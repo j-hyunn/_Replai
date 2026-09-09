@@ -1,0 +1,32 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# next.js
+.next/
+out/
+build/
+next-env.d.ts
+
+# env — never commit secrets
+.env
+.env.*
+!.env.example
+
+# vercel / typescript
+.vercel
+*.tsbuildinfo
+
+# testing
+coverage/
+
+# os / editor
+.DS_Store
+*.pem
+npm-debug.log*
+yarn-error.log*
+
+# NOTE: docs/ and _workspace/ are intentionally NOT ignored.
+# The spec, API contract, and rubric under _workspace/ are the source of truth
+# that qa-inspector cross-checks against, so they are versioned with the code.
