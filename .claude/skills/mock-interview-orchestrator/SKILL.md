@@ -181,7 +181,8 @@ documentation-only run.
 
 1. Confirm QA is green, or that the remaining findings are explicitly accepted
 2. Follow `git-github-workflow`: commit at working boundaries, push the branch,
-   open a PR using `.github/pull_request_template.md`
+   open a PR using `.github/pull_request_template.md`. **The PR title and description
+   are written in Korean**; the commit messages stay English
 3. **Fill in the PR's boundary impact section from the QA report**, not from memory.
    The propagation table in Phase 0 and that PR section describe the same risk:
    a change that crosses a boundary and leaves the other side stale

@@ -1,37 +1,37 @@
 ---
-name: Bug report
-about: Something behaves incorrectly at runtime
+name: 버그 리포트
+about: 런타임에서 잘못 동작하는 문제
 labels: bug
 ---
 
-## What happened
+## 무슨 일이 일어났는가
 
-## What should have happened
+## 어떻게 동작해야 하는가
 
-## Where
+## 발생 위치
 
-- [ ] Voice pipeline (mic, STT, TTS, turn detection)
-- [ ] Interview session (streaming, conversation flow)
-- [ ] Evaluation (scoring, report generation)
-- [ ] Auth / session
-- [ ] Database / RLS
-- [ ] UI / routing
-- [ ] Not sure
+- [ ] 음성 파이프라인 (마이크, STT, TTS, 턴 감지)
+- [ ] 면접 세션 (스트리밍, 대화 흐름)
+- [ ] 평가 (채점, 리포트 생성)
+- [ ] 인증 / 세션
+- [ ] 데이터베이스 / RLS
+- [ ] UI / 라우팅
+- [ ] 모르겠음
 
-## Reproduction
+## 재현 절차
 
 1.
 2.
 3.
 
-## Boundary suspicion
+## 의심되는 경계면
 
-Most runtime bugs in this project live at a boundary. If you know which, note it —
-API response vs frontend hook type, link vs real route, state transition missing in code,
-DB field vs API field name.
+이 프로젝트의 런타임 버그는 대부분 경계면에서 발생한다. 짚이는 곳이 있으면 적는다 —
+API 응답 vs 프론트 훅 타입, 링크 vs 실제 라우트, 코드에 누락된 상태 전이,
+DB 필드명 vs API 필드명.
 
-## Environment
+## 환경
 
-- Where: local / Vercel preview / production
-- Modality: voice / text
-- Browser:
+- 위치: 로컬 / Vercel 프리뷰 / 프로덕션
+- 모달리티: 음성 / 텍스트
+- 브라우저:

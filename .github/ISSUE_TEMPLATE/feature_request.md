@@ -1,28 +1,28 @@
 ---
-name: Feature request
-about: Something the service should do that it does not yet do
+name: 기능 제안
+about: 서비스가 해야 하지만 아직 하지 못하는 것
 labels: enhancement
 ---
 
-## What should it do
+## 무엇을 해야 하는가
 
-## Why
+## 왜 필요한가
 
-<!-- What does the user gain? If this is not tied to a user outcome, say so plainly. -->
+<!-- 사용자가 무엇을 얻는가? 사용자 가치와 연결되지 않는다면 그렇다고 솔직히 적는다. -->
 
-## Layers this touches
+## 영향을 받는 레이어
 
-- [ ] Product spec / state machine
-- [ ] Runtime AI agents (interviewer, evaluator, coach, planner)
-- [ ] Voice pipeline
-- [ ] Database schema
+- [ ] 제품 스펙 / 상태머신
+- [ ] 런타임 AI 에이전트 (면접관, 평가자, 코치, 질문 플래너)
+- [ ] 음성 파이프라인
+- [ ] 데이터베이스 스키마
 - [ ] API
 - [ ] UI
 
-If more than one layer is checked, this is orchestrator work — run
-`mock-interview-orchestrator` rather than editing one layer directly.
+두 개 이상 체크했다면 오케스트레이터가 다룰 작업이다. 한 레이어만 직접 수정하지 말고
+`mock-interview-orchestrator`를 실행한다.
 
-## Scope
+## 범위
 
 - [ ] MVP
-- [ ] Later
+- [ ] 이후 확장

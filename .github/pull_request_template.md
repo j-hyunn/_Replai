@@ -1,32 +1,32 @@
-## What this changes
+## 변경 내용
 
-<!-- One or two sentences. Why, not just what. -->
+<!-- 무엇을 했는지보다 왜 했는지를 한두 문장으로. diff가 '무엇'은 이미 말해준다. -->
 
-## Boundary impact
+## 경계면 영향
 
-Check anything this PR changes. These are the changes that break the other side of a
-boundary, so be honest here even when the change looks small.
+이 PR이 바꾸는 항목을 체크한다. 아래는 경계면 반대쪽을 깨뜨리는 변경들이므로,
+사소해 보여도 정직하게 표시한다.
 
-- [ ] API response shape (an endpoint's returned object changed)
-- [ ] DB schema (table, column, or CHECK constraint)
-- [ ] Session status values or allowed transitions
-- [ ] AI contract schema (`_workspace/02_ai_contracts.md`)
-- [ ] Voice pipeline state names
-- [ ] Route paths (a page moved, was added, or was removed)
-- [ ] Environment variables (added, renamed, or removed)
-- [ ] None of the above
+- [ ] API 응답 shape (엔드포인트가 반환하는 객체 구조 변경)
+- [ ] DB 스키마 (테이블, 컬럼, CHECK 제약)
+- [ ] 세션 status 값 또는 허용 전이
+- [ ] AI 계약 스키마 (`_workspace/02_ai_contracts.md`)
+- [ ] 음성 파이프라인 상태 이름
+- [ ] 라우트 경로 (페이지 이동·추가·삭제)
+- [ ] 환경변수 (추가·이름 변경·삭제)
+- [ ] 해당 없음
 
-If any box above is checked, list what has to change on the other side:
+하나라도 체크했다면, 반대쪽에서 함께 바뀌어야 하는 것을 적는다:
 
-<!-- e.g. useEvaluation now unwraps { evaluation }; migration 004 adds evaluations.total_score -->
+<!-- 예) useEvaluation이 { evaluation }을 unwrap하도록 수정 / 마이그레이션 004가 evaluations.total_score 추가 -->
 
-## Verification
+## 검증
 
-- [ ] CI is green
-- [ ] Vercel preview renders and the changed screens work
-- [ ] Voice path checked in the preview (only if this touches the session screen or voice)
-- [ ] Auth redirect checked in the preview (only if this touches auth or middleware)
+- [ ] CI 통과
+- [ ] Vercel 프리뷰가 정상 렌더링되고 변경된 화면이 동작
+- [ ] 프리뷰에서 음성 경로 확인 (세션 화면이나 음성을 건드린 경우에만)
+- [ ] 프리뷰에서 인증 리다이렉트 확인 (인증이나 미들웨어를 건드린 경우에만)
 
-## Notes
+## 비고
 
-<!-- Anything left undone, a follow-up needed, or a decision that should be revisited. -->
+<!-- 남겨둔 작업, 후속으로 필요한 것, 나중에 다시 판단해야 할 결정. -->
