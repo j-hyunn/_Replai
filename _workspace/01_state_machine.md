@@ -74,8 +74,8 @@ engineer
 | `evaluating` | 평가 작업 실행 중 | 아니오 | `/sessions/[sessionId]/report` (평가 진행 화면) |
 | `evaluated` | 리포트 생성 완료 | **예** | `/sessions/[sessionId]/report` |
 | `failed` | 복구 불가 오류로 종료. 재시도 진입점 제공 | **예** | `/sessions/[sessionId]/report` (실패 화면) |
-| `abandoned` | 재개 시한(24시간) 초과로 자동 종료 | **예** | `/sessions` 목록에서 "중단됨" 표시 |
-| `canceled` | 사용자가 세션을 폐기 | **예** | `/sessions` 목록에서 사라짐(삭제 시) 또는 "취소됨" |
+| `abandoned` | 재개 시한(7일) 초과로 자동 종료 | **예** | `/sessions` 목록에서 "중단됨" 표시 |
+| `canceled` | 사용자가 세션을 폐기(종료 상태, **행은 남는다**) | **예** | `/sessions` 기본 목록에서는 숨김. "취소된 세션 보기" 토글에서 "취소됨"으로 표시 |
 
 > `evaluating → evaluated` 전이는 **반드시 구현되어야 합니다.** 이 전이가 빠지면 사용자는 리포트를
 > 영원히 기다립니다. 평가 워커는 성공 시 `evaluated`, 실패 시 `failed`로 **항상** 상태를 옮겨야 하며,
@@ -89,27 +89,27 @@ engineer
 |---|---|---|---|---|
 | (없음) | `created` | 사용자가 "새 면접 시작" 클릭 | 인증됨 | `interview_sessions` 행 삽입, `session_events` 기록 |
 | `created` | `configuring` | 설정 화면에서 첫 입력 저장 | — | 부분 설정 저장 |
-| `created` | `canceled` | 사용자가 설정을 떠나며 폐기 | — | 세션 행 삭제(실제 삭제) |
+| `created` | `canceled` | 사용자가 설정을 떠나며 폐기 | — | `ended_at` 기록. **행은 유지**(삭제하지 않음) |
 | `configuring` | `configuring` | 설정 항목 변경 | — | 부분 설정 갱신 |
 | `configuring` | `ready` | 사용자가 "면접 준비" 클릭 → 컨텍스트 준비 완료 | 직군·페르소나·모달리티·이력서·JD가 모두 있고 이력서/JD의 `extraction_status = 'succeeded'` | 이력서·JD 요약 컨텍스트 생성, 오프닝 주질문 1개 생성 후 `questions` 삽입, `question_budget` 확정 |
-| `configuring` | `failed` | 이력서 텍스트 추출 실패(스캔 PDF 등) 후 사용자가 재시도 포기 | — | `failure_reason = 'document_extraction_failed'` 기록. 사용자에게 텍스트 직접 입력 경로 안내 |
-| `configuring` | `canceled` | 사용자가 폐기 | — | 세션·첨부 관계 실제 삭제 |
+| `configuring` | `failed` | 이력서 텍스트 추출 실패(스캔 PDF 등) 후 사용자가 재시도 포기 (진입점: `POST .../abandon-preparation`, `05_api_contract.md` #35) | — | `failure_reason = 'document_extraction_failed'` 기록. 사용자에게 텍스트 직접 입력 경로 안내 |
+| `configuring` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. 첨부 관계 유지. **행은 유지** |
 | `ready` | `in_progress` | 사용자가 "면접 시작" 클릭 | 음성 모드면 마이크 권한 확인 완료 | `started_at` 기록, 오프닝 질문 발화 |
 | `ready` | `configuring` | 사용자가 "설정 변경" 클릭 | — | 생성된 `questions` 폐기(실제 삭제) |
-| `ready` | `canceled` | 사용자가 폐기 | — | 세션 실제 삭제 |
+| `ready` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지** |
 | `in_progress` | `in_progress` | 답변 제출 → 다음 질문 생성 | 종료 조건(3절) 미충족 | `turns` 삽입, 꼬리질문이면 `questions.parent_question_id` 설정, `depth` 증가 |
 | `in_progress` | `in_progress` | 모달리티 전환(음성↔텍스트) | — | `current_modality` 갱신, `session_events`에 `modality_switched` 기록. **상태는 바뀌지 않음** |
 | `in_progress` | `paused` | 사용자가 "일시정지" 클릭 | — | `pause_reason = 'user_requested'`, `paused_at` 기록, 오디오 버퍼 폐기 |
 | `in_progress` | `paused` | LLM 레이트 리밋 도달 + 백오프 대기 60초 초과 | 4절 폴백 사다리의 3단계 | `pause_reason = 'rate_limited'`, 재개 가능 시각 안내 |
-| `in_progress` | `paused` | 네트워크·탭 종료로 하트비트 90초 유실 | — | `pause_reason = 'connection_lost'` |
+| `in_progress` | `paused` | 네트워크 단절·탭 종료. **클라이언트가 감지하면 `sendBeacon`으로 즉시**(최선 노력), 감지하지 못하면 일 1회 워치독 또는 사용자가 다시 열었을 때의 지연 판정으로 회수 (D25) | — | `pause_reason = 'connection_lost'` |
 | `in_progress` | `completed` | 종료 조건 충족(3절) 또는 사용자가 "면접 종료" 클릭 | 답변한 주질문 ≥ 1 | `ended_at` 기록, 오디오 버퍼 폐기, 평가 작업 큐 등록 |
-| `in_progress` | `canceled` | 사용자가 "이 세션 버리기" 클릭 | — | 세션·턴·질문 실제 삭제 |
+| `in_progress` | `canceled` | 사용자가 "이 세션 버리기" 클릭 | — | `ended_at` 기록. 턴·질문 **유지**. 평가는 등록하지 않음 |
 | `in_progress` | `failed` | 복구 불가 오류(프로바이더 영구 오류, 컨텍스트 손상) | — | `failure_reason` 기록, 오디오 버퍼 폐기 |
-| `paused` | `in_progress` | 사용자가 "이어서 하기" 클릭 | 마지막 갱신 후 24시간 이내, `rate_limited`면 재개 가능 시각 경과 | `pause_reason = NULL`, 직전 질문 재발화 |
+| `paused` | `in_progress` | 사용자가 "이어서 하기" 클릭 | 마지막 갱신 후 7일 이내, `rate_limited`면 재개 가능 시각 경과 | `pause_reason = NULL`, 직전 질문 재발화 |
 | `paused` | `completed` | 사용자가 "여기서 끝내기" 클릭 | 답변한 주질문 ≥ 1 | `ended_at` 기록, 평가 큐 등록 |
-| `paused` | `abandoned` | 24시간 경과(스케줄러) | 답변한 주질문 = 0 이거나 사용자가 재개하지 않음 | `ended_at` 기록. 답변한 주질문 ≥ 1이면 `completed`로 보내 평가(아래 행 참조) |
-| `paused` | `completed` | 24시간 경과(스케줄러) | 답변한 주질문 ≥ 1 | 자동 종료 후 평가 큐 등록. 리포트에 "중단된 세션" 배지 |
-| `paused` | `canceled` | 사용자가 폐기 | — | 실제 삭제 |
+| `paused` | `abandoned` | 7일 경과(스케줄러) | 답변한 주질문 = 0 이거나 사용자가 재개하지 않음 | `ended_at` 기록. 답변한 주질문 ≥ 1이면 `completed`로 보내 평가(아래 행 참조) |
+| `paused` | `completed` | 7일 경과(스케줄러) | 답변한 주질문 ≥ 1 | 자동 종료 후 평가 큐 등록. 리포트에 "중단된 세션" 배지 |
+| `paused` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지** |
 | `completed` | `evaluating` | 평가 워커가 작업을 집음 | 평가 작업이 큐에 있음 | `evaluations` 행 삽입(`status = 'running'`), `evaluation_started_at` 기록 |
 | `completed` | `failed` | 평가 큐 등록 자체가 실패하고 재시도 3회 소진 | — | `failure_reason = 'evaluation_enqueue_failed'` |
 | `evaluating` | `evaluated` | 평가 결과 저장 완료 | 모든 축의 점수와 인용이 저장됨 | `evaluation_scores`·`evaluation_citations` 삽입, 리포트 열람 가능, 알림 표시 |
@@ -117,8 +117,8 @@ engineer
 | `evaluating` | `failed` | 평가 재시도 3회 소진 또는 10분 워치독 타임아웃 | — | `failure_reason = 'evaluation_failed'`, 리포트 화면에 재시도 버튼 노출 |
 | `evaluated` | `evaluating` | 사용자가 "평가 다시 실행" 클릭 | MVP 범위 밖 — `[later]` | 기존 평가는 보존하고 새 `evaluations` 행 생성 |
 | `failed` | `evaluating` | 사용자가 리포트 화면에서 "평가 재시도" 클릭 | `failure_reason`이 평가 계열이고 `turns`가 남아 있음 | 재시도 카운터 초기화 후 평가 큐 재등록 |
-| `failed` | `canceled` | 사용자가 폐기 | — | 실제 삭제 |
-| `abandoned` | `canceled` | 사용자가 폐기 | — | 실제 삭제 |
+| `failed` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지** |
+| `abandoned` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지** |
 | 모든 상태 | (행 삭제) | 사용자가 세션 삭제 / 계정 삭제 | — | DB 행과 Storage 객체 **실제 삭제**(소프트 삭제 아님) |
 
 ### 전이 표에 없는 조합은 금지
@@ -178,7 +178,7 @@ LLM이 막히면 면접 자체가 진행 불가입니다. 이 둘을 한 상태�
 | 4 | LLM (60초 초과 또는 일일 한도 소진) | 세션 보존 후 일시정지 | `in_progress → paused`, `pause_reason = 'rate_limited'` | "지금은 이어갈 수 없습니다. {재개 가능 시각} 이후 '이어서 하기'를 누르면 마지막 질문부터 계속됩니다" |
 
 - 3단계에서 사용자는 언제든 직접 "일시정지"를 눌러 4단계로 갈 수 있습니다.
-- 4단계에서 24시간 안에 재개하지 않으면 3절의 자동 종료 규칙을 따릅니다(답변 ≥ 1이면 `completed`, 아니면 `abandoned`).
+- 4단계에서 7일 안에 재개하지 않으면 3절의 자동 종료 규칙을 따릅니다(답변 ≥ 1이면 `completed`, 아니면 `abandoned`).
 - 1·2단계는 상태를 바꾸지 않으므로 **완주율 지표를 왜곡하지 않습니다.** 이것도 이 설계를 택한 이유입니다.
 
 ---
@@ -213,18 +213,35 @@ LLM이 막히면 면접 자체가 진행 불가입니다. 이 둘을 한 상태�
 |---|---|---|
 | 설정 화면 | `created` 또는 `configuring` | `/dashboard`의 "작성 중인 세션"에서 이어서 설정 |
 | 준비 화면 | `ready` | 목록에서 "면접 시작" |
-| 면접 도중 탭을 닫음 | `paused` (`connection_lost`) | 24시간 안에 "이어서 하기" |
+| 면접 도중 탭을 닫음 | `paused` (`connection_lost`) | 7일 안에 "이어서 하기" |
 | 평가 대기 중 나감 | `completed` / `evaluating` | 평가는 서버에서 계속. 완료 시 목록·리포트에서 확인 |
 | 리포트를 안 봄 | `evaluated` | 목록에 "새 리포트" 배지 (지표 2 측정 지점) |
 
 ---
 
-## 8. 남은 결정
+## 8. 결정 완료
 
-```
-[결정 필요] paused 자동 종료 시한을 24시간으로 둘 것인가
-  옵션 A: 24시간 — 브리프 3절 "D-7 집중 연습" 사용 패턴에 맞고 미완 세션이 목록을 어지럽히지 않음
-  옵션 B: 7일 — 레이트 리밋(일일 한도)으로 멈춘 세션은 다음 날에야 재개 가능하므로 24시간이 빠듯할 수 있음
-  영향: 스케줄러(cron), 세션 목록 UI, 완주율 지표의 분모
-  현재 문서는 A(24시간)를 잠정값으로 사용. 무료 티어 한도가 확정되면 B로 바뀔 수 있음
-```
+남은 미결 없음. (2026-09-09)
+
+**D19 — `canceled`는 삭제가 아니라 행을 남기는 종료 상태입니다.** 초안은 모든 `→ canceled` 전이의
+부작용을 "실제 삭제"로 적었는데, 행이 지워지면 `status = 'canceled'`는 어떤 행에도 존재할 수 없는
+값이 되어 CHECK에만 있고 관측 불가능한 유령 상태였습니다. 3절이 목록에 "취소됨"으로 보인다고
+적은 것과도 어긋났습니다.
+
+취소와 삭제를 분리합니다 — 취소는 종료 상태이고, **삭제는 `DELETE /api/sessions/[sessionId]` 경로에서
+되돌릴 수 없다는 확인을 거쳐서만** 일어납니다. 면접 도중 "이 세션 버리기"를 누른 사용자가 확인 없이
+대화 기록을 영구 파괴당할 이유가 없습니다. **상태 목록 11개와 CHECK 제약은 그대로이며 값의 의미만
+정정되었습니다.**
+
+**D18 — 평가 시작은 서버가 합니다.** `completed`로 가는 모든 경로의 부작용으로 서버가 평가를
+등록합니다. `paused` 7일 자동 종료처럼 클라이언트가 존재하지 않는 경로가 있기 때문입니다.
+`POST .../evaluate`는 `failed` 상태의 재시도 전용입니다.
+
+**D7 — `paused` 자동 종료 시한은 7일입니다.** 초안의 24시간에서 뒤집혔습니다.
+무료 티어는 분당뿐 아니라 **일당(RPD) 한도**가 걸리고, `pause_reason = 'rate_limited'`로 멈춘 세션은
+구조적으로 다음 날에야 재개할 수 있습니다. 24시간 시한은 그 재개 창과 겹쳐, 예산 제약이 만든 중단을
+사용자 이탈로 기록하게 됩니다 — 완주율(지표 1)이 압박 강도가 아니라 무료 티어 한도를 재게 됩니다.
+부수적으로 브리프 3절의 "D-7 집중 연습" 창과 7일이 정확히 겹칩니다.
+스케줄러는 일 1회 그대로입니다.
+
+> 전체 결정 기록: [`00_input/decisions.md`](00_input/decisions.md)

@@ -7,6 +7,12 @@
 ## 변경 로그
 - 2026-09-09 최초 작성. 5개 호출(planner / interviewer / summarizer / evaluator / coach)의 입출력 JSON 스키마,
   `<<<META>>>` 스트림 규약, 저장 매핑, 서버 검증 알고리즘 확정.
+- 2026-09-09 QA 대응(`07_qa_report.md` F5·F7).
+  - **F5**: `evaluation_scores.improvement`를 **NULL 허용**으로 확정(`04_data_layer.md` 3.8절이 확정본).
+    5.5절 매핑, 5.6절 쓰기 순서(플레이스홀더 INSERT → **NULL INSERT**), 9절 #3, 10절 `[결정 필요]`를 갱신.
+  - **F7**: 3.5절 `utterance_done` 페이로드에 **`sessionStatus`** 추가(`05_api_contract.md`·`06_ui_plan.md`가
+    이미 전제하고 있던 필드). SSE 이벤트 4종의 페이로드를 하위 문서와 전수 재대조하고 3.5절에 스트림 수명 규약을 명문화.
+  - 11절(SSE 이벤트 4종 재대조 결과)·12절(다른 문서에 요청하는 변경)을 신설.
 
 ---
 
@@ -379,6 +385,23 @@
 **부분 센티널 방어(구현 요구):** 델타 경계에서 `<<<M` 같은 조각이 TTS로 새는 것을 막기 위해,
 서버는 버퍼 끝의 최대 9자(`<<<META>>>` 길이 − 1)를 **항상 보류**했다가 다음 델타와 합쳐 판정합니다.
 
+**M8 — 스트림 종료 시 보류 버퍼 처리 (2026-09-09 리더 추가).**
+위 규칙만으로는 스트림이 보류 버퍼를 남긴 채 끝났을 때의 동작이 정의되지 않아, 마지막 글자가
+유실되거나 `<<<META` 조각이 발화로 누출되는 두 방향의 버그가 모두 가능했습니다
+(`03_voice_pipeline.md` 15절 지적). 스트림 종료 시 보류분 `H`를 다음 순서로 처리합니다.
+
+```
+1. H가 "<<<META>>>"를 포함하면        → 센티널 처리. 이후 텍스트는 제어 블록 (M3)
+2. H가 "<<<META>>>"의 진부분 문자열(prefix)이면
+   → 센티널이 아니었다. H를 그대로 발화 텍스트로 flush 한다
+     근거: 스트림이 끝난 이상 뒤에 붙을 델타가 없으므로 완성될 가능성이 0이다.
+           보류한 채 버리면 답변 마지막 글자가 조용히 사라진다
+3. 그 외                              → 평범한 텍스트. 그대로 flush 한다
+4. flush 후 utterance_done 을 보낸다. flush 없이 utterance_done 을 먼저 보내지 않는다
+```
+
+중단(abort)으로 스트림이 끊긴 경우도 동일합니다. 보류분을 버리는 경로는 존재하지 않습니다.
+
 ### 3.3 `<<<META>>>` JSON 스키마
 
 ```jsonc
@@ -461,9 +484,38 @@ else:  // neutral_transition / comfort / wrap_up
 | event | data 스키마 | 비고 |
 |---|---|---|
 | `utterance_chunk` | `{"seq": int, "text": string}` | 문장 단위. 10~80자. `<<<META>>>` 이후 텍스트는 **절대 포함되지 않는다** |
-| `utterance_done` | `{"turnId": uuid, "questionId": uuid \| null, "parentQuestionId": uuid \| null, "depth": int, "questionKind": "main"\|"follow_up"\|null, "action": string, "targetAxis": axis \| null}` | 전부 **서버 확정값**(3.4절 후처리 결과). 모델 원본 META가 아니다 |
+| `utterance_done` | `{"turnId": uuid, "questionId": uuid \| null, "parentQuestionId": uuid \| null, "depth": int, "questionKind": "main"\|"follow_up"\|null, "action": "follow_up"\|"next_main"\|"neutral_transition"\|"comfort"\|"wrap_up", "targetAxis": axis \| null, "sessionStatus": "in_progress"\|"completed"}` | 전부 **서버 확정값**(3.4절 후처리 결과). 모델 원본 META가 아니다. `sessionStatus`는 이 스트림을 처리한 뒤의 세션 상태다 |
 | `session_notice` | `{"kind": "distress_guard"\|"pressure_capped"\|"rate_limit_fallback", "level": int \| null, "messageKo": string}` | G4 발동 시 UI가 3지 선택 다이얼로그를 띄우는 신호(10.2절, 13.5절) |
-| `stream_error` | `{"code": "llm_timeout"\|"llm_rate_limited"\|"llm_failed", "retryable": boolean, "messageKo": string}` | 폴백 사다리(`01_state_machine.md` 4절) 연동 |
+| `stream_error` | `{"code": "llm_timeout"\|"llm_rate_limited"\|"llm_failed", "retryable": boolean, "messageKo": string}` | 폴백 사다리(`01_state_machine.md` 4절) 연동. HTTP 상태는 이미 200이므로 오류는 이 이벤트로만 전달된다 |
+
+**`utterance_done.sessionStatus`** (2026-09-09 추가 — F7)
+
+값은 `01_state_machine.md` 1절의 상태 값을 **문자 단위로 그대로** 씁니다(한국어 번역 금지). 타입은 API 계약의
+`SessionStatus` 유니온과 같지만, 이 이벤트에 **실제로 실려 나갈 수 있는 값은 두 개뿐**입니다.
+
+| 값 | 언제 |
+|---|---|
+| `in_progress` | 정상. 면접이 계속된다 (`action`이 `follow_up` / `next_main` / `neutral_transition` / `comfort`) |
+| `completed` | 이 발화로 종료 조건(`01_state_machine.md` 3절)이 충족되어 서버가 `in_progress → completed` 전이를 끝냈다. `action = 'wrap_up'`과 함께 온다 |
+
+**UI는 이 값으로 "면접이 끝났는가"를 판정합니다** — `completed`면 입력창을 닫고 리포트 대기 화면으로 보냅니다
+(`06_ui_plan.md` 3.3절 `useInterviewStream`). 이 필드가 없으면 UI는 종료를 감지할 수단이 없습니다.
+
+`paused`(레이트 리밋 4단계)는 `stream_error`로 끝나는 경로이므로 `utterance_done`이 나가지 않습니다. `evaluating`
+이후의 상태도 이 스트림에서는 관측되지 않습니다(평가는 D18에 따라 `completed` 전이의 서버 부작용으로 별도 등록됩니다).
+
+**스트림 수명 규약** (`05_api_contract.md` 5.2절과 동일 — 원본은 이 절입니다)
+
+- `utterance_done`은 **스트림당 정확히 1회**이며 **마지막 이벤트**입니다.
+- `stream_error`를 보낸 경우에는 `utterance_done`을 **보내지 않고** 스트림을 닫습니다. `done`을 기다리는 클라이언트
+  코드가 매달리면 안 됩니다.
+- `session_notice`는 0회 이상이며 `utterance_done` 앞에 옵니다.
+- 보류 버퍼 flush(M8)는 `utterance_done`보다 **먼저** 나갑니다.
+- `stream_error`에는 **재개 가능 시각이 실리지 않습니다.** 폴백 사다리 4단계(`retryable: false`)에서 UI가 보여줄
+  재개 시각은 세션을 다시 조회해 `Session.resumableAfter`(`05_api_contract.md` 9절)에서 읽습니다.
+  SSE 페이로드에 시각을 중복으로 싣지 않습니다 — 값의 출처가 둘이 되면 어긋납니다.
+- `action`은 3.3절 META의 5개 값과 **같은 유니온**입니다(`05_api_contract.md`의 `InterviewerAction`).
+  이 표의 초안이 `string`으로 느슨하게 적혀 있던 것을 2026-09-09에 좁혔습니다.
 
 ---
 
@@ -777,7 +829,7 @@ else:
 | `axes[].is_insufficient_evidence` | `evaluation_scores.is_insufficient_evidence` | `scores_evidence_shape` CHECK |
 | `axes[].rationale` | `evaluation_scores.rationale` (not null) | |
 | — (AI 출력 아님) | `evaluation_scores.weight` (not null) | **서버가 페르소나 표에서 채운다** |
-| — (코치 산출물) | `evaluation_scores.improvement` (not null) | 5.6절 참조 |
+| — (코치 산출물) | `evaluation_scores.improvement` (**NULL 허용**) | 코치 성공 시에만 값이 생긴다. 5.6절 참조 |
 | `citations[].turn_id` | `evaluation_citations.turn_id` | |
 | `citations[].quote_text` | `evaluation_citations.quote_text` | 20~160자 CHECK |
 | `citations[].comment` | `evaluation_citations.comment` | |
@@ -787,20 +839,42 @@ else:
 | `rubric_version` | `evaluations.rubric_version` | |
 | 모델 식별자 | `evaluations.model_name` | 역할 상수 → 실제 모델 ID |
 
-### 5.6 `evaluation_scores.improvement`의 쓰기 순서 (not null 제약 때문에 순서가 계약이다)
+### 5.6 `evaluation_scores.improvement`의 쓰기 순서 (컬럼이 NULL 허용이므로 순서가 계약이다)
 
-`evaluation_scores.improvement`는 **not null**인데 생산 주체는 **코치**이고, 코치는 실패가 허용됩니다
-(`02_ai_architecture.md` 3절: 코치 실패 시에도 `evaluated`로 전이). 이 둘을 양립시키기 위해 순서를 못박습니다.
+**확정: `evaluation_scores.improvement`는 NULL 허용입니다**(`04_data_layer.md` 3.8절이 확정본 —
+`improvement text null check (improvement is null or char_length(improvement) between 20 and 400)`).
+2026-09-09 QA(F5)로 이 계약의 초안(not null + 플레이스홀더)을 폐기하고 DB에 맞춥니다.
+
+근거: 개선 제안의 **생산 주체는 코치**이고 코치 호출은 **실패가 허용됩니다**
+(`02_ai_architecture.md` 3절: 코치 실패 시에도 `evaluated`로 전이). 실패했을 때 플레이스홀더 문자열을 넣으면
+(a) "값 없음"과 "코치가 실제로 그렇게 말했음"을 DB 수준에서 구분할 수 없고, (b) 의미 없는 문구가 리포트에 그대로
+노출됩니다. **"값 없음"은 오직 `NULL` 하나로 표현합니다.**
 
 ```
 1) 평가자 성공 → evaluation_scores 5행 INSERT.
-   이때 improvement에 플레이스홀더를 넣는다:
-   '개선 제안을 아직 생성하지 못했습니다. 리포트에서 다시 시도할 수 있습니다.'
-2) 코치 성공 → 같은 트랜잭션에서 5행의 improvement를 UPDATE + evaluations의 summary/improvements/coach_payload INSERT.
-3) 코치 실패 → 1)의 플레이스홀더가 남고 evaluated로 전이. 리포트는 "총평 생성 실패 — 다시 시도" 버튼을 노출한다.
+   이때 improvement는 NULL로 둔다 (INSERT 문에서 컬럼을 생략한다).
+   플레이스홀더 문자열을 넣지 않는다.
+2) 코치 성공 → 같은 트랜잭션에서 5행의 improvement를 축별로 UPDATE
+   + evaluations의 summary/improvements/coach_payload 기록.
+3) 코치 실패 → improvement가 NULL인 채로 evaluated로 전이.
+   리포트는 축별 개선 제안 영역을 감추고 "총평 생성 실패 — 다시 시도" 버튼을 노출한다.
+4) 사용자가 리포트에서 재시도 → 코치만 다시 돌려 2)와 같은 UPDATE로 채운다.
+   INSERT가 아니라 UPDATE이므로 점수·인용은 건드리지 않는다.
 ```
 
-UI는 플레이스홀더 문자열을 비교하지 말고 `evaluations.summary IS NULL`로 "코치 미완료"를 판정합니다.
+**빈 문자열 차단 (서버 검증 — DB CHECK와 이중화)**
+
+not null이 사라졌으므로 `''`·공백만 있는 문자열이 NULL 대신 들어오는 경로를 서버가 먼저 막습니다.
+
+- 코치 출력 검증(6.3절)에서 `axis_improvements[].improvement`는 이미 `minLength: 20` / `maxLength: 400`입니다.
+  스키마 통과 후에도 **트림한 문자열 길이**를 다시 재고, 20자 미만이면 `SchemaValidationError`로 재시도합니다.
+- UPDATE 문에 바인딩하기 직전, **트림 결과가 빈 문자열이면 그 UPDATE를 실행하지 않고 코치 실패로 처리합니다.**
+  `''`를 쓰려는 시도는 DB의 `char_length between 20 and 400` CHECK에도 걸려 저장되지 않습니다.
+- 축 5개 중 일부만 UPDATE에 성공하는 상태를 만들지 않기 위해 5행 UPDATE는 **한 트랜잭션**입니다.
+
+**판정 기준은 하나입니다.** UI는 "코치 미완료"를 `evaluations.summary IS NULL`로 판정합니다.
+`improvement IS NULL`은 **축 단위의 표시 분기**일 뿐 세션 전체의 상태 판정이 아닙니다.
+플레이스홀더 문자열 비교는 어디에도 존재하지 않습니다.
 
 ---
 
@@ -952,6 +1026,7 @@ UI는 플레이스홀더 문자열을 비교하지 말고 `evaluations.summary I
 | `improvements[].priority`가 {1,2,3} 정확히 한 번씩 | 재시도 |
 | `next_actions[].order`가 {1,2,3} 정확히 한 번씩 | 재시도 |
 | `axis_improvements`의 축 5개가 정확히 한 번씩 | 재시도 |
+| `axis_improvements[].improvement`의 **트림 후 길이**가 20~400자 (빈 문자열·공백 문자열 차단, 5.6절) | 재시도 |
 | `model_answers[].question_id`가 입력 `questions`에 존재 | 해당 항목 폐기(0건이 되면 재시도) |
 | `model_answers[].turn_id`가 입력 `transcript`의 candidate 턴 | null로 낮춤 |
 | `summary` 문장 수 3~5 (`.`/`?`/`!` 종결 기준) | 재시도 |
@@ -965,7 +1040,7 @@ UI는 플레이스홀더 문자열을 비교하지 말고 `evaluations.summary I
 |---|---|
 | `summary` | `evaluations.summary` (text) |
 | `improvements` | `evaluations.improvements` (jsonb 배열) — `[{"priority":1,"title":"...","action":"...","related_axis":"..."}]` |
-| `axis_improvements[].improvement` | `evaluation_scores.improvement` (축별 UPDATE) |
+| `axis_improvements[].improvement` | `evaluation_scores.improvement` (**NULL 허용** 컬럼에 축별 UPDATE. INSERT가 아니다 — 5.6절) |
 | `model_answers`, `next_actions` | `evaluations.coach_payload` (jsonb) — `{"model_answers":[...],"next_actions":[...]}` |
 
 ---
@@ -1016,7 +1091,7 @@ DB에는 **언제나 정화 전 원본**을 저장합니다. 치환은 프롬프
 |---|---|---|---|
 | 1 | `01_rubric.md` 4절 3항 vs `02_ai_architecture.md` 11.2절 | 루브릭은 `…` 생략 인용을 인용당 1회 허용하지만, 오프셋 검증(연속 부분 문자열)을 통과할 수 없다 | 루브릭을 **"생략 없는 연속 부분 문자열"** 로 좁힌다. 이 계약은 이미 그 전제로 작성됨(5.2·5.3절) |
 | 2 | `01_rubric.md` 5절 vs 책임 경계 | 축별 개선 제안의 생산 주체가 평가자로 읽힐 수 있다 | **코치**로 명시. 이 계약은 코치 출력(6.2절 `axis_improvements`)에 둠 |
-| 3 | `04_data_layer.md` 3.8절 `evaluation_scores.improvement not null` vs `02_ai_architecture.md` 3절(코치 실패 허용) | 평가자 성공·코치 실패 시 not null 컬럼을 채울 값이 없다 | 5.6절의 **플레이스홀더 후 UPDATE 순서**를 계약으로 확정했다. 리더 승인 필요. (대안: 컬럼을 NULL 허용으로 완화) |
+| 3 | ~~`04_data_layer.md` 3.8절 `evaluation_scores.improvement not null` vs `02_ai_architecture.md` 3절(코치 실패 허용)~~ | **해소됨 (2026-09-09, F5).** 컬럼이 **NULL 허용**으로 확정되어 충돌 자체가 사라졌다 | 5.6절을 **NULL INSERT → 코치 성공 시 UPDATE**로 갱신 완료. 플레이스홀더 방식은 폐기 |
 | 4 | `04_data_layer.md` 3.7절 vs `02_ai_architecture.md` 13.1절 | `evaluations.coach_payload jsonb`가 데이터 레이어에 없다. 모범 답안·다음 행동을 저장할 곳이 없다 | `evaluations`에 `coach_payload jsonb NULL` 추가 |
 | 5 | `04_data_layer.md` 3.4절 vs `02_ai_architecture.md` 12.5절 | `questions.archetype_id`, `questions.seed_version`이 없다 | 두 컬럼(`text NULL`) 추가. 품질 관측 지표의 원천 |
 | 6 | `04_data_layer.md` 3.7절 vs `02_ai_architecture.md` 13.1절 | `evaluations.ai_contract_version`, `provider`가 없다 | 두 컬럼(`text NULL`) 추가. 재현성 추적 |
@@ -1030,19 +1105,22 @@ DB에는 **언제나 정화 전 원본**을 저장합니다. 치환은 프롬프
 ## 10. 남은 결정
 
 ```
-[결정 필요] evaluation_scores.improvement의 not null을 유지하고 플레이스홀더를 쓸 것인가,
-            컬럼을 NULL 허용으로 완화할 것인가 (9절 #3)
-  옵션 A(이 문서의 잠정값): not null 유지 + 플레이스홀더 후 UPDATE. DB 제약이 그대로 유지되지만
-            "의미 없는 문자열이 잠시 저장된다"는 상태가 생긴다
-  옵션 B: improvement를 NULL 허용으로 바꾸고 UI가 NULL을 "생성 중/실패"로 렌더링
-  영향: 04_data_layer.md 3.8절 DDL, 리포트 화면 분기, QA 체크리스트
+[결정 완료 — 2026-09-09 리더 조정 1 / QA F5] evaluation_scores.improvement는 NULL을 허용한다 (옵션 B).
+  근거: 개선 제안의 생산 주체는 코치이고 코치 호출은 실패가 허용된다. 플레이스홀더 문자열을 넣으면
+        "값 없음"과 "코치가 실제로 그렇게 말했음"을 구분할 수 없고, 의미 없는 문구가 리포트에 노출된다.
+        "값 없음"은 오직 NULL 하나로 표현한다.
+  확정 DDL: 04_data_layer.md 3.8절
+        improvement text null check (improvement is null or char_length(improvement) between 20 and 400)
+  반영: 이 문서 5.5절(매핑) / 5.6절(NULL INSERT → 코치 성공 시 UPDATE, 빈 문자열 서버 차단) /
+        6.3절(트림 후 길이 검증) / 6.4절 / 9절 #3
+  폐기: 옵션 A(not null 유지 + 플레이스홀더 후 UPDATE). 이 문서의 초안 서술이었으며 더는 유효하지 않다
 ```
 
 ```
-[결정 필요] 면접관의 wrap_up(마무리 발화)을 turns에만 남길 것인가, questions에도 남길 것인가
-  옵션 A(이 문서의 잠정값): turns만. wrap_up은 질문이 아니므로 questions 트리를 오염시키지 않는다
-  옵션 B: question_kind를 확장해 남긴다 — 지표 6의 분모가 흔들리므로 권장하지 않는다
-  영향: 지표 6(꼬리질문 깊이) 계산, questions_kind_shape CHECK
+[결정 완료 D5] 면접관의 wrap_up(마무리 발화)은 turns에만 남긴다. questions에 넣지 않는다
+  근거: wrap_up은 질문이 아니라 마무리 발화다. questions에 넣으면 지표 6(세션당 최초 질문 대비
+        후속 질문 수의 중앙값)의 분모가 세션마다 1씩 부풀어, 제품 정체성을 재는 유일한 지표가
+        왜곡된다. questions_kind_shape CHECK는 그대로 유지된다
 ```
 
 ```
@@ -1050,3 +1128,41 @@ DB에는 **언제나 정화 전 원본**을 저장합니다. 치환은 프롬프
             어디까지 강제하는가. 강제되지 않는 제약은 서버 검증이 전부 잡도록 이미 이중화했으나,
             재시도율에 영향을 주므로 구현 착수 시 실측해 05_deploy.md에 기록한다
 ```
+
+---
+
+## 11. SSE 이벤트 4종 전수 재대조 (2026-09-09, F7과 같은 유형의 결함 탐색)
+
+`02_ai_contracts.md` 3.5절(원본) ↔ `05_api_contract.md` 5.2절 ↔ `06_ui_plan.md` 3.3절 ↔ `03_voice_pipeline.md`
+7절·11절·14절을 필드 단위로 대조한 결과입니다. **F7 외에 페이로드 필드 누락은 2건 더 있었고, 둘 다 이 문서에서
+고쳤습니다.** 하위 문서에 요청할 항목은 없습니다.
+
+| event | 하위 문서가 가정한 필드 | 3.5절 초안 | 조치 |
+|---|---|---|---|
+| `utterance_chunk` | `seq`, `text` | 동일 | 없음 (일치) |
+| `utterance_done` | `turnId`, `questionId`, `parentQuestionId`, `depth`, `questionKind`, `action`, `targetAxis`, **`sessionStatus`** | `sessionStatus` **누락** | **F7 — 추가함.** 값은 `in_progress` \| `completed` |
+| `utterance_done` | `action`이 `InterviewerAction`(5개 값 유니온) | `string`으로 느슨함 | **좁힘.** 3.3절 META의 `action` enum과 같은 유니온으로 명시 |
+| `session_notice` | `kind`, `level`, `messageKo` | 동일 | 없음 (일치) |
+| `stream_error` | `code`, `retryable`, `messageKo` | 동일 | 없음 (일치) |
+| `stream_error` | UI가 4단계에서 **재개 가능 시각**을 표시(`06_ui_plan.md` 4절·6.2절, `03_voice_pipeline.md` 14절 F16) | 페이로드에 없음 | **필드를 추가하지 않고 출처를 명문화함** — `Session.resumableAfter` 재조회. 값의 출처를 하나로 유지 |
+
+**페이로드가 아닌 스트림 수명 규약**도 하위 문서에만 있고 원본에 없어 3.5절에 옮겨 적었습니다:
+`utterance_done`은 스트림당 정확히 1회이자 마지막 이벤트 / `stream_error`가 나가면 `utterance_done`은 나가지 않음 /
+`session_notice`는 0회 이상이며 `utterance_done` 앞 / M8 flush가 `utterance_done`보다 먼저.
+SSE 하트비트(15초 `: ping`)는 전송 계층 규약이므로 `05_api_contract.md` 5.2절이 계속 소유합니다.
+
+---
+
+## 12. 다른 문서에 요청하는 변경
+
+이 문서에서 고칠 수 없는(=소유자가 다른) 항목입니다. 이번 작업에서 `01_*`·`03_*`·`04_*`·`05_*`·`06_*`은
+수정하지 않았습니다.
+
+| 대상 | 소유자 | 요청 |
+|---|---|---|
+| **`02_prompts/coach.md:227`** | `ai-interview-architect` (이번 범위 밖 — 별건 처리 필요) | **F5로 틀린 서술이 됨.** 실패 처리 표의 "재시도 2회 소진" 행이 "`evaluation_scores.improvement`는 **플레이스홀더가 남습니다**"라고 적고 있습니다. 확정본은 NULL이므로 **"`improvement`는 NULL로 남습니다"** 로 고쳐야 합니다. 출력 스키마(축 5개 필수)는 변경 없음 |
+| `02_prompts/evaluator.md` | — | **조치 불필요.** `:269`가 이미 "개선 제안은 코치의 일"로 올바르게 서술하고 있어 F5의 영향을 받지 않습니다 |
+| `04_data_layer.md` | `supabase-engineer` | 요청 없음. 3.8절이 확정본이며 이 계약이 거기에 맞춰졌습니다 |
+| `05_api_contract.md` | `vercel-platform-engineer` | 요청 없음. 5.2절은 이미 `sessionStatus`를 포함하고 있어 원본이 따라온 형태입니다. 다만 5.2절의 `action` 타입 `InterviewerAction`이 3.3절 META enum과 같은 5개 값임을 각주로 달아 두면 좋습니다(선택) |
+| `06_ui_plan.md` | `shadcn-ui-engineer` | 요청 없음. 3.3절 `InterviewStreamState.done` 타입이 확정된 3.5절 페이로드와 필드 단위로 일치합니다 |
+| `01_rubric.md` | `product-architect` | 5절(축별 개선 제안)에 **"생산 주체는 코치이며, 코치 실패 시 개선 제안은 비어 있을 수 있다"** 는 한 줄 추가 요청. 9절 #2의 잔여분입니다 |

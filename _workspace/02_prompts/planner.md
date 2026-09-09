@@ -338,5 +338,5 @@ source_span은 위 원문에서 글자 그대로 복사하십시오.
    target_axis: logical_consistency
 ```
 
-이 템플릿은 직군 무관 공통입니다. 직군별 시드가 채워지면(`02_ai_architecture.md` 12.3절의 `[결정 필요]`)
+이 템플릿은 직군 무관 공통입니다. 직군별 시드가 채워지면(`02_ai_architecture.md` 12.3절, **결정 D13**으로 Phase 3 착수 시 작성)
 이 경로에 도달하는 빈도가 떨어지며, `planner_fallback_used` 발생률이 시드 작성 우선순위의 지표가 됩니다.
