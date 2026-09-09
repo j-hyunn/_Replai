@@ -17,6 +17,19 @@
     첫 적용 이후에는 새 ALTER 마이그레이션만 허용한다는 규칙을 명시.
   - 조정 4 — 13절을 "계약 문서 없음"에서 **실제 대조 결과**로 갱신. 11개 지점 전부 정합 확인, 남은 불일치 7건(R1~R7)을 나열.
   - 인덱스 총개수는 **17개 그대로**입니다(4절 표 변경 없음).
+- 2026-09-09 **2차 조정 — 확정된 결정 반영**(`00_input/decisions.md`의 D1·D3·D4·D5·D6·D7·D8·D9·D10).
+  이 문서의 잠정값 하나가 **뒤집혔습니다.**
+  - **D6(스키마 변경)** — `documents`를 참조만 하던 방식을 **세션 시작 시 텍스트 스냅샷 복사**로 바꿉니다.
+    3.3절에 `resume_text_snapshot` / `jd_text_snapshot` 2컬럼 추가, 복사 시점을 `configuring → ready` 전이로 고정,
+    2절 FK 표와 9.2절 문서 삭제 정책을 재설계, 4절에 용량 영향 1줄 추가.
+  - **D7** — `paused` 자동 종료 시한 24시간 → **7일**. 3.3절 부분 인덱스 서술 갱신(스케줄러 주기는 일 1회 그대로).
+  - **D8** — 이메일 확인(confirm email) **끔**. 6.1절 갱신 + 남는 위험 명시.
+  - **D3 / D9 / D10** — 각각 원본 파일 계속 보관 / 삭제 세션 집계 테이블 없음 / 코치 시도 횟수 컬럼 없음으로 확정.
+    7.5절·9.5절·3.7절을 확정 서술로 바꾸고 14절의 `[결정 필요]`를 제거.
+  - **D5** — `wrap_up`은 `turns`에만. `questions_kind_shape` CHECK 유지 → 13.3절 R7 **해소**. D10으로 R5도 **해소**.
+  - **D1 / D4** — 저장 구조 변경 없음. 총점 가중치에서 `score = NULL` 축을 제외하는 규칙을 12절에 서버 책임으로 명시하고,
+    `score_disputes`에 재평가 관련 컬럼이 필요 없음을 3.11절에 못박음.
+  - 14절 "남은 결정"을 **"결정 완료"**로 교체. **테이블 수(12개)·RLS 정책·Storage 버킷·Realtime은 변경 없음.**
 
 ---
 
@@ -31,7 +44,8 @@
 | Storage | 비공개 버킷 `documents` 1개. 오디오 버킷 없음(음성 원본 미저장) |
 | Realtime | `interview_sessions` 1개 테이블만 |
 | 삭제 | 소프트 삭제 없음. FK CASCADE + Storage 정리 큐로 **실제 삭제** |
-| 인덱스 | 21개로 제한 (무료 티어 절약. 4절 트레이드오프 참조) |
+| 문서-세션 관계 | **스냅샷**(D6). 세션은 `configuring → ready`에서 `documents.extracted_text`를 복사해 보관하며, 이후 원본 문서에 의존하지 않음 |
+| 인덱스 | 17개로 제한 (무료 티어 절약. 4절 트레이드오프 참조) |
 
 ---
 
@@ -125,8 +139,10 @@ auth.users
    ▼
 profiles ──1:N──► documents ──(0..1 storage object)──► storage: documents 버킷
    │                  ▲   ▲
-   │                  │   └── jd_document_id     (on delete set null)
-   │                  └────── resume_document_id (on delete set null)
+   │                  │   └── jd_document_id     (on delete set null · 출처 링크만)
+   │                  └────── resume_document_id (on delete set null · 출처 링크만)
+   │                          ※ 면접 근거 텍스트는 세션의 *_text_snapshot 컬럼에 복사되어 있고,
+   │                            위 두 FK는 "어느 문서에서 왔는가"를 가리키는 링크일 뿐입니다(D6).
    │ 1:N
    ▼
 interview_sessions ──self──► source_session_id (재시도 복제 원본, on delete set null)
@@ -156,7 +172,7 @@ storage_cleanup_queue  (독립 테이블. documents 삭제 트리거가 채움. 
 |---|---|
 | `profiles.id → auth.users.id` | `cascade` |
 | 모든 `user_id → profiles.id` | `cascade` |
-| `interview_sessions.resume_document_id / jd_document_id → documents.id` | `set null` |
+| `interview_sessions.resume_document_id / jd_document_id → documents.id` | `set null` (D6로 재검토 — 아래) |
 | `interview_sessions.source_session_id → interview_sessions.id` | `set null` |
 | 세션 하위 전부(`questions`·`turns`·`session_events`·`evaluations`·`report_feedback`) | `cascade` |
 | `questions.parent_question_id → questions.id` | `cascade` |
@@ -164,6 +180,24 @@ storage_cleanup_queue  (독립 테이블. documents 삭제 트리거가 채움. 
 | `evaluation_scores.evaluation_id`, `evaluation_citations.score_id`, `score_disputes.score_id` | `cascade` |
 | `evaluation_citations.turn_id → turns.id` | `cascade` |
 | `score_disputes.citation_id → evaluation_citations.id` | `cascade` |
+
+**`resume_document_id` / `jd_document_id`의 `set null` 재검토 (2026-09-09 D6)**
+
+세 후보를 다시 놓고 봤습니다. 판단 기준은 "문서를 지웠을 때 과거 리포트가 온전한가"입니다.
+
+| 후보 | 스냅샷 도입 **전** | 스냅샷 도입 **후**(현재) |
+|---|---|---|
+| `cascade` | 문서 삭제가 과거 세션·리포트를 통째로 지움 — **채택 불가** | 여전히 채택 불가(리포트를 지울 이유가 없음) |
+| `restrict` | 문서 삭제를 세션이 막음 — 보관함에서 영영 못 지우는 문서가 생김 | 스냅샷이 있으므로 막을 이유가 사라짐 — **불필요** |
+| **`set null`** | FK가 NULL이 되면 **무엇을 읽고 이 질문을 했는지가 사라짐**(D6 근거) | **채택.** 근거 텍스트는 세션 안에 남고, NULL이 되는 것은 "출처 문서로 가는 링크"뿐 |
+
+즉 `set null`이라는 **동작 자체는 그대로지만 의미가 바뀌었습니다.** 스냅샷 이전에는 데이터 손실이었고,
+지금은 링크 소실입니다. 컬럼의 역할도 "면접 컨텍스트의 출처"에서 **"출처 표시 + 지표 3(같은 이력서로 다시 하기)의 조인 키"**로
+좁아집니다.
+
+- **대가:** 문서를 지우면 그 문서로 본 세션들은 지표 3의 "같은 이력서 재도전" 묶음에서 빠집니다.
+  스냅샷 텍스트로 동일성을 추정하지 **않습니다**(텍스트가 같아도 다른 문서일 수 있고, 사용자가 편집하면 같은 문서라도 달라집니다).
+- **9.2절 문서 삭제 흐름의 경고 문구도 이에 맞춰 바뀝니다**(더 이상 "리포트가 손상된다"가 아닙니다).
 
 ---
 
@@ -227,8 +261,10 @@ constraint documents_source_shape check (
 | `persona` | text | NULL 허용, `check (persona is null or persona in ('deep_pressure','technical_probe'))` |
 | `modality` | text | not null default `'voice'`, `check (modality in ('voice','text'))` |
 | `current_modality` | text | not null default `'voice'`, `check (current_modality in ('voice','text'))` |
-| `resume_document_id` | uuid | NULL 허용, → `documents(id) on delete set null` |
-| `jd_document_id` | uuid | NULL 허용, → `documents(id) on delete set null` |
+| `resume_document_id` | uuid | NULL 허용, → `documents(id) on delete set null` — **출처 링크**(2절) |
+| `jd_document_id` | uuid | NULL 허용, → `documents(id) on delete set null` — **출처 링크**(2절) |
+| `resume_text_snapshot` | text | NULL 허용, `check (resume_text_snapshot is null or char_length(resume_text_snapshot) between 1 and 200000)` — **D6** |
+| `jd_text_snapshot` | text | NULL 허용, `check (jd_text_snapshot is null or char_length(jd_text_snapshot) between 1 and 200000)` — **D6** |
 | `main_question_budget` | int | not null default 4, `check (main_question_budget between 1 and 12)` |
 | `max_follow_up_depth` | int | not null default 4, `check (max_follow_up_depth between 0 and 8)` |
 | `max_turns` | int | not null default 20, `check (max_turns between 1 and 60)` |
@@ -270,9 +306,72 @@ constraint sessions_failure_reason_only_when_failed check (
 constraint sessions_no_self_source check (source_session_id is null or source_session_id <> id)
 ```
 
+**스냅샷 컬럼 (2026-09-09 D6 — 잠정값 "참조만"을 뒤집음)**
+
+`01_domain_model.md` 5절이 확정한 대로, 세션은 `documents`를 참조만 하지 않고 **면접 근거가 되는 텍스트를 자기 안에 복사해 둡니다.**
+이력서를 고치거나 지워도 과거 세션의 "무엇을 읽고 이 질문을 했는가"가 남아야 하기 때문입니다.
+
+| 항목 | 결정 |
+|---|---|
+| 타입 | `text` (원본 `documents.extracted_text`와 동일 타입) |
+| nullable | **예.** `created` / `configuring` 구간에는 아직 값이 없습니다 |
+| 길이 CHECK | `1 ~ 200000`자. 상한은 `documents.extracted_text`와 **같은 값**이고, 하한 1은 **빈 문자열 금지**입니다 |
+| 기본값 | 없음(NULL) |
+| 인덱스 | **두지 않습니다.** 세션 상세 조회 때 PK로 함께 읽힐 뿐, 검색 대상이 아닙니다 |
+| 원본과의 관계 | 복사 이후 **완전히 독립.** 원본이 바뀌어도 갱신하지 않고, 원본이 지워져도 남습니다 |
+
+- **하한을 0이 아니라 1로 두는 이유.** `extraction_status = 'succeeded'`인데 본문이 빈 문자열인 문서를 스냅샷하면
+  면접관이 컨텍스트 없이 시작해 놓고도 스키마상으로는 "스냅샷 있음"으로 보입니다. `''`를 막으면
+  "값이 없다"는 뜻이 오직 NULL 하나로 표현됩니다(3.8절 `improvement`와 같은 원칙).
+- **`jd_text_snapshot`도 not null이 아닙니다.** 아래 상태 정합 제약이 `ready` 이후에만 값을 요구합니다.
+
+**복사 시점 — `configuring → ready` 전이 (`01_state_machine.md` 2절)**
+
+이 전이는 이미 "직군·페르소나·모달리티·이력서·JD가 모두 있고 이력서/JD의 `extraction_status = 'succeeded'`"를
+가드로 걸고 있습니다. **추출이 성공했음이 보장되는 첫 지점이자, 컨텍스트 요약과 오프닝 질문을 만드는 지점**이므로
+스냅샷 복사도 여기서 같은 트랜잭션 안에 넣습니다.
+
+```
+configuring → ready 트랜잭션 (서버, admin.ts):
+  1. 가드 검사 (설정 5종 존재 + 양 문서 extraction_status = 'succeeded')
+  2. resume_text_snapshot := (select extracted_text from documents where id = resume_document_id)
+     jd_text_snapshot     := (select extracted_text from documents where id = jd_document_id)
+  3. context_summary 생성 → 오프닝 주질문 1개 questions 삽입 → status = 'ready'
+```
+
+- **2단계와 3단계가 같은 트랜잭션이어야 합니다.** 요약과 오프닝 질문은 스냅샷된 텍스트에서 나온 것이어야 하는데,
+  따로 커밋하면 그 사이 사용자가 `/documents`에서 원본을 편집해 **질문과 스냅샷이 서로 다른 원문을 가리키는** 세션이 생깁니다.
+- **`ready → configuring` 되돌리기**(전이 표: 생성된 `questions` 폐기)에서는 **스냅샷도 함께 NULL로 되돌립니다.**
+  설정을 바꾸러 갔다가 다른 이력서를 고르면 옛 스냅샷이 남아 새 질문과 어긋나기 때문입니다.
+  다음 `configuring → ready`에서 다시 복사됩니다.
+- **`in_progress` 이후에는 어떤 경로로도 다시 쓰지 않습니다.** 재개(`paused → in_progress`)는 읽기만 합니다.
+- **재시도 복제**(`source_session_id`)로 새 세션을 만들 때도 스냅샷을 그대로 물려받지 않고,
+  새 세션이 자기 `configuring → ready`에서 **그 시점의 원본을 다시 복사**합니다. "같은 이력서로 다시 봤을 때의 변화"를
+  보려면 회차마다 그 회차가 실제로 읽은 텍스트가 남아야 합니다.
+
+```sql
+constraint sessions_snapshot_required_after_ready check (
+  status in ('created','configuring','canceled','failed')
+  or (resume_text_snapshot is not null and jd_text_snapshot is not null)
+)
+```
+`ready` 이후의 모든 상태(`ready`·`in_progress`·`paused`·`completed`·`evaluating`·`evaluated`·`abandoned`)에서
+스냅샷 2개가 반드시 있어야 합니다. 면제되는 4개 상태의 근거:
+`created`/`configuring`은 아직 복사 전이고, `canceled`는 어느 상태에서든 올 수 있으며,
+`failed`는 **`configuring → failed`**(문서 추출 실패) 경로가 있어 스냅샷 없이 도달할 수 있습니다(전이 표 95행).
+`failed`를 면제하지 않으면 추출 실패 세션이 `failed`로도 넘어가지 못해 `configuring`에 갇힙니다 — 6.4절과 같은 종류의 사고입니다.
+
 인덱스
 - `idx_sessions_user_created (user_id, created_at desc)` — `/sessions` 목록, `/dashboard`
 - `idx_sessions_status_updated (status, updated_at)` **부분 인덱스**: `where status in ('paused','completed','evaluating')` — 워치독·자동 종료 스케줄러 전용. 전체 인덱스 대신 부분 인덱스로 크기를 줄입니다.
+  - **자동 종료 시한은 7일입니다**(2026-09-09 D7 — 잠정값 24시간을 뒤집음. `01_state_machine.md` 8절).
+    **스케줄러 주기는 일 1회 그대로**입니다. 시한이 길어져도 스캔 주기를 좁힐 이유가 없고(하루 늦게 종료돼도
+    사용자 경험에 차이가 없습니다), 오히려 무료 티어의 크론 실행 횟수를 아낍니다.
+  - **부분 인덱스는 시한이 7일로 늘어나면서 더 유용해집니다.** `paused` 행이 최대 7배 오래 남지만,
+    이 인덱스가 커버하는 3개 상태는 여전히 전체 세션의 소수(과반은 `evaluated`)이고,
+    스케줄러는 `where status = 'paused' and paused_at < now() - interval '7 days'`로 이 인덱스를 타고 들어갑니다.
+    전체 인덱스였다면 `evaluated` 행까지 함께 커져 시한 연장이 그대로 인덱스 크기 증가가 됐을 것입니다.
+    쌓이는 `paused` 행의 비용은 **행 자체의 저장 공간뿐**이고 스캔 비용이 아닙니다.
 
 ### 3.4 `questions` — 질문 트리 (지표 6의 원천)
 
@@ -401,7 +500,7 @@ constraint turns_correction_shape check (
 | `coach_payload` | jsonb | NULL 허용, `check (coach_payload is null or jsonb_typeof(coach_payload) = 'object')` — 코치 원출력 보관 |
 | `ai_contract_version` | text | NULL 허용, `check (ai_contract_version is null or char_length(ai_contract_version) <= 40)` |
 | `provider` | text | NULL 허용, `check (provider is null or char_length(provider) <= 40)` |
-| `attempt_count` | int | not null default 0, `check (attempt_count between 0 and 3)` |
+| `attempt_count` | int | not null default 0, `check (attempt_count between 0 and 3)` — **평가자 시도만** 셈(아래) |
 | `error_message` | text | NULL 허용 |
 | `started_at` | timestamptz | not null default now() |
 | `finished_at` | timestamptz | NULL 허용 |
@@ -436,6 +535,22 @@ constraint turns_correction_shape check (
 - **인덱스를 두지 않는 이유.** 세 컬럼 모두 **읽기 대상이지 검색 대상이 아닙니다.** `coach_payload`는 리포트가
   `evaluation_id`로 찾은 뒤 통째로 읽고, 나머지 둘은 회귀 분석용 배치 집계입니다. jsonb GIN 인덱스는
   본문 크기에 비례해 커지므로 무료 티어에서 특히 비쌉니다. 조회 경로가 생기기 전에는 만들지 않습니다.
+
+**`attempt_count`가 세는 것 — 평가자 시도뿐입니다** (2026-09-09 D10 확정, 13.3절 R5 해소)
+
+코치 시도 횟수 컬럼(`coach_attempt_count`)은 **추가하지 않습니다.** 컬럼 하나를 관측 목적만으로 늘리기보다,
+이미 있는 `session_events`로 코치 실패를 셉니다.
+
+- **`attempt_count`는 평가자(Evaluator) 재시도만 셉니다.** 코치는 최대 2회 재시도하지만(`02_ai_contracts.md` 8절)
+  그 횟수는 이 컬럼에 들어가지 **않습니다.** 코치 워커가 이 컬럼을 증가시키면 "평가가 3번 실패했다"는
+  운영 신호가 코치 실패로 오염됩니다. **코치 워커는 이 컬럼을 절대 UPDATE하지 않습니다.**
+- **코치 실패의 관측 경로:** `session_events`에 코치 재시도·실패 이벤트를 남기고
+  (`trigger = 'ai_completion'` 또는 `'system_error'`, `event_name`으로 구분), `detail jsonb`에 시도 회차를 담습니다.
+  `idx_session_events_session_time`으로 세션을 좁힌 뒤 필터링하면 되고, 프로바이더별 집계는
+  `evaluations.provider`와 세션 단위로 조인합니다.
+- **세션 단위 "코치 미완료" 판정은 여전히 `evaluations.summary IS NULL` 하나입니다**(3.8절과 동일 기준).
+  관측 지표가 늘어도 판정 기준은 하나여야 합니다.
+- 필요해지면 ALTER 한 줄입니다. 단 **첫 마이그레이션 적용 이후이므로 새 ALTER 파일**로만 추가합니다(10절 규칙).
 
 인덱스: `idx_evaluations_session_started (session_id, started_at desc)` — 재평가 대비 최신 1건 조회.
 
@@ -550,6 +665,19 @@ create unique index uq_disputes_citation
 축 단위 이의는 축당 1건, 인용 단위 이의는 인용당 1건. 지표 5(노출 대비 클릭 비율)가 중복 클릭으로 부풀지 않습니다.
 추가로 `idx_disputes_session (session_id)`.
 
+**재평가 관련 컬럼은 두지 않습니다** (2026-09-09 D4 확정)
+
+이의 제기는 **수집만 하고 재평가를 유발하지 않습니다.** 따라서 이 테이블에 `status`(접수/검토중/반영됨),
+`resolved_at`, `resulting_evaluation_id` 같은 컬럼이 **필요 없음을 확인했습니다.** 위 DDL은 그대로입니다.
+
+- 이의가 재평가를 부르지 않으므로 `score_disputes`에서 `evaluations`로 향하는 **역방향 참조가 없습니다.**
+  관계는 `score_id`(→ `evaluation_scores`)와 선택적 `citation_id` 두 개뿐이고, 둘 다 "무엇에 대한 이의인가"를
+  가리킬 뿐 "무엇을 바꿨는가"를 가리키지 않습니다.
+- 서버 쓰기 경로도 늘어나지 않습니다: 클라이언트 INSERT 정책 하나(5.2절)로 끝이고,
+  UPDATE·DELETE 정책은 계속 두지 않습니다(제기 후 수정·철회는 MVP 밖).
+- 나중에 이의가 재평가를 유발하게 되면 그때 상태 컬럼과 워커가 함께 필요해집니다. **지금 미리 넣지 않습니다** —
+  아무도 쓰지 않는 `status` 컬럼은 "이의가 처리되고 있다"는 잘못된 인상을 UI에 주기 쉽습니다.
+
 ### 3.12 `storage_cleanup_queue` — Storage 객체 실제 삭제 보장 (서버 전용)
 
 DB의 FK CASCADE는 **Storage 객체를 지우지 않습니다.** 계정 삭제나 세션 삭제로 `documents` 행이 연쇄 삭제되면
@@ -624,6 +752,12 @@ PK를 제외하고 **17개**입니다(unique 제약이 만드는 인덱스 포�
 - `session_events.event_name`에 인덱스를 두지 않았습니다. 지표 5 집계는 배치성이므로 순차 스캔을 감수합니다.
 - FK 컬럼에 인덱스가 없으면 **부모 삭제 시 자식 스캔**이 발생합니다. 위 세 FK는 부모(`questions`/`turns`/`evaluation_scores`)가
   항상 세션 CASCADE의 일부로 삭제되고 세션당 행 수가 수십 건이므로 실측상 문제가 없습니다. 세션당 행 수가 커지면 재검토합니다.
+- **스냅샷 2컬럼의 용량 영향**(2026-09-09 D6): `resume_text_snapshot` + `jd_text_snapshot`은 각 최대 200,000자이지만
+  실제 이력서·JD는 **세션당 합계 수십 KB 수준**이고, Postgres가 임계값을 넘는 `text`를 TOAST로 압축·외부 저장하므로
+  세션 상세를 읽지 않는 목록 쿼리(`/sessions`, `/dashboard`)의 비용은 늘지 않습니다.
+  **대가:** 같은 이력서로 N번 면접하면 같은 텍스트가 N벌 쌓입니다 — 사용자당 수백 KB 규모이며,
+  무료 티어 DB 용량을 무겁게 만드는 쪽은 텍스트가 아니라 Storage의 원본 파일입니다(7.5절, D3).
+  **인덱스는 두 컬럼 모두 두지 않으므로 4절 표의 17개는 변하지 않습니다.**
 - **비정규화한 `session_id`**(evaluation_scores/citations/disputes)의 대가는 uuid 3개 × 행 수의 저장 공간입니다.
   대신 RLS의 조인 깊이가 3단(citation→score→evaluation→session)에서 1단으로 줄어, 리포트 화면의 모든 쿼리에서
   중첩 서브쿼리가 사라집니다. 무료 티어에서는 CPU가 디스크보다 먼저 병목이므로 이쪽을 택했습니다.
@@ -793,8 +927,35 @@ where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity = true
 ### 6.1 로그인 방식
 
 - **이메일 + 비밀번호** (Supabase Auth). 소셜 로그인은 `[later]`(`01_product_spec.md` 4.1).
-- 이메일 확인(confirm email)은 켭니다. 무료 티어 기본 SMTP는 발송 한도가 낮으므로 초기 사용자 20~30명 규모에서만 유효합니다.
-  → 사용자 규모가 커지면 외부 SMTP가 필요합니다. `[결정 필요]`로 남깁니다(9절).
+- **이메일 확인(confirm email)은 끕니다** (2026-09-09 D8 — 잠정값 "켬"을 뒤집음).
+
+**설정**
+
+```
+Supabase Dashboard → Authentication → Providers → Email
+  Confirm email : OFF
+```
+
+이 값은 마이그레이션 SQL이 아니라 **프로젝트 설정**이므로 `supabase/migrations/`에 들어가지 않습니다.
+스키마 변경은 없습니다. 대신 원격 프로젝트를 새로 만들 때 놓치기 쉬우므로,
+`vercel-platform-engineer`에게 넘기는 배포 체크리스트 항목으로 남깁니다(12절).
+
+**근거.** 무료 티어 기본 SMTP는 시간당 발송 한도가 낮아, 켜 두면 예산 제약("무료 티어 안에서 해결")과
+충돌하는 외부 SMTP 프로바이더가 필요해집니다. 리포트 완료 알림을 앱 내 배지로만 두기로 한 D2와도 일관되며,
+그 결과 **이 서비스에는 이메일 발송 경로가 하나도 없습니다.**
+
+**남는 위험 — 잘못된 이메일로 가입하면 계정 복구 경로가 없습니다.**
+
+이것은 완화가 아니라 **감수하는 위험**입니다. 확인 메일이 없으므로 오타 주소(`gmial.com` 등)로도 가입이 성사되고,
+비밀번호 재설정 메일 역시 그 주소로 가므로 사용자는 **자기 계정에 영영 다시 들어올 수 없습니다.**
+데이터는 DB에 남아 있지만 소유자를 증명할 방법이 없어 운영자도 되돌릴 수 없습니다.
+
+- 완화: `/login` 회원가입 화면에 **입력한 이메일을 다시 확인하라는 문구**를 둡니다(`shadcn-ui-engineer` 전달 — 12절).
+  이메일 재입력 필드는 두지 않습니다 — 붙여넣기로 무력화되고 이탈만 늘립니다.
+- 이 위험은 스키마로 막을 수 없습니다. `profiles`에 복구용 컬럼(대체 이메일 등)을 두지 않습니다 —
+  아무도 채우지 않을 컬럼입니다.
+- **되돌리는 조건:** 사용자가 늘어 복구 요청이 실제로 발생하면 그때 켭니다. 켜는 것은 설정 한 번이며
+  **기존 계정은 영향받지 않습니다**(이미 확인된 것으로 취급). 스키마 마이그레이션도 필요 없습니다.
 
 ### 6.2 `auth.users`와의 관계
 
@@ -925,9 +1086,18 @@ create policy "documents_objects_delete_own" on storage.objects
 ### 7.5 용량 절약 (무료 티어)
 
 - 텍스트 직접 입력 경로는 **Storage를 전혀 쓰지 않습니다.** 파일이 필요 없는 사용자는 용량을 소비하지 않습니다.
-- 추출이 `succeeded`로 끝난 뒤 **원본 파일을 계속 보관합니다.** 보존 정책이 무기한이고 사용자가 원본을 다시 볼 수 있어야 하기 때문입니다.
-  → 다만 이것이 무료 티어 용량의 유일한 누적 요인입니다. 대안(추출 성공 후 원본 삭제)은 9절 `[결정 필요]`로 올립니다.
-- 세션은 `documents`를 **참조만** 하고 복사하지 않습니다(`01_domain_model.md` 5절 옵션 A 계승). 세션 수가 늘어도 용량이 늘지 않습니다.
+- **추출이 `succeeded`로 끝난 뒤에도 원본 파일을 계속 보관합니다** (2026-09-09 D3 확정 — 옵션 A).
+  보존 정책이 무기한이고, 사용자가 자기가 올린 원본을 다시 볼 수 있어야 하며, 추출 규칙이 바뀌면 재추출할 수 있어야 하기 때문입니다.
+  삭제 경로는 사용자의 명시적 삭제(9.2·9.3절)뿐이며, **`extraction_status` 변화로 파일이 사라지는 자동 경로는 없습니다.**
+  - **이것이 Storage 무료 티어 용량의 유일한 누적 요인입니다.** 총량은 대략 `사용자 수 × 문서 수 × 파일 크기`로 늘고,
+    상한은 문서당 10 MiB(7.1절)뿐이라 사용자가 지우지 않는 한 **단조 증가합니다.**
+    베이스라인 수집 기간(첫 사용자 20~30명)에는 문제가 없지만, 뒤에서 줄어드는 힘이 없다는 점을 명시해 둡니다.
+  - **DB 쪽 누적(스냅샷 텍스트, 4절)과 혼동하지 마세요.** 둘은 다른 무료 티어 한도를 씁니다 —
+    파일은 Storage 용량, 스냅샷은 DB 용량이고, 압박이 먼저 오는 쪽은 파일입니다.
+  - **관측:** 용량이 한도에 가까워지는지는 Supabase 대시보드의 Storage 사용량으로 봅니다.
+    이 문서는 자동 삭제·보존 기간 컬럼을 두지 않으므로, 한도에 닿으면 **그때 정책을 다시 결정합니다**(D3을 뒤집는 일).
+- 세션은 `documents`의 **텍스트를 스냅샷으로 복사합니다**(2026-09-09 D6, 3.3절). 복사 대상은 `extracted_text`뿐이고
+  **파일을 복사하지 않으므로 Storage 용량은 세션 수와 무관합니다.** 늘어나는 것은 DB 쪽 텍스트뿐입니다(4절).
 
 ---
 
@@ -989,20 +1159,48 @@ Realtime 테이블을 1개로 묶는 것은 무료 티어의 동시 연결·메�
 **`documents`는 함께 지우지 않습니다.** 다른 세션이 같은 이력서를 참조할 수 있고, "같은 이력서로 다시 하기"(지표 3)의
 전제이기 때문입니다(`01_domain_model.md` 4절). 세션 삭제는 Storage를 건드리지 않습니다.
 
+**스냅샷은 세션 행 안에 있으므로 세션과 함께 사라집니다**(2026-09-09 D6). `resume_text_snapshot` / `jd_text_snapshot`은
+별도 테이블이 아니라 `interview_sessions`의 컬럼이라 추가 정리 단계가 필요 없습니다 —
+세션 1행을 지우면 그 세션이 읽었던 텍스트도 함께 사라집니다. 이것이 "실제 삭제" 원칙과 맞습니다.
+
 CASCADE만으로 전부 사라지는지는 위 FK 표가 보장합니다. 어떤 자식 테이블도 `on delete set null`이나 `restrict`가 아닙니다
 (단 `resume_document_id`/`jd_document_id`/`source_session_id`는 의도적으로 `set null` — 이들은 자식이 아니라 참조입니다).
 
-### 9.2 경로 2 — 문서 단위 삭제 (`/documents` 보관함)
+### 9.2 경로 2 — 문서 단위 삭제 (`/documents` 보관함) — **2026-09-09 D6으로 재설계**
+
+스냅샷이 생기면서 **문서 삭제가 과거 세션에 미치는 영향이 크게 줄었습니다.** 예전에는 문서를 지우면
+그 세션이 무엇을 읽었는지가 사라졌지만, 이제 근거 텍스트는 세션 안에 남습니다. 그래서 이 경로는
+**세션 쪽을 아무것도 바꾸지 않고 문서만 지우는 단순 경로**가 됩니다.
 
 ```
 1. 소유권 확인
-2. 참조 중인 세션이 있으면 UI에서 경고 후 사용자 확인
+2. 참조 중인 세션이 있으면 UI에서 경고 후 사용자 확인 (경고 문구가 바뀝니다 — 아래)
 3. delete from public.documents where id = :documentId
    └ BEFORE DELETE 트리거가 storage_cleanup_queue에 storage_path를 넣음
-   └ 참조하던 interview_sessions.resume_document_id / jd_document_id는 NULL이 됨
-     (과거 리포트는 남고 원본 문서만 사라짐 — 도메인 모델 4절)
+   └ 참조하던 interview_sessions.resume_document_id / jd_document_id는 NULL이 됨 (출처 링크만 끊김)
+   └ resume_text_snapshot / jd_text_snapshot은 그대로 남음 → 과거 리포트·전사·질문 근거가 온전
 4. 스위퍼가 큐를 읽어 Storage API로 객체 실제 삭제 → status='done'
 ```
+
+**FK 동작은 `set null` 그대로입니다**(2절 재검토 표). `cascade`는 리포트를 지우므로 채택 불가이고,
+`restrict`는 스냅샷이 생긴 지금 막을 이유가 사라졌습니다.
+
+**경고 문구가 바뀝니다** (`shadcn-ui-engineer` 전달 — 12절)
+
+| | 잃는 것 | 남는 것 |
+|---|---|---|
+| 이전(참조만) | 과거 세션의 근거 텍스트, 재추출, 원본 열람 | 리포트 숫자만 |
+| **현재(스냅샷)** | **원본 파일 열람 / 재추출 / 지표 3의 "같은 이력서" 묶음** | 리포트·전사·질문·근거 텍스트 전부 |
+
+→ "이 이력서를 사용한 과거 면접 N건의 내용은 그대로 남습니다. 원본 파일만 삭제되며, 이후 이 이력서로
+다시 면접을 보려면 새로 올려야 합니다." 정도의 문구가 사실과 맞습니다.
+**"과거 리포트가 손상된다"는 취지의 경고는 이제 거짓이므로 쓰지 마세요.**
+
+**`ready` 이전 세션에는 예외가 있습니다.** `created` / `configuring` 상태의 세션은 아직 스냅샷을 복사하지
+않았으므로(3.3절), 참조하던 문서가 지워지면 `configuring → ready` 가드를 통과할 수 없게 됩니다
+(`resume_document_id`가 NULL이 되어 "이력서 있음" 조건이 깨짐). 이것은 **정상 동작**입니다 —
+사용자는 설정 화면에서 다른 문서를 고르면 되고, 스키마가 막아야 할 상황이 아닙니다.
+UI 경고에서 이 세션들은 "설정 중인 세션 N건에서 이력서를 다시 골라야 합니다"로 따로 셉니다.
 
 ### 9.3 경로 3 — 계정 삭제 (`/settings/account`)
 
@@ -1032,9 +1230,20 @@ CASCADE만으로 전부 사라지는지는 위 FK 표가 보장합니다. 어떤
 
 ### 9.5 삭제되지 않는 것 — 명시
 
-`session_events`는 세션과 함께 사라집니다. 즉 **삭제된 세션은 지표 1·2의 분모에서도 사라집니다.**
+`session_events`는 세션과 함께 사라집니다. 즉 **삭제된 세션은 지표 1·2·3의 분모에서도 사라집니다.**
 이것은 의도된 결과입니다(사용자가 지운 데이터를 집계에 남기면 실제 삭제가 아닙니다).
-지표 왜곡이 우려되면 개인 식별 정보가 없는 별도 집계 테이블이 필요하지만, MVP 범위 밖입니다. 9절 `[결정 필요]` 참조.
+
+**삭제된 세션의 지표를 남기는 별도 집계 테이블은 두지 않습니다** (2026-09-09 D9 확정 — 옵션 A).
+
+- "실제 삭제"는 브리프 7절의 확정 제약입니다. `session_id`를 해시로 익명화하더라도 **사용자가 지운 세션의 흔적이
+  남는 것**은 그 약속과 어긋납니다. 지표는 아직 베이스라인 수집 단계라 정확도보다 원칙이 우선합니다.
+- 따라서 이 문서의 테이블 수는 **12개 그대로**이고, `session_metrics_archive` 류의 13번째 테이블은 없습니다.
+  삭제 트리거도 늘어나지 않습니다(세션 삭제 시 다른 테이블에 무언가를 남기는 경로가 하나도 없습니다).
+- **대가:** 지표 1(완주율)·2(리포트 도달률)·3(재도전율)의 분모가 삭제로 줄어듭니다.
+  특히 "면접이 잘 안 풀린 세션일수록 지우기 쉽다"면 완주율이 **실제보다 높게** 나옵니다 —
+  숫자를 읽을 때 이 편향 방향을 기억해야 합니다.
+- **되돌리는 조건:** 삭제율이 높게 나와 지표를 믿기 어려워지면 그때 다시 판단합니다.
+  다시 판단할 때 필요한 값(삭제 자체의 빈도)은 세션 삭제 라우트의 **애플리케이션 로그**로 봅니다 — DB 테이블이 아닙니다.
 
 ---
 
@@ -1047,7 +1256,7 @@ CASCADE만으로 전부 사라지는지는 위 FK 표가 보장합니다. 어떤
 | 1 | `20260909000100_init_extensions_and_helpers.sql` | `pgcrypto` 확인, 공통 트리거 함수 `set_updated_at()` |
 | 2 | `20260909000200_profiles_and_auth_trigger.sql` | `profiles` + RLS + 정책 + `handle_new_user()` 트리거 |
 | 3 | `20260909000300_documents.sql` | `documents` + CHECK + RLS + 정책 + 인덱스 |
-| 4 | `20260909000400_interview_sessions.sql` | `interview_sessions` + **상태 CHECK** + 정합 제약 + RLS + select 정책 + 인덱스 |
+| 4 | `20260909000400_interview_sessions.sql` | `interview_sessions`(**`resume_text_snapshot`·`jd_text_snapshot` 포함**) + **상태 CHECK** + 정합 제약(`sessions_snapshot_required_after_ready` 포함) + RLS + select 정책 + 인덱스 |
 | 5 | `20260909000500_questions_and_turns.sql` | `questions`(**`archetype_id`·`seed_version`·`probe_hints` 포함**), `turns` + CHECK + RLS + 정책 + 인덱스 |
 | 6 | `20260909000600_session_events.sql` | `session_events` + 상태 CHECK 2개 + RLS + 정책 + 인덱스 |
 | 7 | `20260909000700_evaluations.sql` | `evaluations`(**`coach_payload`·`ai_contract_version`·`provider` 포함**), `evaluation_scores`(**`improvement`은 NULL 허용**), `evaluation_citations` + CHECK + RLS + 정책 + 인덱스 |
@@ -1055,6 +1264,9 @@ CASCADE만으로 전부 사라지는지는 위 FK 표가 보장합니다. 어떤
 | 9 | `20260909000900_storage_bucket_and_policies.sql` | `documents` 버킷 생성 + `storage.objects` 정책 4개 |
 | 10 | `20260909001000_storage_cleanup_queue.sql` | `storage_cleanup_queue` + RLS(정책 0개) + `enqueue_storage_cleanup()` 트리거 |
 | 11 | `20260909001100_realtime_publication.sql` | `supabase_realtime`에 `interview_sessions` 추가 |
+
+**파일 개수는 11개 그대로입니다.** D6·D7·D8·D9·D10 어느 것도 새 테이블·새 트리거·새 인덱스를 부르지 않고,
+D8은 SQL이 아니라 프로젝트 설정입니다(6.1절).
 
 **2026-09-09 리더 조정 3 — 변경분은 별도 ALTER 마이그레이션이 아니라 위 CREATE TABLE 파일에 흡수합니다.**
 
@@ -1067,6 +1279,12 @@ CASCADE만으로 전부 사라지는지는 위 FK 표가 보장합니다. 어떤
 | `questions.archetype_id` / `seed_version` / `probe_hints` | #5 | `create table`의 컬럼 목록 + `probe_hints` CHECK |
 | `evaluations.coach_payload` / `ai_contract_version` / `provider` | #7 | `create table`의 컬럼 목록 + `coach_payload` 오브젝트 CHECK |
 | `evaluation_scores.improvement` not null 해제 | #7 | `create table`에서 `not null`을 쓰지 않고 길이 CHECK만 부여 |
+| **(2차) `interview_sessions.resume_text_snapshot` / `jd_text_snapshot`** (D6) | **#4** | `create table`의 컬럼 목록 + 길이 CHECK 2개 + `sessions_snapshot_required_after_ready` 제약 |
+
+**2차 조정도 같은 규칙을 따릅니다** (2026-09-09 D6). 아직 어떤 마이그레이션도 원격에 적용하지 않았으므로
+`ALTER TABLE public.interview_sessions ADD COLUMN resume_text_snapshot ...` 파일을 **만들지 않습니다.**
+D6은 "컬럼을 나중에 붙인 것"이 아니라 **"처음부터 스냅샷 방식이었던 것"**이므로, 파일 #4의 `create table`이
+그 사실을 있는 그대로 보여줘야 합니다. 스냅샷 없이 세션 테이블이 존재했던 시점은 실제로 없습니다.
 
 **이 규칙은 "첫 적용 전"에만 유효합니다.** 위 11개 파일 중 **하나라도 원격에 적용된 뒤에는**
 어떤 스키마 변경도 반드시 `#12` 이후의 **새 ALTER 마이그레이션**으로만 처리합니다. 적용된 파일을 고치면
@@ -1123,6 +1341,51 @@ API 라우트 응답   : camelCase    (sessionId, createdAt, mainQuestionBudget)
 | `shadcn-ui-engineer` | Realtime 구독은 `interview_sessions` 한 테이블, `id=eq.{sessionId}` 필터. Storage 다운로드는 서명 URL만 |
 | `shadcn-ui-engineer` (조정 1) | **`evaluation_scores.improvement`는 NULL일 수 있습니다.** 코치 실패 시 그 축의 개선 제안 영역을 **감추세요**(플레이스홀더 문자열을 비교하거나 "생성 실패" 문구를 축마다 반복 노출하지 마세요). 세션 전체의 "코치 미완료" 판정은 `evaluations.summary IS NULL` 하나로 하고, 그때만 리포트 상단에 재시도 버튼을 한 번 노출합니다. 재시도는 UPDATE이므로 점수·인용은 그대로 유지됩니다 |
 | `vercel-platform-engineer`·`shadcn-ui-engineer` (조정 4 / R3) | `evaluation_citations.quote_start`/`quote_end`는 **JS UTF-16 오프셋**입니다(서버 `indexOf` 산출값). 인용 하이라이트는 프론트엔드의 JS 문자열 슬라이싱으로만 하고, **Postgres `substring()`에 이 오프셋을 넣지 마세요** — 비-BMP 문자에서 어긋납니다 |
+| `vercel-platform-engineer` (2차 / **D6**) | **`configuring → ready` 라우트가 스냅샷을 복사합니다.** `resume_text_snapshot` / `jd_text_snapshot`에 `documents.extracted_text`를 복사하고, 컨텍스트 요약·오프닝 질문 삽입과 **같은 트랜잭션**에서 커밋하세요(3.3절). `ready → configuring` 되돌리기에서는 두 컬럼을 **NULL로 되돌립니다.** `in_progress` 이후에는 어떤 라우트도 이 컬럼을 쓰지 않습니다 — 재개는 읽기만 합니다. 면접관·평가자 프롬프트의 이력서·JD 입력은 **`documents`가 아니라 세션의 스냅샷 컬럼에서** 읽으세요 |
+| `vercel-platform-engineer` (2차 / **D7**) | `paused` 자동 종료 시한은 **7일**입니다. 스케줄러는 **일 1회** 그대로이며, 쿼리는 `where status = 'paused' and paused_at < now() - interval '7 days'`로 `idx_sessions_status_updated` 부분 인덱스를 탑니다 |
+| `vercel-platform-engineer` (2차 / **D8**) | **배포 체크리스트 항목:** Supabase 프로젝트 설정에서 Authentication → Email → **Confirm email을 OFF**로 둡니다. 마이그레이션 SQL에 없으므로 새 프로젝트를 만들 때 놓치기 쉽습니다. 이 서비스에는 이메일 발송 경로가 하나도 없습니다 |
+| `shadcn-ui-engineer` (2차 / **D6**) | `/documents` **삭제 경고 문구를 바꿔야 합니다.** 문서를 지워도 **과거 세션의 리포트·전사·질문 근거는 그대로 남습니다**(9.2절). 잃는 것은 원본 파일 열람·재추출·"같은 이력서로 다시 하기" 묶음뿐입니다. "과거 리포트가 손상된다"는 취지의 문구는 이제 사실이 아닙니다. 단 `created`/`configuring` 상태 세션은 이력서를 다시 골라야 하므로 따로 셉니다 |
+| `shadcn-ui-engineer` (2차 / **D8**) | 회원가입 화면에 **입력한 이메일을 다시 확인하라는 안내 문구**를 두세요. 확인 메일이 없어 오타 주소로 가입하면 계정 복구 경로가 없습니다(6.1절). 이메일 재입력 필드는 두지 마세요 |
+| `qa-inspector` (2차) | 새 회귀 항목 2개: (1) `configuring → ready` 이후 `resume_text_snapshot`/`jd_text_snapshot`이 채워지는지, (2) 원본 `documents` 행을 지운 뒤에도 과거 세션의 리포트 조회가 온전한지. DB CHECK가 강제하는 부분(`ready` 이후 스냅샷 not null)은 `sessions_snapshot_required_after_ready`가 잡지만, **복사된 내용이 실제 원본과 같은지는 스키마가 보지 못합니다** |
+| `ai-interview-architect` (2차 / **D1**) | 총점 계산은 서버 책임이며 **`score = NULL`인 축(`is_insufficient_evidence = true`)은 가중치 합 `W`에서 제외**합니다 — 아래 참조 |
+
+### 12.1 총점 가중치와 저장 구조의 정합 (2026-09-09 **D1**)
+
+D1로 총점을 **숫자로 노출**하기로 확정됐습니다. `evaluations.overall_score`의 **구조 변경은 없습니다**
+(`numeric(3,2)`, nullable, `check between 1.00 and 5.00`). 다만 노출되는 순간 계산 규칙이 사용자에게 보이므로,
+저장 구조와 계산 규칙이 어긋나지 않는지 확인했습니다.
+
+**규칙 — 인용이 없는 축은 총점 가중치 계산에서 제외됩니다.**
+
+```
+scored = [a for a in axes if a.is_insufficient_evidence = false]   # 곧 score is not null
+W      = sum(weight[a] for a in scored)                            # 제외된 축의 weight는 W에 넣지 않음
+overall_score = round(sum(weight[a] * score[a] for a in scored) / W, 2)
+if len(scored) == 0:  overall_score = NULL,  evaluations.status = 'succeeded'
+```
+
+**저장 구조와 정합합니다.** 근거는 세 가지입니다.
+
+1. **제외 대상을 판별할 값이 행 안에 있습니다.** `scores_evidence_shape` CHECK가
+   `is_insufficient_evidence = true ⟺ score is null`을 **양방향으로** 강제하므로(3.8절),
+   `where score is not null` 하나로 `scored`가 정확히 나옵니다. 두 컬럼이 어긋난 행은 저장될 수 없습니다.
+2. **`weight`에 정규화 전 원값이 들어 있습니다.** `evaluation_scores.weight`는 페르소나 표의 **원값**이고
+   정규화(`/W`)는 계산 과정에만 존재합니다(`02_ai_contracts.md` 5.4절). 그래서 제외 축이 생겨도
+   **저장된 값을 고치지 않고** 남은 축의 원값만 다시 더하면 됩니다. 만약 정규화된 값을 저장했다면
+   축 하나가 빠질 때마다 5행 전부를 UPDATE해야 했을 것입니다.
+3. **`overall_score`가 nullable입니다.** 모든 축이 근거 부족이면 `W = 0`이 되어 나눗셈이 성립하지 않습니다.
+   이때 컬럼은 NULL을 받고 `evaluations.status`는 `'succeeded'`로 남습니다 — **실패가 아니라 "점수 없는 리포트"**입니다.
+
+**서버 책임으로 못박습니다** (`vercel-platform-engineer`·`ai-interview-architect`):
+
+- 총점은 **평가 워커가 저장 시 한 번 계산해 컬럼에 넣습니다.** 조회할 때마다 다시 계산하지 않습니다 —
+  같은 리포트가 코드 버전에 따라 다른 숫자를 보이면 안 됩니다.
+- **`W = 0`일 때 0으로 나누지 마세요.** `len(scored) == 0`을 먼저 검사하고 NULL을 넣습니다.
+  이 분기를 빠뜨리면 근거 부족 리포트가 저장 단계에서 통째로 실패합니다.
+- **제외된 축도 `evaluation_scores` 행은 그대로 만듭니다.** 행을 만들지 않으면
+  리포트에서 "이 축은 근거가 부족했다"를 보여줄 수 없고, `unique (evaluation_id, axis)` 5행 전제도 깨집니다.
+- **UI는 총점 옆에 몇 개 축이 반영됐는지 함께 보여야 합니다.** 5축 중 2축만 채점된 총점 4.5와
+  5축 전부 채점된 4.5는 같은 숫자가 아닙니다. 이 정보는 `score is null` 행 수로 세면 됩니다 — 별도 컬럼을 두지 않습니다.
 
 ---
 
@@ -1192,7 +1455,33 @@ indexOf ≥ 0  →  quote_start = idx, quote_end = idx + len(quote_text)
 | 20–160자 CHECK | 5.2절 스키마 + 5.3절 서버 검사의 **이중 방어** 뒤에 DB CHECK가 3중째. 세 곳의 경계값이 모두 `20`·`160`으로 동일(off-by-one 없음) |
 | `score = NULL` + `is_insufficient_evidence` | `scores_evidence_shape` CHECK의 두 방향(true→null, false→not null)이 5.2절 description·5.3절 assert와 **양방향 모두** 일치. 계약이 추가하는 "citations 0건" 조건만 DB가 강제하지 못함(R1) |
 
-### 13.3 남은 불일치 — 고치지 않고 나열 (리더 조정 대상)
+### 13.3 남은 불일치 — 재검토 결과 (2026-09-09 2차 조정)
+
+**R5·R7이 해소됐습니다.** 남은 것은 5건이며, 그중 어느 것도 스키마 변경을 부르지 않습니다.
+
+| # | 상태 | 처리 |
+|---|---|---|
+| R1 | **남음** | QA 체크리스트(스키마로 해결 불가) |
+| R2 | **남음** | 실무 영향 낮음. 서버 구현 지침 |
+| R3 | **남음** | 문서·전달로 처리(12절에 전달 완료) |
+| R4 | **남음** | 의도적으로 CHECK를 두지 않음 |
+| R5 | **해소 (D10)** | 코치 시도 횟수 컬럼을 **추가하지 않습니다.** `session_events`로 관측하고, `attempt_count`가 평가자 시도만 센다는 사실을 3.7절에 명시했습니다 |
+| R6 | **남음(의도)** | 이미 "의도적으로 두는 여유"로 확정된 항목 |
+| R7 | **해소 (D5)** | `wrap_up`은 **`turns`에만** 기록합니다. 옵션 A 확정이므로 `questions_kind_shape`·`question_kind` CHECK **둘 다 그대로**이며, 이 문서의 스키마는 변경되지 않았습니다 |
+
+**R7 해소의 의미 — 스키마 변경을 부르던 유일한 미결이 사라졌습니다.**
+`wrap_up`을 `questions`에도 남겼다면 `question_kind`에 세 번째 값이 필요하고,
+`questions_kind_shape`(main은 부모 없음 / follow_up은 부모 있음)의 두 갈래가 어느 쪽도 맞지 않아
+제약 자체를 다시 써야 했습니다. 더 중요한 것은 지표 6(세션당 최초 질문 대비 후속 질문 수의 중앙값)의
+**분모가 세션마다 1씩 부풀었을 것**이라는 점입니다 — `wrap_up`은 질문이 아니라 마무리 발화입니다.
+`turns`에만 남기면 `role = 'interviewer'`, `question_id is null`인 평범한 행 하나이며, 이는 현재 스키마가
+이미 허용합니다(`turns.question_id`는 nullable).
+
+**R5 해소의 의미.** `evaluations`에 컬럼이 늘지 않으므로 마이그레이션 #7도 그대로입니다.
+
+아래는 원래의 7건 전문입니다(해소된 2건은 위 표를 함께 보세요).
+
+
 
 | # | 지점 | 내용 | 성격 |
 |---|---|---|---|
@@ -1200,62 +1489,69 @@ indexOf ≥ 0  →  quote_start = idx, quote_end = idx + len(quote_text)
 | R2 | 계약 5.3절 `len(c.quote_text)` vs 이 문서 3.9절 `char_length` | JS `String.length`는 **UTF-16 코드 단위**, Postgres `char_length`는 **코드포인트**다. 한글·영문은 같지만 이모지(서로게이트 페어)가 섞이면 JS 기준 160자가 DB 기준 160자를 넘거나 그 반대가 될 수 있다. 경계 근처 인용에서만 재현되는 저장 실패 | 실무 영향 낮음(면접 전사에 이모지가 드묾). 서버가 `[...str].length`로 세면 완전히 사라짐 |
 | R3 | 계약 5.3절 `indexOf` 산출값의 의미 | `quote_start`/`quote_end`는 **JS UTF-16 오프셋**이다. 이 값을 Postgres `substring(transcript_text from quote_start+1 ...)`에 그대로 넣으면 비-BMP 문자에서 어긋난다. **DB 안에서 오프셋으로 원문을 다시 자르는 쿼리를 쓰면 안 된다**는 제약이 계약 어디에도 적힌 적이 없다 | 하이라이트는 프론트(JS)에서만 하면 안전. `vercel-platform-engineer`·`shadcn-ui-engineer`에게 전달 필요 |
 | R4 | 계약 6.2절 `improvements` minItems/maxItems 3 vs 이 문서 3.7절 | 정확히 3건이라는 제약을 DB가 강제하지 않는다(`jsonb`에 개수 CHECK 없음) | 앱 검증(6.3절)이 이미 잡음. CHECK 추가는 선택 사항이며 코치 출력 형태가 바뀔 때 마이그레이션을 부르므로 **두지 않는 쪽을 권합니다** |
-| R5 | 계약 8절 "코치 재시도 최대 2회" vs 이 문서 3.7절 `attempt_count` | `attempt_count`는 **평가자 시도 횟수**만 담는다(CHECK 0–3). 코치 시도 횟수를 담을 컬럼이 없어, 코치가 몇 번 만에 성공/실패했는지 추적할 수 없다 | 컬럼 추가(`coach_attempt_count int`)가 필요한지 리더 판단. 지금은 `session_events`로만 관측 가능 |
+| R5 | 계약 8절 "코치 재시도 최대 2회" vs 이 문서 3.7절 `attempt_count` | `attempt_count`는 **평가자 시도 횟수**만 담는다(CHECK 0–3). 코치 시도 횟수를 담을 컬럼이 없어, 코치가 몇 번 만에 성공/실패했는지 추적할 수 없다 | ~~컬럼 추가(`coach_attempt_count int`)가 필요한지 리더 판단~~ → **해소(D10): 추가하지 않고 `session_events`로 관측.** 3.7절 참조 |
 | R6 | 계약 9절 #8 vs 이 문서 3.9절 | 루브릭·계약은 인용 `comment`를 **필수**로 하는데 컬럼은 NULL 허용이다 | 계약 5.2절이 AI 출력에서 `required`로 강제하므로 실무상 NULL이 들어올 경로가 없음. **의도적으로 두는 여유**로 확정하며 컬럼은 바꾸지 않습니다 |
-| R7 | 계약 10절 `[결정 필요]` wrap_up | 면접관의 `wrap_up` 발화를 `questions`에도 남길지 미결. 옵션 B를 택하면 `questions_kind_shape` CHECK와 `question_kind` CHECK를 모두 바꿔야 한다 | **스키마 변경을 부르는 유일한 미결 항목.** 옵션 A(turns만)면 이 문서는 그대로. 리더 결정 전까지 이 문서는 옵션 A 전제 |
+| R7 | 계약 10절 `[결정 필요]` wrap_up | 면접관의 `wrap_up` 발화를 `questions`에도 남길지 미결. 옵션 B를 택하면 `questions_kind_shape` CHECK와 `question_kind` CHECK를 모두 바꿔야 한다 | ~~스키마 변경을 부르는 유일한 미결 항목~~ → **해소(D5): 옵션 A(`turns`에만) 확정.** 이 문서의 CHECK는 그대로입니다 |
 
-**불일치를 어느 쪽도 임의로 바꾸지 않습니다.** R1·R3는 문서·체크리스트로, R5·R7은 리더 결정으로 처리합니다.
+**불일치를 어느 쪽도 임의로 바꾸지 않습니다.** R1·R3는 문서·체크리스트로 처리하고,
+**R5·R7은 리더 결정(D10·D5)으로 해소됐습니다.** R2·R4·R6은 의도적으로 남기는 여유입니다.
+
+**2차 조정에서 새로 발견한 불일치는 없습니다.** D6(스냅샷)은 `02_ai_contracts.md`의 평가자·코치 입출력 계약을
+건드리지 않습니다 — 계약은 이력서·JD 텍스트를 프롬프트 입력으로만 다루고 그 텍스트가 어디에 저장돼 있는지는
+규정하지 않기 때문입니다. 다만 **면접관·평가자 프롬프트를 채우는 서버 코드가 `documents`가 아니라 세션의
+스냅샷 컬럼에서 읽어야 한다**는 점은 계약 문서에 없는 구현 지침이라 12절로 전달했습니다.
 
 ---
 
-## 14. 남은 결정
+## 14. 결정 완료
+
+남은 미결 없음. (2026-09-09)
+
+이 문서가 잠정값으로 열어 두었던 `[결정 필요]` **6건이 전부 확정됐습니다.**
+전체 결정 기록과 근거는 [`00_input/decisions.md`](00_input/decisions.md)입니다.
+
+| 이 문서의 옛 미결 | 확정 | 이 문서에 반영된 곳 | 스키마 변경 |
+|---|---|---|---|
+| 추출 성공 후 원본 파일 보관 여부 | **D3 — 계속 보관**(옵션 A) | 7.5절 | 없음 |
+| 삭제된 세션의 지표 집계 테이블 | **D9 — 두지 않음**(옵션 A) | 9.5절 | 없음(테이블 12개 유지) |
+| 이메일 확인(confirm email) | **D8 — 끔**(잠정값 뒤집힘) | 6.1절 | 없음(프로젝트 설정) |
+| `paused` 자동 종료 시한 | **D7 — 7일**(잠정값 뒤집힘) | 3.3절 인덱스 서술 | 없음 |
+| 코치 시도 횟수 컬럼 | **D10 — 추가 안 함**(옵션 A) | 3.7절, 13.3절 R5 | 없음 |
+| `documents` 스냅샷 여부 | **D6 — 스냅샷**(잠정값 뒤집힘) | 3.3절, 2절, 9.2절, 4절, 10절 | **있음 — 컬럼 2개** |
+
+이 문서 밖에서 확정되어 여기에 반영된 것: **D1**(총점 숫자 노출 → 12.1절 가중치 규칙),
+**D4**(이의 제기는 수집만 → 3.11절), **D5**(`wrap_up`은 `turns`에만 → 13.3절 R7).
+
+**뒤집힌 잠정값은 3건입니다**(D6·D7·D8). 그중 스키마를 바꾼 것은 **D6 하나뿐**이며,
+아직 마이그레이션을 적용하지 않았으므로 ALTER가 아니라 파일 #4의 `create table`에 흡수됩니다(10절).
+
+### 14.1 남은 것 — 판단이 아니라 **측정**이 필요한 항목
+
+아래는 결정이 아니라 구현 착수 시 실측으로 확인할 값입니다. 어느 것도 스키마를 바꾸지 않습니다.
 
 ```
-[결정 필요] 추출 성공 후 원본 파일을 계속 보관할 것인가
-  옵션 A: 계속 보관 (현재 문서의 잠정값) — 사용자가 원본을 다시 볼 수 있고, 추출 규칙이 바뀌면 재추출 가능.
-          무기한 보존과 겹쳐 Storage 무료 티어 용량이 사용자 수 × 문서 수만큼 누적
-  옵션 B: extraction_status='succeeded' 이후 원본 삭제, extracted_text만 보존 — 용량 압박이 사라지지만
-          재추출 불가, 사용자가 "내가 올린 파일"을 다시 못 봄
-  영향: Storage 용량(무료 티어), /documents 화면, 재추출 기능
-```
-
-```
-[결정 필요] 삭제된 세션의 지표를 별도 집계 테이블에 남길 것인가
-  옵션 A: 남기지 않음 (현재 문서의 잠정값) — 실제 삭제 원칙에 충실. 삭제된 세션은 지표 1·2·3의 분모에서 사라짐
-  옵션 B: 개인 식별 정보 없는 집계 테이블(session_id 해시, 상태 전이 시각만)을 유지 — 지표가 안정되지만
-          "실제 삭제" 문구와 사용자 기대에 어긋날 수 있음
-  영향: 지표 1·2·3의 정확도, 개인정보 처리 범위, 테이블 1개 추가
-```
-
-```
-[결정 필요] 이메일 확인(confirm email)을 켤 것인가
-  옵션 A: 켬 (현재 문서의 잠정값) — 계정 도용·오타 가입 방지. 무료 티어 기본 SMTP는 시간당 발송 한도가 낮아
-          사용자가 늘면 외부 SMTP 프로바이더가 필요(예산 제약과 충돌 가능)
-  옵션 B: 끔 — 발송 의존성 0. 잘못된 이메일로 가입해도 막을 수 없고 계정 복구가 불가능해짐
-  영향: 인증 흐름, 외부 의존성, /login 화면
-```
-
-```
-[결정 필요] paused 자동 종료 시한 (01_state_machine.md 8절에서 이월)
-  DB 쪽 영향: idx_sessions_status_updated 부분 인덱스의 유용성과 스케줄러 주기.
-  24시간이면 일 1회 크론으로 충분하고, 7일이면 그대로여도 되지만 paused 행이 더 오래 쌓입니다.
-  스키마 변경은 필요 없으므로 이 문서는 상태 머신의 결정을 그대로 따릅니다.
-```
-
-```
-[결정 필요] 코치 시도 횟수를 컬럼으로 남길 것인가 (2026-09-09 조정 4에서 신규 — 13.3절 R5)
-  현황: evaluations.attempt_count는 평가자 시도만 담습니다(CHECK 0~3). 코치는 최대 2회 재시도하지만
-        (02_ai_contracts.md 8절) 그 횟수를 담을 컬럼이 없어 "코치가 몇 번 만에 실패했는가"를 집계할 수 없습니다.
-  옵션 A(이 문서의 잠정값): 추가하지 않음 — session_events로만 관측. 컬럼 하나를 아끼고,
-        코치 실패는 evaluations.summary IS NULL로 이미 판정 가능
-  옵션 B: evaluations.coach_attempt_count int not null default 0 CHECK 0~2 추가 —
-        "총평 실패율이 프로바이더별로 다른가"를 SQL 한 줄로 볼 수 있음
-  영향: 3.7절 DDL, 마이그레이션 #7, 코치 워커의 UPDATE 1개. 인덱스는 어느 쪽도 불필요
+[확인 필요] 스냅샷 텍스트가 실제로 세션당 몇 KB인가
+  근거: 3.3절은 상한 200,000자를 CHECK로 두었지만, 실제 이력서·JD는 수십 KB 수준으로 가정했습니다(4절).
+  확인 시점: Phase 3에서 첫 세션 20~30건이 쌓인 뒤
+  확인 방법: select pg_size_pretty(sum(pg_column_size(resume_text_snapshot) + pg_column_size(jd_text_snapshot)))
+             from public.interview_sessions;
+  가정이 틀렸을 때: 상한을 낮추거나(마이그레이션), 스냅샷을 원본 대신 context_summary로 대체하는 안을 재검토
 ```
 
 ```
-[결정 필요] documents 스냅샷 여부 (01_domain_model.md 5절에서 이월)
-  이 문서는 옵션 A(참조만)를 채택했습니다. 근거: 무료 티어 용량 절약과 스키마 단순성.
-  옵션 B(세션 생성 시 extracted_text 스냅샷)로 바뀌면 interview_sessions에
-  resume_text_snapshot / jd_text_snapshot 두 컬럼을 추가하는 새 마이그레이션이 필요합니다.
+[확인 필요] Storage 원본 파일 누적이 무료 티어 한도에 언제 닿는가
+  근거: D3으로 원본을 계속 보관하므로 용량이 단조 증가합니다(7.5절). 줄어드는 힘이 없습니다.
+  확인 시점: 상시(Supabase 대시보드 Storage 사용량)
+  가정이 틀렸을 때: D3을 되돌리는 결정이 필요합니다 — 스키마가 아니라 정책 변경입니다
 ```
+
+```
+[확인 필요] 부분 인덱스 idx_sessions_status_updated가 7일 시한에서도 충분히 작은가
+  근거: 3.3절은 paused 행이 최대 7배 오래 남아도 비용이 무시할 수준이라고 판단했습니다.
+  확인 시점: Phase 3 이후 세션 수가 수백 건을 넘을 때
+  확인 방법: select pg_size_pretty(pg_relation_size('idx_sessions_status_updated'));
+  가정이 틀렸을 때: where 절에서 'completed'·'evaluating'을 떼고 워치독용 인덱스를 분리
+```
+
+이와 별개로 `00_input/decisions.md` 말미의 전사 `[확인 필요]` 2건(모델별 무료 티어 RPM/RPD/TPM,
+JSON Schema 강제 범위)은 **데이터 레이어에 영향이 없습니다** — 둘 다 AI 호출 예산과 계약 검증에 관한 값입니다.
