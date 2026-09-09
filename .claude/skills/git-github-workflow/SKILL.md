@@ -96,9 +96,25 @@ If that order is impossible, the change must be backward compatible — add the 
 
 ## Output language
 
-Commit messages, PR titles, and PR descriptions are written in **English**, matching the harness instruction files and the conventional-commit format. Everything else follows the project language policy: `_workspace/` deliverables, runtime prompts, and UI copy are Korean.
+| What | Language |
+|------|----------|
+| PR title and description | **Korean** |
+| Issue title and body | **Korean** |
+| Commit messages | **English**, conventional-commit format |
+| Branch names, scopes, code identifiers | **English** |
 
-Code identifiers stay English everywhere — branch names, scopes, and status values included.
+**Write pull requests in Korean.** A PR description is a document a person reads and decides from, so it follows the project's document language. Write the boundary impact and verification notes in Korean too — those are the parts that have to be understood quickly, months later.
+
+The conventional-commit prefix stays English inside a Korean PR title, because the type and scope are identifiers rather than prose. The same change produces two different lines:
+
+```
+PR title:       feat(voice): 마이크 권한 거부 시 텍스트 폴백 추가
+Commit subject: feat(voice): add text fallback when microphone permission is denied
+```
+
+Commit messages stay English. The type, scope, and imperative subject form one machine-readable convention, and mixing languages inside that line makes the history harder to scan and to grep. When a PR squash-merges, write the squash commit in English even though the PR description above it is Korean.
+
+Code identifiers stay English everywhere — branch names, scopes, status values, and field names included. Never translate a status value into Korean; it breaks the DB CHECK constraint at runtime.
 
 ---
 
