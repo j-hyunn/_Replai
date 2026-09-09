@@ -58,10 +58,11 @@ QA uses `general-purpose` rather than `Explore`, because it needs Grep-based cro
 
 ### Phase 1: Preparation
 
-1. Analyze the user's input — target features, scope, constraints, how far this run should go
-2. Create `_workspace/` (on a fresh run, right after moving the old directory)
-3. Save input material to `_workspace/00_input/`
-4. Record the fixed constraints in `_workspace/00_input/constraints.md` so every member reads them:
+1. Read `docs/` first — the human-owned inputs. At minimum `docs/00_brief.md` (service brief: target users, non-goals, fixed constraints). **`docs/` is read-only for every agent; never edit or move it.** If the brief is missing or its `[결정 필요]` markers cover the requested scope, stop and ask the user rather than guessing.
+2. Analyze the user's input — target features, scope, constraints, how far this run should go
+3. Create `_workspace/` (on a fresh run, right after moving the old directory). **`_workspace/` is agent-owned and may be rotated; nothing human-authored belongs in it.**
+4. Save run-specific input material to `_workspace/00_input/`
+5. Record the fixed constraints in `_workspace/00_input/constraints.md` so every member reads them:
 
 ```markdown
 - Framework: Next.js (App Router) + React
@@ -95,7 +96,7 @@ TeamCreate(
 )
 ```
 
-Every prompt must include: read `_workspace/00_input/constraints.md` first, the name of the member's skill, the output file paths, and who they collaborate with.
+Every prompt must include: read `docs/00_brief.md` and `_workspace/00_input/constraints.md` first, the name of the member's skill, the output file paths, and who they collaborate with. State that `docs/` is read-only.
 
 ```
 TaskCreate(tasks: [
@@ -210,6 +211,9 @@ documentation-only run.
 ## Data flow
 
 ```
+docs/00_brief.md (human-owned, read-only)
+        │
+        ▼
 00_input/constraints.md
         │
         ▼
@@ -239,8 +243,13 @@ documentation-only run.
 
 ## Deliverable path convention
 
+Two document roots, split by owner. See CLAUDE.md for the routing table.
+
 ```
-_workspace/
+docs/                      # human-owned, stable, READ-ONLY for agents
+└── 00_brief.md            # service brief — the origin of the spec
+
+_workspace/                # agent-owned, rotated on a fresh run
 ├── 00_input/constraints.md
 ├── 01_product_spec.md / 01_state_machine.md / 01_domain_model.md / 01_rubric.md
 ├── 02_ai_architecture.md / 02_ai_contracts.md / 02_prompts/{interviewer,evaluator,coach,planner}.md
