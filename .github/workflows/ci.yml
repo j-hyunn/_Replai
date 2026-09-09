@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  harness-check:
+    name: Harness integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate agent and skill frontmatter
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys, re
+
+          errors = []
+
+          def check(path: pathlib.Path, kind: str):
+              text = path.read_text(encoding="utf-8")
+              lines = text.splitlines()
+              if not lines or lines[0].strip() != "---":
+                  errors.append(f"{path}: {kind} must start with '---' frontmatter")
+                  return
+              try:
+                  end = lines.index("---", 1)
+              except ValueError:
+                  errors.append(f"{path}: frontmatter is not closed with '---'")
+                  return
+              fm = "\n".join(lines[1:end])
+              for field in ("name", "description"):
+                  if not re.search(rf"^{field}:\s*\S", fm, re.MULTILINE):
+                      errors.append(f"{path}: frontmatter is missing '{field}'")
+              m = re.search(r"^name:\s*(\S+)", fm, re.MULTILINE)
+              if m:
+                  declared = m.group(1).strip().strip('"').strip("'")
+                  expected = path.parent.name if path.name == "SKILL.md" else path.stem
+                  if declared != expected:
+                      errors.append(
+                          f"{path}: name '{declared}' does not match its location '{expected}'"
+                      )
+
+          agents = sorted(pathlib.Path(".claude/agents").glob("*.md"))
+          skills = sorted(pathlib.Path(".claude/skills").glob("*/SKILL.md"))
+
+          if not agents:
+              errors.append(".claude/agents/ has no agent definitions")
+          if not skills:
+              errors.append(".claude/skills/ has no skills")
+
+          for p in agents:
+              check(p, "agent")
+              if not re.search(r"^model:\s*opus", p.read_text(encoding="utf-8"), re.MULTILINE):
+                  errors.append(f"{p}: agent must declare 'model: opus'")
+          for p in skills:
+              check(p, "skill")
+
+          claude_md = pathlib.Path("CLAUDE.md")
+          if not claude_md.exists():
+              errors.append("CLAUDE.md is missing")
+          elif "HARNESS_CHANGELOG" not in claude_md.read_text(encoding="utf-8"):
+              errors.append("CLAUDE.md no longer points at .claude/HARNESS_CHANGELOG.md")
+
+          if not pathlib.Path(".claude/HARNESS_CHANGELOG.md").exists():
+              errors.append(".claude/HARNESS_CHANGELOG.md is missing")
+
+          print(f"checked {len(agents)} agents, {len(skills)} skills")
+          if errors:
+              print("\nharness-check failed:")
+              for e in errors:
+                  print(f"  - {e}")
+              sys.exit(1)
+          print("harness OK")
+          PY
+
+      - name: Check for committed secrets
+        run: |
+          if git ls-files | grep -E '(^|/)\.env($|\.)' ; then
+            echo "A .env file is tracked. Remove it and rotate any key it contained."
+            exit 1
+          fi
+          echo "no tracked .env files"
+
+  app-check:
+    name: Typecheck, lint, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect application
+        id: detect
+        run: |
+          if [ -f package.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No package.json yet — the app has not been scaffolded. Skipping."
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.detect.outputs.present == 'true'
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      - name: Typecheck
+        if: steps.detect.outputs.present == 'true'
+        run: npm run typecheck --if-present
+
+      - name: Lint
+        if: steps.detect.outputs.present == 'true'
+        run: npm run lint --if-present
+
+      - name: Build
+        if: steps.detect.outputs.present == 'true'
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder-anon-key
+        run: npm run build --if-present

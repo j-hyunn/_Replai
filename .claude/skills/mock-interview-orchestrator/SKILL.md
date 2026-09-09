@@ -25,6 +25,8 @@ The team is reformed per phase. Only one team can be active per session, so dele
 
 **Specify `model: "opus"` on every Agent and TeamCreate call.**
 
+`git-github-workflow` is a **shared skill every member uses** — it is not owned by one teammate. Name it in every member prompt, because whoever produces a change that should land in the repository follows those conventions.
+
 QA uses `general-purpose` rather than `Explore`, because it needs Grep-based cross-extraction and the ability to run verification scripts.
 
 ## Workflow
@@ -172,6 +174,23 @@ TaskCreate(tasks: [
 4. Send critical and high findings from the QA report to their owners for fixes, then re-verify (**at most 2 rounds**, to avoid an infinite loop)
 5. After 2 rounds, list anything still outstanding as unresolved in `_workspace/07_qa_report.md` and report it to the user
 
+### Phase 4.5: Land the work in the repository
+
+Run this whenever the phase produced code, not just documents. Skip it for a
+documentation-only run.
+
+1. Confirm QA is green, or that the remaining findings are explicitly accepted
+2. Follow `git-github-workflow`: commit at working boundaries, push the branch,
+   open a PR using `.github/pull_request_template.md`
+3. **Fill in the PR's boundary impact section from the QA report**, not from memory.
+   The propagation table in Phase 0 and that PR section describe the same risk:
+   a change that crosses a boundary and leaves the other side stale
+4. Wait for CI. A red `app-check` is usually a real contract mismatch — fix the
+   contract rather than casting past it
+5. Check the Vercel preview for anything touching the session screen, voice, or auth.
+   None of those failures are visible in a diff
+6. Squash merge, delete the branch
+
 ### Phase 5: Cleanup and feedback
 
 1. Ask teammates to finish, then `TeamDelete`
@@ -243,6 +262,8 @@ _workspace/
 | infinite QA fix loop | stop after at most 2 rounds and mark the rest unresolved |
 | a member introduces a non-shadcn library | reject immediately. Re-send the constraints document and direct a rebuild with Radix + Tailwind |
 | migration failure | do not leave a partially applied state. Determine the current schema state and report it |
+| CI fails on the PR | read the failing step's log first. Never disable a check or cast past a type error to get a merge through |
+| branches conflict at merge | merge in dependency order — migration, then API, then UI. If that order is impossible, make the change backward compatible for one cycle |
 
 ## Test scenarios
 
