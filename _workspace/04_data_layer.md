@@ -1,7 +1,9 @@
 # 데이터 레이어 설계 (Supabase)
 
 > 소유: `supabase-engineer` · 상태: **설계(design)** — 이 문서는 설계이며 마이그레이션 적용은 다음 Phase입니다.
-> 입력: `docs/00_brief.md`(읽기 전용), `00_input/constraints.md`, `01_domain_model.md`, `01_state_machine.md`, `01_rubric.md`, `01_product_spec.md`
+> 입력: `docs/00_brief.md`(읽기 전용), `00_input/constraints.md`, `00_input/decisions.md`(**D27·D28·D29 포함**),
+> `01_domain_model.md`, `01_state_machine.md`, `01_rubric.md`, `01_product_spec.md`, `02_ai_contracts.md`,
+> `02_ai_architecture.md`(**8.3절·13.6절 — 예약 원장 명세의 원본**)
 > **상태 값과 부속 enum의 원본은 `01_state_machine.md` 1절입니다.** 이 문서의 값은 그 코드 블록을 문자 단위로 복사한 것이며,
 > 충돌하면 상태 머신 문서가 우선합니다.
 > 서술은 한국어, 식별자(테이블·컬럼·enum 값·정책 이름·파일명)는 영어입니다. **번역 금지.**
@@ -30,6 +32,25 @@
   - **D1 / D4** — 저장 구조 변경 없음. 총점 가중치에서 `score = NULL` 축을 제외하는 규칙을 12절에 서버 책임으로 명시하고,
     `score_disputes`에 재평가 관련 컬럼이 필요 없음을 3.11절에 못박음.
   - 14절 "남은 결정"을 **"결정 완료"**로 교체. **테이블 수(12개)·RLS 정책·Storage 버킷·Realtime은 변경 없음.**
+- 2026-09-10 **3차 조정 — D27·D28·D29 대응.** 이 문서 들어 **테이블이 가장 많이 늘어난 조정**입니다(12개 → 17개).
+  - **D27(예약 원장)** — `ai_quota_ledger`·`ai_quota_reservations` 2개 테이블, plpgsql 함수 3종,
+    `before delete` 트리거 1개를 신설(3.13·3.14절). 명세 원본은 `02_ai_architecture.md` 8.3절·13.6.1절이며
+    **그대로 구현**합니다. 두 테이블은 **RLS 켜고 정책 0개**(서버 전용).
+    **예약은 `funding_source = 'trial_shared'` 세션에만 생깁니다**(D28) — BYOK 세션은 원장에 행을 만들지 않습니다.
+  - **D28(BYOK)** — `user_api_keys`(Supabase Vault 암호화)와 `account_events`(키 수명주기 감사 로그) 신설(3.15·3.17절).
+    **키 원문은 `public` 스키마 어느 컬럼에도 저장하지 않습니다.** 노출은 `key_last4` 4자뿐입니다.
+  - **D29(체험 동의)** — `trial_consents` 신설(3.16절). 사용자·시각·**문구 버전 + 문구 해시**를 남깁니다.
+    동의 없이 체험 세션이 `ready`로 가지 못하도록 `interview_sessions`에 트리거를 겁니다.
+  - **enum·컬럼 변경(리더 승인 완료)** — `pause_reason` 3개 → **5개**(`byok_key_invalid`·`byok_quota_exhausted` 추가),
+    `interview_sessions.funding_source` **신규 컬럼**(`trial_shared`|`byok`, not null, 변경 금지).
+    **`status` 11개는 변경 없습니다.**
+  - 인덱스 17개 → **22개**, 마이그레이션 파일 11개 → **14개**(신규 3개. 기존 11개는 손대지 않고,
+    `funding_source`·`pause_reason`은 아직 미적용이므로 파일 #4의 `create table`에 흡수).
+- 2026-09-10 **D30 반영 — 체험 예약은 사용자당 동시 1건.** `reserve_session_quota`에 **동시 예약 가드**를 추가합니다(3.14.1절).
+  같은 사용자에게 **다른 세션의 `held` 예약**이 있으면 `trial_reservation_exists:<session_id>` 예외를 던지고(라우트는 409),
+  예외 메시지에 **기존 세션 id를 담아** UI가 "이어서 하기" 링크를 만들 수 있게 합니다.
+  존재 확인과 삽입 사이의 경쟁은 **사용자 단위 `pg_advisory_xact_lock`**으로 닫습니다(부분 unique 인덱스는 기각 — 근거는 3.14.1절).
+  **테이블·컬럼·인덱스·마이그레이션 파일 수는 변경 없습니다**(17개 / 22개 / 14개). BYOK 세션은 예약 자체를 하지 않으므로 해당 없습니다.
 
 ---
 
@@ -37,15 +58,18 @@
 
 | 항목 | 결정 |
 |---|---|
-| 테이블 수 | 12개 (전부 RLS 활성화, 예외 없음) |
+| 테이블 수 | **17개** (전부 RLS 활성화, 예외 없음) |
 | 소유권 판별 | 최상위는 `user_id = auth.uid()`, 세션 하위는 부모 세션을 통한 `exists` 서브쿼리 |
 | 클라이언트 쓰기 | `documents` / `report_feedback` / `score_disputes` / `profiles`만 허용 |
-| 서버 전용 쓰기 | 세션 상태·질문·턴·이벤트·평가 계열 전부 (`service_role`, RLS 우회). 클라이언트 쓰기 정책을 **아예 만들지 않음** |
+| 서버 전용 쓰기 | 세션 상태·질문·턴·이벤트·평가 계열 전부 + **예약 원장 2개·키·감사 로그** (`service_role`, RLS 우회). 클라이언트 쓰기 정책을 **아예 만들지 않음** |
+| 클라이언트 읽기 차단 | `storage_cleanup_queue` · `ai_quota_ledger` · `ai_quota_reservations` · `user_api_keys` · `account_events` — **RLS 켜고 정책 0개** |
 | Storage | 비공개 버킷 `documents` 1개. 오디오 버킷 없음(음성 원본 미저장) |
 | Realtime | `interview_sessions` 1개 테이블만 |
-| 삭제 | 소프트 삭제 없음. FK CASCADE + Storage 정리 큐로 **실제 삭제** |
+| 삭제 | 소프트 삭제 없음. FK CASCADE + Storage 정리 큐 + **Vault 시크릿 파기 트리거**로 **실제 삭제** |
 | 문서-세션 관계 | **스냅샷**(D6). 세션은 `configuring → ready`에서 `documents.extracted_text`를 복사해 보관하며, 이후 원본 문서에 의존하지 않음 |
-| 인덱스 | 17개로 제한 (무료 티어 절약. 4절 트레이드오프 참조) |
+| 세션 재원 | `funding_source`(D28). `trial_shared`는 **예약 원장 + 동의 필수**, `byok`는 **둘 다 없음**(사용자 키로 돌기 때문) |
+| 사용자 키 | **Supabase Vault 암호화.** `public` 스키마에는 원문이 없고 끝 4자리(`key_last4`)만 있음 |
+| 인덱스 | **22개**로 제한 (무료 티어 절약. 4절 트레이드오프 참조) |
 
 ---
 
@@ -75,7 +99,28 @@ canceled
 user_requested
 rate_limited
 connection_lost
+byok_key_invalid
+byok_quota_exhausted
 ```
+
+> **`byok_key_invalid` · `byok_quota_exhausted`는 2026-09-10 신규 값입니다(D28).** 기존 3개는 의미가 바뀌지 않은 **순수 추가**입니다.
+> 두 값은 **우리 여력이 아니라 사용자 계정의 사정**을 가리키므로 `rate_limited`와 뭉치지 마세요.
+> `funding_source = 'byok'` 세션에서만 발생합니다(`01_state_machine.md` 2절·4.5절).
+
+### `interview_sessions.funding_source` (2026-09-10 신규 — D28)
+
+```
+trial_shared
+byok
+```
+
+| 값 | 의미 | 예약 원장(D27) | 동의(D29) | 사용하는 키 |
+|---|---|---|---|---|
+| `trial_shared` | 체험 세션. 서비스 공용 키로 진행 | **행이 생김** | **필요함** | 공용 키(서버 환경변수) |
+| `byok` | 사용자가 연결한 본인 키로 진행 | **행이 생기지 않음** | 불필요 | `user_api_keys`의 복호화된 키 |
+
+**세션 생성 시 확정되고 끝날 때까지 바뀌지 않습니다.** 이 불변성은 트리거로 DB가 강제합니다(3.3절) —
+사용자 키가 실패했다고 공용 키로 넘어가면 D29 동의 없는 데이터가 공용 경로로 나가기 때문입니다.
 
 ### `interview_sessions.modality` / `interview_sessions.current_modality` / `turns.modality`
 
@@ -125,6 +170,24 @@ score_disputes.reason_code    : transcription_error | misinterpreted | score_too
 storage_cleanup_queue.status  : pending | done | failed
 ```
 
+2026-09-10 추가분(D27·D28). 원본은 각각 `02_ai_architecture.md` 8.3절과 이 문서입니다.
+
+```
+ai_quota_ledger.model_bucket        : flash_lite | flash | pro        (원본: 02_ai_architecture.md 8.3.1절)
+ai_quota_reservations.model_bucket  : flash_lite | flash | pro        (〃)
+ai_quota_reservations.status        : held | released | overflow      (〃 8.3.2절)
+user_api_keys.provider              : google
+user_api_keys.status                : connected | invalid
+user_api_keys.last_failure_code     : auth_rejected | quota_exhausted | unknown
+account_events.event_name           : api_key_connected | api_key_replaced | api_key_disconnected
+                                    | api_key_marked_invalid | trial_consent_granted
+```
+
+`session_events.event_name`에 **값 3종이 추가**됩니다(D27, `02_ai_architecture.md` 8.3.9절):
+`quota_reserved` · `quota_released` · `quota_overflow`.
+**`event_name`에는 값 CHECK가 없고 길이 CHECK(1–64자)만 있으므로 스키마 변경이 없습니다**(3.6절).
+값 목록은 API 계약이 문서화합니다 — `failure_reason`과 같은 이유입니다(6.4절).
+
 `interview_sessions.failure_reason`은 상태 머신 전이 표에 등장하는 값들
 (`document_extraction_failed`, `evaluation_enqueue_failed`, `evaluation_failed`)을 포함하지만
 운영 중 새 사유가 늘어날 수 있어 **CHECK를 걸지 않고 자유 텍스트**로 둡니다. 근거는 6.4절.
@@ -164,6 +227,17 @@ interview_sessions ──self──► source_session_id (재시도 복제 원�
            score_disputes ◄─1:N─ evaluation_scores (score_id)
 
 storage_cleanup_queue  (독립 테이블. documents 삭제 트리거가 채움. 서버 전용)
+
+── 2026-09-10 추가분 (D27·D28·D29) ───────────────────────────────────────────
+
+profiles ──1:N──► user_api_keys (1:1 실질. PK = user_id)
+   │                   └── vault_secret_id ─▶ vault.secrets  (FK 아님. 삭제 트리거가 파기)
+   ├──1:N──► trial_consents ──0..1──► interview_sessions (session_id, on delete set null)
+   └──1:N──► account_events   (키 연결·교체·해제 감사. session_events를 오염시키지 않음)
+
+interview_sessions ──1:N──► ai_quota_reservations ──(quota_date, model_bucket)──► ai_quota_ledger
+                              ※ funding_source = 'trial_shared' 세션에만 행이 생깁니다(D28).
+                                ai_quota_ledger는 FK 없는 독립 카운터(하루 3행)입니다.
 ```
 
 **FK 삭제 규칙 요약**
@@ -180,6 +254,17 @@ storage_cleanup_queue  (독립 테이블. documents 삭제 트리거가 채움. 
 | `evaluation_scores.evaluation_id`, `evaluation_citations.score_id`, `score_disputes.score_id` | `cascade` |
 | `evaluation_citations.turn_id → turns.id` | `cascade` |
 | `score_disputes.citation_id → evaluation_citations.id` | `cascade` |
+| `user_api_keys.user_id → profiles.id` | `cascade` (+ `before delete` 트리거가 **Vault 시크릿을 파기**) |
+| `account_events.user_id → profiles.id` | `cascade` |
+| `trial_consents.user_id → profiles.id` | `cascade` |
+| `trial_consents.session_id → interview_sessions.id` | **`set null`** — 세션을 지워도 **동의 사실은 남아야 합니다**(아래) |
+| `ai_quota_reservations.session_id → interview_sessions.id` | `cascade` (+ `before delete` 트리거가 **원장에 여력을 반납**) |
+
+**`trial_consents.session_id`가 `set null`인 이유.** 동의는 "이 세션에 대한 동의"가 아니라
+**"이 사용자가 이 문구에 동의했다"**는 사실입니다. `cascade`로 두면 사용자가 체험 세션을 지우는 순간
+동의 기록이 함께 사라져, 우리가 그 이력서를 외부로 보냈다는 사실만 남고 **동의를 받았다는 증거가 없어집니다.**
+세션 삭제는 사용자의 데이터 삭제 요구이지 동의 사실의 취소가 아닙니다. NULL이 되는 것은
+"어느 세션이 이 동의를 유발했는가"라는 링크뿐입니다(`resume_document_id`와 같은 성격).
 
 **`resume_document_id` / `jd_document_id`의 `set null` 재검토 (2026-09-09 D6)**
 
@@ -215,10 +300,31 @@ storage_cleanup_queue  (독립 테이블. documents 삭제 트리거가 채움. 
 | `id` | uuid | PK, `references auth.users(id) on delete cascade` |
 | `display_name` | text | NULL 허용, `check (display_name is null or char_length(display_name) <= 60)` |
 | `default_job_role` | text | NULL 허용, `check (default_job_role is null or default_job_role in ('pm','pd','security','ai','engineer'))` |
+| `trial_consumed_at` | timestamptz | NULL 허용 — **2026-09-10 신규(D28).** 체험 1회 소진 시각 |
 | `created_at` | timestamptz | not null default now() |
 | `updated_at` | timestamptz | not null default now() |
 
 인덱스: PK만. (사용자당 1행이므로 추가 인덱스 불필요)
+
+**`trial_consumed_at` — 체험 소진을 파생시키지 않고 저장하는 이유** (2026-09-10 D28)
+
+`01_product_spec.md` 10절이 판단을 이쪽으로 넘겼습니다. 제품 판단은 확정돼 있습니다 —
+**답변한 주질문이 1개 이상이면 소진**이고, 그 전에 끝난 세션은 소진이 아닙니다. 남은 것은 저장 형태뿐입니다.
+
+| 후보 | 판정 |
+|---|---|
+| 파생(`funding_source='trial_shared'` 세션 중 답변된 주질문 ≥ 1인 것이 있는가) | **기각.** 이 문서는 **실제 삭제**를 씁니다(9절). 사용자가 체험 세션을 지우면 파생값이 되돌아가 **체험이 무한 재생성**됩니다. 게이트가 세션 삭제로 우회되는 것은 결함입니다. 게다가 판정마다 `interview_sessions ⋈ questions ⋈ turns` 3단 조인이 세션 생성 경로(#3)에 들어갑니다 |
+| **컬럼 저장(`profiles.trial_consumed_at`)** | **채택.** 세션과 수명이 분리돼 삭제로 흔들리지 않고, 게이트 판정이 `profiles` 1행 읽기로 끝납니다 |
+
+- **채우는 시점:** 체험 세션에서 **후보가 첫 주질문에 답한 턴이 저장되는 순간**, 같은 트랜잭션에서
+  `update profiles set trial_consumed_at = now() where id = ... and trial_consumed_at is null`.
+  `is null` 조건이 멱등성을 만듭니다(두 번째 답변이 시각을 덮어쓰지 않습니다).
+- **`boolean`이 아니라 `timestamptz`인 이유.** 언제 소진됐는지가 체험 정책을 되돌릴 때(6.5.8절: 체험 횟수 증설)
+  필요한 유일한 값입니다. 같은 저장 공간에 정보가 하나 더 들어갑니다.
+- **`trialStatus`(`available`/`consumed`)는 이 컬럼의 NULL 여부입니다.** 별도 상태 컬럼을 두지 않습니다.
+- 계정 삭제로 `profiles`가 사라지면 이 값도 사라집니다 — **재가입하면 체험이 다시 생깁니다.**
+  이것은 실제 삭제의 대가로 **감수합니다.** 막으려면 삭제된 계정의 식별자를 남겨야 하는데,
+  그건 브리프 7절의 실제 삭제 약속과 정면으로 충돌합니다(9.5절과 같은 판단).
 
 ### 3.2 `documents` — 이력서·JD
 
@@ -269,7 +375,8 @@ constraint documents_source_shape check (
 | `max_follow_up_depth` | int | not null default 4, `check (max_follow_up_depth between 0 and 8)` |
 | `max_turns` | int | not null default 20, `check (max_turns between 1 and 60)` |
 | `max_duration_min` | int | not null default 30, `check (max_duration_min between 1 and 120)` |
-| `pause_reason` | text | NULL 허용, `check (pause_reason is null or pause_reason in ('user_requested','rate_limited','connection_lost'))` |
+| `funding_source` | text | **not null**, `check (funding_source in ('trial_shared','byok'))` — **2026-09-10 신규(D28).** 기본값 없음 |
+| `pause_reason` | text | NULL 허용, **CHECK — 1절 5개 값**(2026-09-10 `byok_key_invalid`·`byok_quota_exhausted` 추가) |
 | `resumable_after` | timestamptz | NULL 허용 |
 | `failure_reason` | text | NULL 허용 (CHECK 없음 — 6.4절) |
 | `context_summary` | text | NULL 허용 |
@@ -305,6 +412,73 @@ constraint sessions_failure_reason_only_when_failed check (
 ),
 constraint sessions_no_self_source check (source_session_id is null or source_session_id <> id)
 ```
+
+**`pause_reason` CHECK (2026-09-10 D28 — 3개 → 5개. 1절에서 문자 단위 복사)**
+```sql
+constraint sessions_pause_reason_check check (
+  pause_reason is null or pause_reason in (
+    'user_requested',
+    'rate_limited',
+    'connection_lost',
+    'byok_key_invalid',
+    'byok_quota_exhausted'
+  )
+)
+```
+`sessions_pause_reason_only_when_paused`(위)는 **그대로**입니다 — 5개 값 전부 `status = 'paused'`일 때만 유효합니다.
+
+**`funding_source` — 신규 컬럼 (2026-09-10 D28)**
+
+| 항목 | 결정 |
+|---|---|
+| nullable | **아니오(not null).** 세션은 어느 키로 도는지 모르는 채로 존재할 수 없습니다 |
+| 기본값 | **없음.** `default 'trial_shared'`를 두지 않습니다 — 아래 |
+| CHECK | `in ('trial_shared','byok')` |
+| 인덱스 | **두지 않습니다.** 세션 목록은 항상 `user_id`로 좁힌 뒤 읽히고, 재원별 전역 집계 화면이 MVP에 없습니다 |
+| 변경 | **불가.** 트리거가 UPDATE를 막습니다(아래) |
+
+- **기본값을 두지 않는 이유가 가장 중요합니다.** `default 'trial_shared'`를 두면 재원을 정하지 않고 INSERT한
+  코드 경로가 조용히 **공용 키 세션**을 만듭니다. 그 세션은 D29 동의도, 예약도 없이 존재하게 되고,
+  사용자의 이력서가 동의 없이 공용 경로로 나갑니다. 기본값이 없으면 그런 INSERT는 **not null 위반으로 즉시 실패**합니다.
+  값의 원본은 전이 #3의 재원 분기(`01_state_machine.md` 2절)뿐이어야 합니다.
+- **`byok`가 기본값이 아닌 이유도 같습니다.** 키가 없는 사용자의 세션이 `byok`로 만들어지면 준비 단계에서
+  키 복호화에 실패해 `configuring`에 갇힙니다.
+
+**재원 규칙 트리거 — 불변성과 동의를 DB가 보증합니다**
+
+두 규칙 모두 **여러 행에 걸친 조건**이라 CHECK로 표현할 수 없습니다(전자는 OLD/NEW 비교, 후자는 다른 테이블 조회).
+
+```sql
+create function public.enforce_session_funding_rules() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  -- (1) 재원 불변: 세션이 시작된 뒤 공용 ↔ 사용자 키를 갈아타지 못한다 (D28·D29)
+  if tg_op = 'UPDATE' and new.funding_source is distinct from old.funding_source then
+    raise exception 'funding_source is immutable (session %)', old.id;
+  end if;
+
+  -- (2) 체험 세션은 동의 없이 ready 이후로 갈 수 없다 (D29)
+  if new.funding_source = 'trial_shared'
+     and new.status not in ('created','configuring','canceled','failed')
+     and not exists (select 1 from public.trial_consents c where c.user_id = new.user_id) then
+    raise exception 'trial consent required before ready (session %)', new.id;
+  end if;
+
+  return new;
+end $$;
+
+create trigger trg_sessions_funding_rules
+  before insert or update on public.interview_sessions
+  for each row execute function public.enforce_session_funding_rules();
+```
+
+- **면제 상태 4개는 `sessions_snapshot_required_after_ready`와 같은 목록**입니다(`created`·`configuring`·`canceled`·`failed`).
+  같은 이유입니다 — 준비 전이고, `canceled`는 어디서든 오며, `failed`는 준비 실패 경로로 도달할 수 있습니다.
+  목록이 어긋나면 동의를 받았는데도 실패 세션이 상태를 못 바꾸는 사고가 납니다(6.4절과 같은 종류).
+- **트리거가 검사하는 것은 "동의 행이 있는가"까지입니다.** "**현재** 문구 버전에 동의했는가"는
+  현재 버전이 애플리케이션 상수라 DB가 알 수 없으므로 **서버 가드의 책임**입니다(3.16절·13.4절 R9).
+  DB는 마지막 방어선이지 유일한 방어선이 아닙니다.
+- `byok` 세션은 이 검사를 전혀 타지 않습니다 — 동의 화면 자체가 없습니다(`01_product_spec.md` 6.5.4절).
 
 **스냅샷 컬럼 (2026-09-09 D6 — 잠정값 "참조만"을 뒤집음)**
 
@@ -479,11 +653,36 @@ constraint turns_correction_shape check (
 | `detail` | jsonb | NULL 허용 |
 | `occurred_at` | timestamptz | not null default now() |
 
+**`to_status` 값 규약 (2026-09-10, QA F6·G6 — `05_api_contract.md` 4.5절이 원본).**
+`session_events`에는 상태 전이가 아닌 이벤트도 들어옵니다(`score_card_viewed`, D27이 추가한
+`quota_reserved` / `quota_released` / `quota_overflow` 등 총 8종). `to_status`가 not null이므로
+**비전이 이벤트는 `from_status = to_status = 그 시점 세션의 `status`** 로 채웁니다.
+채우는 주체는 `#22 POST .../events` 라우트이며, 소유권 확인용으로 이미 읽는 세션 행에서 가져오므로
+DB 왕복이 늘지 않습니다. **고정 상태 값을 하드코딩하지 마세요.**
+nullable 완화는 하지 않습니다 — 지표 1·2 쿼리에 `is not null` 누락 위험을 새로 만들기 때문입니다.
+대신 **지표 쿼리는 반드시 `event_name`으로 먼저 필터**합니다.
+
 `from_status` / `to_status`에도 `interview_sessions.status`와 **같은 11개 값 CHECK**를 겁니다
 (`from_status is null or from_status in (...)`). 지표 1·2가 이 로그로 계산되므로 오타 한 글자가 지표를 망칩니다.
 
 인덱스: `idx_session_events_session_time (session_id, occurred_at)`.
 `event_name = 'score_card_viewed'`(지표 5의 분모)는 이 인덱스로 세션 범위를 좁힌 뒤 필터링합니다. 전용 인덱스는 두지 않습니다.
+
+**2026-09-10 `event_name` 값 3종 추가 (D27 — `02_ai_architecture.md` 8.3.9절)**
+
+| `event_name` | 언제 | `detail` |
+|---|---|---|
+| `quota_reserved` | #6 `prepare`의 예약 성공 | `{ "buckets": {"pro":3,"flash":4,"flash_lite":26}, "quotaDate": "2026-09-10" }` |
+| `quota_released` | 반납 시(완주·정산·취소·포기·실패·만료) | `{ "buckets": {...}, "reason": "completed\|settled\|canceled\|abandoned\|failed\|expired" }` |
+| `quota_overflow` | `consumed_calls > reserved_calls` 발생 | `{ "bucket": "flash_lite", "reserved": 26, "consumed": 27 }` |
+
+- **스키마 변경이 없습니다.** `event_name`에는 값 CHECK가 없고 길이 CHECK(1–64자)만 있습니다.
+  값 목록을 CHECK로 고정하지 않는 이유는 `failure_reason`과 같습니다(6.4절) — 관측 이벤트가 늘 때마다
+  마이그레이션이 필요해지고, 값이 CHECK를 어기면 **이벤트 기록 실패가 상태 전이 트랜잭션을 통째로 되돌립니다.**
+- **이 3종은 `funding_source = 'trial_shared'` 세션에서만 나옵니다.** BYOK 세션에는 예약 자체가 없습니다.
+- **키 연결·교체·해제는 여기 남기지 않습니다.** `account_events`(3.17절)로 갑니다 —
+  `session_events`는 지표 1·2의 원천 테이블이라 세션과 무관한 행으로 오염시키지 않습니다
+  (`01_product_spec.md` 6.5.7절 6항).
 
 ### 3.7 `evaluations`
 
@@ -718,6 +917,345 @@ create trigger trg_documents_cleanup
 이 테이블은 사용자 데이터(파일 경로 = 개인정보)를 담으므로 **RLS를 켜되 정책을 하나도 만들지 않습니다.**
 `authenticated`/`anon`은 어떤 행도 읽거나 쓸 수 없고, `service_role`만 RLS를 우회해 접근합니다.
 
+### 3.13 `ai_quota_ledger` — 그날·그 버킷의 원자적 카운터 (D27, 서버 전용)
+
+명세 원본은 `02_ai_architecture.md` 8.3.2절·13.6.1절입니다. **그대로 구현합니다.**
+
+| 컬럼 | 타입 | 제약 |
+|---|---|---|
+| `quota_date` | date | not null, **복합 PK 1**. 프로바이더 리셋 시각 기준 날짜(`AI_QUOTA_RESET_TIMEZONE`) |
+| `model_bucket` | text | not null, **복합 PK 2**, `check (model_bucket in ('flash_lite','flash','pro'))` |
+| `limit_calls` | int | not null, `check (limit_calls >= 0)` — **그날 유효한도의 스냅샷** |
+| `held_calls` | int | not null default 0, `check (held_calls >= 0)` — 현재 예약 보유 총량. **이 값만 원자적으로 증감** |
+| `granted_total` | int | not null default 0, `check (granted_total >= 0)` — 그날 누적 승인량(관측용, 감소 없음) |
+| `denied_count` | int | not null default 0, `check (denied_count >= 0)` — 그날 거절 횟수. **0이 아니면 정원 < 실수요 신호** |
+| `created_at` / `updated_at` | timestamptz | not null default now() (`set_updated_at()` 트리거) |
+
+- **하루 3행**입니다(버킷 3개). PK가 곧 조회 인덱스이므로 **추가 인덱스 없음.**
+- **`limit_calls`를 행 생성 시점에 박는 것이 핵심입니다.** DB는 환경변수를 읽을 수 없으므로
+  애플리케이션이 `floor(AI_RPD_LIMIT_<BUCKET> × (1 − AI_QUOTA_SAFETY_MARGIN_PCT/100))`을 계산해
+  예약 함수의 `p_limits jsonb` 인자로 넘깁니다. 하루 도중 환경변수를 바꿔도 **그날의 판정은 흔들리지 않습니다.**
+- 여력 조회는 이 3행만 읽습니다: `select model_bucket, limit_calls, held_calls, limit_calls - held_calls as available from public.ai_quota_ledger where quota_date = $1;`
+- **RLS 켜고 정책 0개.** 사용자가 자기 예약을 직접 읽을 이유가 없고, 읽히면 **서비스 전체 여력이 노출**됩니다.
+  게다가 이 숫자는 UI 금칙어("한도"·"쿼터")를 그대로 드러냅니다(`01_product_spec.md` 6.5.5절).
+
+### 3.14 `ai_quota_reservations` — 세션별 보유분과 반납 근거 (D27, 서버 전용)
+
+| 컬럼 | 타입 | 제약 |
+|---|---|---|
+| `id` | uuid | PK default `gen_random_uuid()` |
+| `session_id` | uuid | not null, → `interview_sessions(id) on delete cascade` |
+| `model_bucket` | text | not null, `check (model_bucket in ('flash_lite','flash','pro'))` |
+| `quota_date` | date | not null — 예약이 잡힌 날. 원장 행과 같은 값 |
+| `reserved_calls` | int | not null default 0, `check (reserved_calls >= 0)` |
+| `consumed_calls` | int | not null default 0, `check (consumed_calls >= 0)` — **상한 CHECK 금지**(초과가 곧 관측 신호) |
+| `released_calls` | int | not null default 0, `check (released_calls >= 0)` |
+| `status` | text | not null default `'held'`, `check (status in ('held','released','overflow'))` |
+| `created_at` / `updated_at` | timestamptz | not null default now() (`set_updated_at()` 트리거) |
+
+```sql
+unique (session_id, model_bucket)   -- 멱등 재예약의 근거. 세션이 같은 버킷을 두 번 잡지 못한다
+create index idx_quota_res_held on public.ai_quota_reservations (quota_date) where status = 'held';
+```
+
+- **`consumed_calls`에 `<= reserved_calls` CHECK를 걸지 않습니다.** 8.3.2절의 명시적 지시입니다.
+  초과는 막아야 할 사고가 아니라 **예약량이 실사용보다 작다는 관측 신호**이고, CHECK를 걸면
+  그 순간 AI 호출 직전의 `consume`이 예외를 던져 **면접이 통째로 끊깁니다.** 관측하려던 것이 장애가 됩니다.
+- **`funding_source = 'trial_shared'` 세션만 행을 가집니다**(D28). BYOK 세션에서 이 테이블에 행이 생기면
+  사용자의 키로 도는 세션이 공용 여력을 갉아먹는 것이므로, `reserve_session_quota()`가
+  **세션의 재원을 확인해 `byok`이면 예외를 던집니다**(아래).
+- **한 사용자는 동시에 `held` 예약을 한 세션만 가집니다**(D30). `trial_consumed_at`은 첫 주질문 응답 시 기록되는데
+  예약은 `prepare`에서 잡히므로, 그 틈에 세션을 여러 개 만들고 `prepare`만 반복하면 **실제 체험은 0회인데
+  `pro` 3 × N개를 동시에 점유**할 수 있습니다. `pro` 버킷이 체험 정원을 결정하므로 **한 사용자가 그날 전체 정원을 잠급니다.**
+  악의가 없어도 탭을 몇 개 열어두면 발생합니다. 강제 지점은 `reserve_session_quota()`입니다(아래).
+- **RLS 켜고 정책 0개.** 3.13절과 같은 이유입니다.
+
+#### 3.14.1 함수 3종 — 전부 `security definer`, `set search_path = public`
+
+세 함수 모두 **`revoke execute ... from public, anon, authenticated`** 하고 `service_role`에만 grant합니다.
+`security definer` 함수를 `authenticated`가 실행할 수 있으면 RLS 0개 정책이 무의미해집니다.
+
+| 함수 | 시그니처 | 하는 일 |
+|---|---|---|
+| `reserve_session_quota` | `(p_session_id uuid, p_quota_date date, p_request jsonb, p_limits jsonb) returns table(model_bucket text, granted int, held_after int, limit_calls int)` | 진입부에서 **① 재원 가드**(BYOK 거절) → **② 동시 예약 가드**(D30, 사용자당 `held` 세션 1개) → 그다음 **버킷 처리 순서 `pro → flash → flash_lite` 고정**(희소한 것 먼저 + 데드락 회피). 버킷마다 ① 원장 행을 `p_limits`의 값으로 `on conflict do nothing` 생성 → ② 기존 예약이 있으면 목표치와의 **차이만** 산출(멱등) → ③ 조건부 UPDATE(`held_calls + n <= limit_calls`) → 0행이면 `raise exception 'quota_exhausted:<bucket>'`으로 **전체 롤백** → ④ 예약 행 upsert(unique 충돌 시 top-up, `status='released'`였으면 `held`로 되돌림) |
+| `release_session_quota` | `(p_session_id uuid, p_buckets text[] default null, p_reason text default 'settled') returns table(model_bucket text, released int)` | `status='held'` 행마다 `released := greatest(reserved_calls - consumed_calls, 0)`, 원장 `held_calls := greatest(held_calls - released, 0)`, 행을 `released`로. `p_buckets`가 null이면 전체 |
+| `consume_session_quota` | `(p_session_id uuid, p_bucket text, p_n int default 1) returns int` | 예약 행의 `consumed_calls += n`. **행이 없으면** `reserved_calls=0, consumed_calls=n, status='overflow'`로 삽입하고 원장 `held_calls`를 **조건 없이** `+n`(한도 초과를 허용해야 다음 예약이 정확히 막힙니다) |
+
+**`reserve_session_quota`의 재원 가드 (D28로 추가되는 유일한 델타)**
+
+함수 진입부에서 세션의 재원을 확인하고, `byok`이면 **예외를 던져 행을 만들지 않습니다.**
+
+```sql
+select funding_source into v_funding from public.interview_sessions where id = p_session_id;
+if v_funding is null then raise exception 'session not found: %', p_session_id; end if;
+if v_funding <> 'trial_shared' then raise exception 'quota_not_applicable:%', v_funding; end if;
+```
+
+- **왜 라우트 분기만으로 충분하지 않은가.** 게이트를 `funding_source = 'trial_shared'`일 때만 호출하는 것은
+  `vercel-platform-engineer`의 책임이지만(`01_product_spec.md` 10절), 그 분기를 한 곳이라도 빠뜨리면
+  BYOK 사용자가 **자기 키로 돌면서 공용 정원을 먹습니다.** 증상이 없어(면접은 정상 진행) 발견되지 않고,
+  체험 사용자들이 조용히 거절당합니다. DB에서 막으면 그 버그는 즉시 예외로 드러납니다.
+- `consume_session_quota`도 같은 확인을 하고 **`byok`이면 아무것도 하지 않고 0을 반환**합니다.
+  여기서는 예외를 던지지 않습니다 — 이 함수는 **AI 호출 직전 경로**에 있어서, 예외를 던지면
+  분기 실수가 곧 면접 중단이 됩니다. 예약은 막고(사전), 소비는 흘려보냅니다(사후).
+- **이 델타는 `02_ai_architecture.md` 13.6.1절 원문에 없습니다.** D28이 D27보다 나중에 확정됐기 때문입니다.
+  12절로 `ai-interview-architect`·`vercel-platform-engineer`에게 전달합니다.
+
+**`reserve_session_quota`의 동시 예약 가드 (2026-09-10 D30)**
+
+재원 가드 **직후, 버킷 루프 이전**에 놓습니다. 같은 사용자에게 **다른 세션의 `held` 예약**이 하나라도 있으면
+예외를 던져 **어떤 버킷도 잡지 않습니다.** 재원 가드가 세션의 user_id를 함께 읽도록 한 줄 넓힙니다.
+
+```sql
+-- 재원 가드 (D28) — user_id를 함께 읽는다
+select user_id, funding_source into v_user_id, v_funding
+  from public.interview_sessions where id = p_session_id;
+if v_funding is null then raise exception 'session not found: %', p_session_id; end if;
+if v_funding <> 'trial_shared' then raise exception 'quota_not_applicable:%', v_funding; end if;
+
+-- 동시 예약 가드 (D30) — 확인과 삽입 사이의 경쟁을 사용자 단위로 직렬화한다
+perform pg_advisory_xact_lock(hashtextextended('trial_quota_reservation:' || v_user_id::text, 0));
+
+select r.session_id into v_existing_session_id
+  from public.ai_quota_reservations r
+  join public.interview_sessions s on s.id = r.session_id
+ where s.user_id = v_user_id
+   and r.status = 'held'
+   and r.session_id <> p_session_id      -- 같은 세션의 멱등 재예약(top-up)은 통과시킨다
+ limit 1;
+
+if v_existing_session_id is not null then
+  raise exception 'trial_reservation_exists:%', v_existing_session_id
+    using errcode = 'P0001',
+          hint = 'resume or cancel the existing session first';
+end if;
+```
+
+- **예외 이름과 담는 정보.** 메시지는 `trial_reservation_exists:<existing_session_id>`입니다.
+  기존 예외 2종(`quota_exhausted:<bucket>`·`quota_not_applicable:<funding_source>`)과 **같은 `이름:값` 형식**이므로
+  라우트는 `:` 앞을 코드로, 뒤를 값으로 파싱하는 기존 경로를 그대로 씁니다.
+  `05_api_contract.md`가 이 코드를 **409**로 매핑하고, 콜론 뒤 세션 id를 응답에 실어 UI가 **"이어서 하기" 링크**를 만듭니다.
+  이 값은 **같은 사용자의 세션 id**이므로 노출해도 다른 사용자의 정보가 새지 않습니다.
+- **왜 라우트가 아니라 DB인가.** 라우트에서 "held 예약이 있나?"를 먼저 조회하고 없으면 예약하는 방식은
+  **두 요청이 같은 순간에 조회하면 둘 다 통과**합니다. 탭 두 개가 동시에 `prepare`를 치는 것이 정확히 이 상황이고,
+  이 결함은 부하가 있을 때만 나타나 테스트로 잡히지 않습니다. BYOK 세션의 원장 행을 함수가 막는 것과 같은 이유입니다.
+- **경쟁 차단 방식 — 트랜잭션 범위 advisory lock.** 잠금 키는 **사용자 id 해시**입니다. 같은 사용자의 두 번째
+  `reserve_session_quota` 호출은 첫 번째 트랜잭션이 커밋/롤백할 때까지 대기하고, 그 뒤 조회는 커밋된 행을 보므로
+  READ COMMITTED에서도 **확인–삽입 사이에 틈이 없습니다.** 잠금은 트랜잭션 종료 시 자동 해제되고
+  **사용자별로 갈라지므로** 다른 사용자의 예약을 막지 않습니다. 첫 번째가 롤백되면(예: `quota_exhausted`)
+  두 번째는 정상 통과합니다 — 롤백된 예약 행은 보이지 않기 때문입니다.
+- **부분 unique 인덱스는 기각합니다.** 후보는 `unique (user_id) where status = 'held'`인데 두 가지가 걸립니다.
+  ① `ai_quota_reservations`에 `user_id`가 없어 **세션에서 비정규화한 컬럼을 새로 두고** 항상 세션과 일치시켜야 합니다.
+  ② 한 세션은 버킷마다 행을 하나씩(최대 3행) 가지므로 `(user_id)` 단독 unique는 **정상 예약 자체를 깨뜨립니다.**
+  `(user_id, model_bucket)`으로 넓히면 깨지지는 않지만, **두 세션이 서로 겹치지 않는 버킷 집합을 요청하면 통과**해
+  구멍이 남습니다. advisory lock은 버킷 구성과 무관하게 막고 **컬럼도 인덱스도 늘리지 않습니다**(4절 22개 유지).
+- **조회 비용.** `status = 'held'` 행은 서비스 전체에서 사용자당 최대 1세션분이라 매우 적습니다.
+  플래너는 `idx_quota_res_held`(부분 인덱스)로 held 행을 좁히거나 `idx_sessions_user_created`로 사용자의 세션을 좁힌 뒤
+  `unique (session_id, model_bucket)`을 탐침합니다. **신규 인덱스는 필요 없습니다.**
+- **BYOK 세션에는 해당 없습니다.** 재원 가드에서 이미 걸러져 이 지점에 도달하지 않습니다(예약 자체를 하지 않음).
+- **취소·정상 종료가 곧 해제입니다.** `release_session_quota()`가 행을 `released`로 바꾸고 삭제는 트리거가 반납하므로,
+  이전 세션을 취소하면 다음 예약이 즉시 통과합니다. 별도의 해제 경로를 새로 만들지 않습니다.
+
+#### 3.14.2 `before delete` 트리거 — **없으면 삭제가 여력을 영구히 먹습니다**
+
+`interview_sessions` 삭제는 CASCADE로 예약 행을 지웁니다. 행만 사라지고 원장의 `held_calls`가 그대로면
+**그 여력은 그날 안에 영영 돌아오지 않습니다.** 계정 삭제(#31)에서는 한 사용자의 모든 세션이 한 번에 샙니다.
+
+```sql
+create function public.release_quota_before_delete() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v_release int;
+begin
+  if old.status = 'held' then
+    v_release := greatest(old.reserved_calls - old.consumed_calls, 0);
+    if v_release > 0 then
+      update public.ai_quota_ledger
+         set held_calls = greatest(held_calls - v_release, 0),
+             updated_at = now()
+       where quota_date = old.quota_date and model_bucket = old.model_bucket;
+    end if;
+  end if;
+  return old;
+end $$;
+
+create trigger trg_quota_release_on_delete
+  before delete on public.ai_quota_reservations
+  for each row execute function public.release_quota_before_delete();
+```
+
+- **라우트가 반납을 잊어도 DB가 보증합니다.** 반납 호출 지점은 6곳이고(8.3.4절), 하나라도 빠지면 새는데
+  그 누수는 **로그에 아무 흔적을 남기지 않습니다.** 이 트리거가 마지막 방어선입니다.
+- `status = 'released'` 행은 이미 반납됐으므로 건드리지 않습니다. **이중 반납이 더 나쁩니다** —
+  있지도 않은 여력을 다음 사용자에게 팔게 되고, 그 사용자는 면접 도중에 한도에 부딪힙니다.
+- `greatest(..., 0)`가 양쪽에 있는 이유: `consumed > reserved`인 overflow 행과 원장 하한을 동시에 방어합니다.
+- 세션 삭제(9.1절)·계정 삭제(9.3절) 모두 이 경로를 탑니다.
+
+### 3.15 `user_api_keys` — 사용자 Gemini API 키 (D28, Supabase Vault 암호화)
+
+**타인의 자격증명을 보관하는 유일한 테이블입니다.** `01_product_spec.md` 6.5.7절의 6개 요구사항을
+스키마·정책 수준에서 강제하는 것이 이 절의 목적입니다.
+
+| 컬럼 | 타입 | 제약 |
+|---|---|---|
+| `user_id` | uuid | **PK**, → `profiles(id) on delete cascade` — 사용자당 1개(1:1) |
+| `provider` | text | not null default `'google'`, `check (provider in ('google'))` |
+| `vault_secret_id` | uuid | not null **unique** — `vault.secrets(id)`를 가리키는 핸들. **FK는 걸지 않습니다**(아래) |
+| `key_last4` | text | not null, `check (key_last4 ~ '^[A-Za-z0-9_-]{4}$')` — **정확히 4자**. 마스킹 표시용 |
+| `status` | text | not null default `'connected'`, `check (status in ('connected','invalid'))` |
+| `last_verified_at` | timestamptz | NULL 허용 — 마지막으로 **유효 확인에 성공한** 시각 |
+| `last_failure_code` | text | NULL 허용, `check (last_failure_code is null or last_failure_code in ('auth_rejected','quota_exhausted','unknown'))` |
+| `last_failure_at` | timestamptz | NULL 허용 |
+| `created_at` / `updated_at` | timestamptz | not null default now() |
+
+```sql
+constraint user_api_keys_status_shape check (
+  (status = 'connected') or (last_failure_code is not null)
+)
+```
+`invalid`인데 사유가 없으면 사용자에게 무엇을 고치라고 말할 수 없습니다(6.5.6절의 3분류 안내가 이 값으로 갈립니다).
+
+**키 원문이 클라이언트로 나가는 경로가 없음 — 5중 강제**
+
+| # | 강제 지점 | 내용 |
+|---|---|---|
+| 1 | **스키마** | `public` 스키마 어디에도 키 원문 컬럼이 **존재하지 않습니다.** 원문은 `vault.secrets`의 암호문뿐입니다. 실수로 반환할 컬럼이 없으면 실수할 수 없습니다 |
+| 2 | **CHECK** | `key_last4`가 정규식으로 **정확히 4자**로 고정됩니다. "마스킹 컬럼에 전체 키가 들어가는" 가장 흔한 사고를 DB가 거부합니다 |
+| 3 | **RLS** | 테이블 **RLS 켜고 정책 0개.** `authenticated`/`anon`은 `vault_secret_id`라는 **핸들조차** 읽을 수 없습니다 |
+| 4 | **스키마 노출** | `vault` 스키마를 PostgREST 노출 스키마 목록에 **넣지 않습니다.** `vault.decrypted_secrets` 뷰는 `service_role`만 읽습니다 |
+| 5 | **함수 권한** | 접근자 함수 2종에 `revoke execute from public, anon, authenticated`. 복호화 경로는 서버 코드 한 곳뿐입니다 |
+
+```sql
+-- 저장(연결·교체): 원문은 인자로만 지나가고 어디에도 남지 않는다
+create function public.set_user_api_key(p_user_id uuid, p_key text, p_last4 text)
+  returns void language plpgsql security definer set search_path = public, vault as $$
+declare v_old uuid; v_new uuid;
+begin
+  select vault_secret_id into v_old from public.user_api_keys where user_id = p_user_id;
+  v_new := vault.create_secret(p_key, 'user_api_key:' || p_user_id::text || ':' || extract(epoch from now())::bigint,
+                               'Gemini API key (BYOK)');
+  insert into public.user_api_keys (user_id, vault_secret_id, key_last4, status,
+                                    last_verified_at, last_failure_code, last_failure_at)
+  values (p_user_id, v_new, p_last4, 'connected', now(), null, null)
+  on conflict (user_id) do update
+     set vault_secret_id = excluded.vault_secret_id, key_last4 = excluded.key_last4,
+         status = 'connected', last_verified_at = now(),
+         last_failure_code = null, last_failure_at = null, updated_at = now();
+  if v_old is not null then delete from vault.secrets where id = v_old; end if;  -- 교체 = 옛 암호문 파기
+end $$;
+
+-- 복호화(서버 전용): 이 함수 외에 원문을 얻는 경로가 없다
+create function public.get_user_api_key(p_user_id uuid) returns text
+  language sql security definer set search_path = public, vault stable as $$
+  select s.decrypted_secret from public.user_api_keys k
+    join vault.decrypted_secrets s on s.id = k.vault_secret_id
+   where k.user_id = p_user_id and k.status = 'connected';
+$$;
+
+revoke execute on function public.set_user_api_key(uuid, text, text) from public, anon, authenticated;
+revoke execute on function public.get_user_api_key(uuid)            from public, anon, authenticated;
+grant  execute on function public.set_user_api_key(uuid, text, text) to service_role;
+grant  execute on function public.get_user_api_key(uuid)             to service_role;
+```
+
+- **"수정"은 조회 후 편집이 아니라 전체 교체입니다**(6.5.7절 2항). 위 함수에 읽기 경로가 없는 이유입니다.
+- **`vault.secrets`에 FK를 걸지 않는 이유.** `vault`는 확장이 소유한 스키마이고, 크로스 스키마 FK는
+  `service_role`의 참조 권한과 Supabase의 Vault 구현 변경에 묶입니다. 정합성은 FK가 아니라
+  **삭제 트리거와 `set_user_api_key`의 트랜잭션**이 지킵니다. 대신 `unique (vault_secret_id)`로
+  두 사용자가 같은 시크릿을 가리키는 상태를 막습니다.
+
+**삭제 트리거 — 실제 삭제를 보증합니다 (D28 4항)**
+
+```sql
+create function public.purge_user_api_key_secret() returns trigger
+language plpgsql security definer set search_path = public, vault as $$
+begin
+  delete from vault.secrets where id = old.vault_secret_id;
+  return old;
+end $$;
+
+create trigger trg_user_api_keys_purge_secret
+  before delete on public.user_api_keys
+  for each row execute function public.purge_user_api_key_secret();
+```
+
+**이 트리거가 없으면 계정을 삭제해도 암호문이 `vault.secrets`에 영원히 남습니다.** CASCADE는
+`public.user_api_keys` 행만 지우고 `vault`는 건드리지 않습니다 — 핸들을 잃은 암호문은 **아무도 지울 수 없는
+타인의 자격증명**이 됩니다. 브리프 7절의 실제 삭제 약속과 D28 4항을 정면으로 어깁니다.
+`storage_cleanup_queue`가 Storage에 대해 하는 일을 이 트리거가 Vault에 대해 합니다.
+
+**운영 컬럼 3종을 두는 판단** (`last_verified_at` / `last_failure_code` / `last_failure_at`)
+
+| 컬럼 | 두는 이유 |
+|---|---|
+| `last_verified_at` | `configuring → ready` 가드가 **키 유효성 확인**을 요구합니다(`01_state_machine.md` 2절). 매번 프로바이더에 확인 호출을 보내면 **사용자 키의 한도를 우리가 갉아먹습니다.** 최근 확인 시각이 있으면 짧은 유예 안에서는 확인을 건너뛸 수 있습니다 |
+| `last_failure_code` | 6.5.6절이 사용자에게 보여줄 문구를 **3분류로 나눕니다**(인증 거절 / 사용자 한도 / 그 외). 그 분기 값이 남아 있어야 `/settings/api-key`를 다시 열었을 때 같은 안내를 보여줄 수 있습니다 |
+| `last_failure_at` | 실패가 방금 일인지 지난주 일인지에 따라 안내가 달라집니다. `last_failure_code`만 있으면 고친 뒤에도 옛 오류가 남아 보입니다 |
+
+- **정규화된 코드만 저장합니다.** 프로바이더의 원본 오류 메시지를 넣지 않습니다 —
+  오류 본문에 요청 헤더나 키 일부가 섞여 들어오는 경로가 실제로 존재하고, 그러면 6.5.7절 5항이 깨집니다.
+  `text` 자유 서술 컬럼(`last_error` 등)을 **의도적으로 두지 않았습니다.**
+- 성공 횟수·호출 수 같은 사용량 컬럼은 두지 않습니다. **사용자 키의 사용량은 우리 관심사가 아니고**(6.5.6절),
+  그 숫자를 보관하는 순간 사용자 계정을 관측하는 제품이 됩니다.
+
+### 3.16 `trial_consents` — 체험 세션 데이터 처리 동의 (D29)
+
+`01_product_spec.md` 6.5.4절의 요구는 셋입니다 — **(a) 누가, (b) 언제, (c) 어떤 문구 버전에** 동의했는가.
+여기에 **문구 해시**를 하나 더 둡니다.
+
+| 컬럼 | 타입 | 제약 |
+|---|---|---|
+| `id` | uuid | PK |
+| `user_id` | uuid | not null, → `profiles(id) on delete cascade` — **(a)** |
+| `granted_at` | timestamptz | not null default now() — **(b)** |
+| `consent_version` | text | not null, `check (char_length(consent_version) between 1 and 20)` — **(c)** 예: `'1.0.0'` |
+| `consent_text_sha256` | text | not null, `check (consent_text_sha256 ~ '^[0-9a-f]{64}$')` — 동의한 **문구 원문의 해시** |
+| `session_id` | uuid | NULL 허용, → `interview_sessions(id) on delete set null` — 이 동의를 유발한 세션(2절) |
+
+```sql
+unique (user_id, consent_version)   -- 같은 버전에 두 번 동의하지 않는다. 멱등 기록의 충돌 키
+```
+
+- **버전만으로는 부족해서 해시를 함께 둡니다.** 버전은 사람이 올리기로 한 **약속**이고, 약속은 깨집니다 —
+  문구를 고치면서 버전을 안 올리면 과거 동의 기록이 **지금은 존재하지 않는 문장**을 가리키게 되고,
+  그 사실을 아무도 알 수 없습니다. 해시는 DB가 확인할 수 있는 **사실**입니다.
+  "무엇에 동의했는가"를 물었을 때 대답할 수 있어야 한다는 것이 D29의 요구입니다.
+  - 해시 대상은 **화면에 렌더된 문구 원문 전체**(공백 정규화 후)이며, 계산은 서버가 합니다.
+  - 문구 원문 자체는 저장하지 않습니다 — 버전당 한 문장인데 사용자 수만큼 복사되고,
+    원문의 원본은 애플리케이션 상수 한 곳이어야 합니다(`ai_contract_version`과 같은 원칙, 3.7절).
+- **`unique (user_id, consent_version)`이 재동의를 표현합니다.** 문구가 바뀌면 버전이 올라가고,
+  사용자는 새 버전에 대해 **새 행**을 만듭니다. 과거 행은 과거 문구를 가리킨 채 남습니다. UPDATE하지 않습니다.
+- **철회 컬럼(`revoked_at`)을 두지 않습니다.** MVP에 동의 철회 화면이 없고(`01_product_spec.md`),
+  아무도 채우지 않는 컬럼은 "철회가 처리되고 있다"는 잘못된 인상을 줍니다(3.11절과 같은 판단).
+  체험은 1회뿐이고, 그 다음부터는 BYOK라 동의 자체가 불필요해집니다.
+- **IP·User-Agent를 수집하지 않습니다.** 동의의 증거로 흔히 쓰이지만 D29가 요구한 것은 셋뿐이고,
+  개인정보를 지키자는 결정에서 개인정보를 더 모으는 것은 앞뒤가 맞지 않습니다.
+- **RLS:** `select`는 **본인 행만 허용**합니다(사용자가 자기가 언제 무엇에 동의했는지 볼 수 있어야 합니다).
+  `insert`/`update`/`delete` 정책은 **만들지 않습니다** — 동의 기록은 서버 라우트만 씁니다.
+  클라이언트 INSERT를 허용하면 동의 화면을 거치지 않고 행을 만들어 게이트를 우회할 수 있습니다.
+
+인덱스: `unique (user_id, consent_version)`가 조회를 겸합니다(가드는 `user_id`로만 좁힙니다). 추가 인덱스 없음.
+
+### 3.17 `account_events` — 키 수명주기 감사 로그 (D28, 서버 전용)
+
+`01_product_spec.md` 6.5.7절 6항이 **`session_events`에 남기지 말 것**을 명시했습니다.
+`session_events`는 지표 1·2의 원천이고 `session_id`가 not null이라, 세션 없는 계정 사건이 들어갈 자리도 없습니다.
+
+| 컬럼 | 타입 | 제약 |
+|---|---|---|
+| `id` | uuid | PK |
+| `user_id` | uuid | not null, → `profiles(id) on delete cascade` |
+| `event_name` | text | not null, `check (event_name in ('api_key_connected','api_key_replaced','api_key_disconnected','api_key_marked_invalid','trial_consent_granted'))` |
+| `detail` | jsonb | NULL 허용 — **키 원문·`vault_secret_id` 금지.** 허용값은 `key_last4`·`provider`·정규화된 실패 코드뿐 |
+| `occurred_at` | timestamptz | not null default now() |
+
+- **여기만 값 CHECK를 겁니다.** `session_events.event_name`과 반대 판단인데, 이유가 있습니다 —
+  이 로그는 관측 지표가 아니라 **보안 감사**이고, 값의 종류가 5개로 닫혀 있으며, 기록 실패가
+  상태 전이 트랜잭션을 되돌리지 않습니다(키 라우트는 자기 트랜잭션 안에서만 씁니다).
+- **RLS 켜고 정책 0개.** 사용자가 읽을 이유가 없고, 운영자가 `service_role`로 봅니다.
+- 인덱스: `idx_account_events_user_time (user_id, occurred_at)`.
+- **계정을 삭제하면 이 로그도 함께 사라집니다**(CASCADE). 실제 삭제 원칙이 감사 로그보다 우선합니다 —
+  9.5절에서 지표 집계 테이블을 두지 않기로 한 것과 같은 판단입니다.
+
 ---
 
 ## 4. 인덱스 총목록과 무료 티어 트레이드오프
@@ -741,8 +1279,25 @@ create trigger trg_documents_cleanup
 | 15 | score_disputes | `uq_disputes_axis`, `uq_disputes_citation` | 중복 제기 방지 |
 | 16 | score_disputes | `idx_disputes_session (session_id)` | RLS·리포트 |
 | 17 | storage_cleanup_queue | `idx_cleanup_pending (enqueued_at) where status = 'pending'` | 스위퍼 |
+| 18 | ai_quota_reservations | `unique (session_id, model_bucket)` | 멱등 재예약 + 세션별 예약 조회 |
+| 19 | ai_quota_reservations | `idx_quota_res_held (quota_date) where status = 'held'` | 크론 만료 스윕 |
+| 20 | user_api_keys | `unique (vault_secret_id)` | 시크릿 중복 참조 방지 |
+| 21 | trial_consents | `unique (user_id, consent_version)` | 버전당 1건 + 동의 가드 조회 |
+| 22 | account_events | `idx_account_events_user_time (user_id, occurred_at)` | 키 수명주기 감사 |
 
-PK를 제외하고 **17개**입니다(unique 제약이 만드는 인덱스 포함).
+PK를 제외하고 **22개**입니다(unique 제약이 만드는 인덱스 포함). 2026-09-10 D27·D28·D29로 5개 늘었습니다.
+
+**신규 5개에 대한 판단**
+- **`ai_quota_ledger`에는 인덱스를 두지 않습니다.** 복합 PK `(quota_date, model_bucket)`가 곧 조회 인덱스이고,
+  테이블 전체가 **하루 3행**입니다. 이 테이블은 크기가 아니라 **행 잠금 경합**만이 관심사입니다.
+- `idx_quota_res_held`는 **부분 인덱스**입니다. 정산이 끝난 행(`released`)이 대다수가 되므로,
+  전체 인덱스로 두면 세션 수에 비례해 커지는데 스윕이 보는 것은 `held` 행뿐입니다.
+- `user_api_keys`·`trial_consents`는 **사용자당 각 1행·버전당 1행** 규모라 unique 인덱스 하나로 끝납니다.
+  `user_api_keys`의 PK가 `user_id`이므로 "내 키 조회"에 별도 인덱스가 필요 없습니다.
+- `account_events`만 사용자당 여러 행이 쌓이지만, 키 연결·교체·해제는 **사용자 생애 몇 건** 수준입니다.
+  `(user_id, occurred_at)` 하나로 조회와 정렬을 함께 처리합니다.
+- **`interview_sessions.funding_source`에는 인덱스를 두지 않습니다**(3.3절). 재원별 전역 집계 화면이 MVP에 없고,
+  세션 목록은 언제나 `idx_sessions_user_created`로 먼저 좁혀집니다.
 
 **절약한 것과 그 대가**
 - `turns.question_id`, `evaluation_citations.turn_id`, `score_disputes.score_id`에 **전용 인덱스를 두지 않았습니다.**
@@ -768,7 +1323,7 @@ PK를 제외하고 **17개**입니다(unique 제약이 만드는 인덱스 포�
 
 ### 5.1 원칙
 
-1. **12개 테이블 전부 `enable row level security`.** 예외 없음. 테이블 생성·RLS 활성화·정책 생성은 **같은 마이그레이션 파일**에 넣어, 정책 없는 창이 생기지 않게 합니다.
+1. **17개 테이블 전부 `enable row level security`.** 예외 없음. 테이블 생성·RLS 활성화·정책 생성은 **같은 마이그레이션 파일**에 넣어, 정책 없는 창이 생기지 않게 합니다.
 2. `auth.uid()`는 항상 `(select auth.uid())`로 감싸 행마다 재평가되지 않게 합니다.
 3. **쓰기 경계:** 상태 머신이 지배하는 데이터(세션 상태·질문·턴·이벤트·평가 계열)는 **클라이언트 쓰기 정책을 아예 만들지 않습니다.**
    정책이 없으면 `authenticated`/`anon`의 INSERT·UPDATE·DELETE는 전부 거부되고, 서버의 `service_role`만 RLS를 우회해 씁니다.
@@ -818,6 +1373,12 @@ exists (
 | `score_disputes` | insert | authenticated | — | `(select auth.uid()) = user_id and OWNS_SESSION(session_id)` |
 | `score_disputes` | update/delete | — | 정책 없음(제기 후 수정·철회는 MVP 밖) | — |
 | `storage_cleanup_queue` | 전부 | — | **정책 없음 — RLS 켜고 전면 차단. `service_role`만 접근** | — |
+| `ai_quota_ledger` | 전부 | — | **정책 없음 — 전면 차단**(읽히면 서비스 전체 여력이 노출) | — |
+| `ai_quota_reservations` | 전부 | — | **정책 없음 — 전면 차단** | — |
+| `user_api_keys` | 전부 | — | **정책 없음 — 전면 차단.** 핸들(`vault_secret_id`)조차 클라이언트에 닿지 않음 | — |
+| `account_events` | 전부 | — | **정책 없음 — 전면 차단**(보안 감사 로그) | — |
+| `trial_consents` | select | authenticated | `(select auth.uid()) = user_id` | — |
+| `trial_consents` | insert/update/delete | — | **정책 없음 — 서버 전용**(클라이언트 INSERT를 허용하면 동의 화면을 거치지 않고 게이트를 우회) | — |
 
 `report_feedback`·`score_disputes`의 insert에서 `user_id` 확인과 `OWNS_SESSION` 확인을 **둘 다** 겁니다.
 전자만 걸면 남의 세션에 자기 `user_id`로 피드백을 다는 것을 막지 못해 지표 4·5가 오염됩니다.
@@ -895,11 +1456,23 @@ create policy "score_disputes_insert_own" on public.score_disputes
 
 -- storage_cleanup_queue : RLS 켜고 정책 0개 = 전면 차단
 alter table public.storage_cleanup_queue enable row level security;
+
+-- 2026-09-10 추가분 (D27·D28·D29)
+-- 서버 전용 4종 : RLS 켜고 정책 0개 = 전면 차단
+alter table public.ai_quota_ledger       enable row level security;
+alter table public.ai_quota_reservations enable row level security;
+alter table public.user_api_keys         enable row level security;
+alter table public.account_events        enable row level security;
+
+-- trial_consents : 본인 행 읽기만 허용. 쓰기는 서버(service_role)
+alter table public.trial_consents enable row level security;
+create policy "trial_consents_select_own" on public.trial_consents
+  for select to authenticated using ((select auth.uid()) = user_id);
 ```
 
 ### 5.4 RLS 활성화 확인 쿼리 (QA·CI용)
 
-정책 누락은 눈으로 못 잡습니다. 다음 두 쿼리가 **0행**이어야 합니다.
+정책 누락은 눈으로 못 잡습니다. 다음 쿼리들이 **0행**이어야 합니다(2026-09-10 세 번째 쿼리 추가).
 
 ```sql
 -- (1) RLS가 꺼진 public 테이블
@@ -908,17 +1481,46 @@ from pg_class c join pg_namespace n on n.oid = c.relnamespace
 where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity = false;
 
 -- (2) RLS는 켰지만 select 정책이 하나도 없는 테이블
---     (storage_cleanup_queue는 의도적 예외이므로 제외)
+--     (서버 전용 5개는 의도적 예외이므로 제외)
 select c.relname
 from pg_class c join pg_namespace n on n.oid = c.relnamespace
 where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity = true
-  and c.relname <> 'storage_cleanup_queue'
+  and c.relname not in (
+        'storage_cleanup_queue',
+        'ai_quota_ledger', 'ai_quota_reservations',   -- 2026-09-10 D27
+        'user_api_keys', 'account_events'             -- 2026-09-10 D28
+      )
   and not exists (select 1 from pg_policies p
                   where p.schemaname = 'public' and p.tablename = c.relname
                     and p.cmd in ('SELECT','ALL'));
 ```
 
-`qa-inspector`에게 이 두 쿼리를 회귀 검사 항목으로 넘깁니다.
+**(1)번 쿼리는 고칠 필요가 없습니다 — 신규 5개 테이블도 그대로 잡습니다.** 새 테이블에 RLS를 켜는 것을
+잊으면 즉시 1행이 나옵니다. 이것이 이 쿼리를 테이블 이름 목록이 아니라 **카탈로그 전수 조회**로 쓴 이유입니다.
+
+**(2)번 쿼리만 예외 목록을 늘렸습니다**(1개 → 5개). 예외가 늘어난다는 것은 위험 신호이므로 규칙을 못박습니다.
+
+- 예외에 들어갈 수 있는 것은 **`service_role`만 접근하는 테이블**뿐입니다. 판별 기준은 하나입니다 —
+  "이 테이블의 행을 사용자에게 보여주는 화면이 있는가". 없으면 정책 0개, 있으면 select 정책이 필요합니다.
+- **예외 목록을 늘릴 때는 이 문서 5.2절 표에 근거를 함께 적습니다.** 목록만 늘어나면
+  "정책을 깜빡한 테이블"과 "의도적으로 차단한 테이블"이 구분되지 않고, 그 순간 이 쿼리는 아무것도 잡지 못합니다.
+- **`trial_consents`는 예외가 아닙니다** — select 정책이 있으므로 쿼리를 그냥 통과합니다.
+
+**신규 검사 1개 — `security definer` 함수의 실행 권한** (D28. 정책 0개만으로는 부족합니다)
+
+```sql
+-- 아래는 0행이어야 합니다: 키 접근자 함수를 anon/authenticated가 실행할 수 있으면 RLS 차단이 무의미해집니다
+select p.proname, r.rolname
+from pg_proc p
+join pg_namespace n on n.oid = p.pronamespace
+cross join (values ('anon'), ('authenticated')) as r(rolname)
+where n.nspname = 'public'
+  and p.proname in ('get_user_api_key', 'set_user_api_key',
+                    'reserve_session_quota', 'release_session_quota', 'consume_session_quota')
+  and has_function_privilege(r.rolname, p.oid, 'EXECUTE');
+```
+
+`qa-inspector`에게 이 **세 쿼리**를 회귀 검사 항목으로 넘깁니다.
 
 ---
 
@@ -1153,8 +1755,19 @@ Realtime 테이블을 1개로 묶는 것은 무료 티어의 동시 연결·메�
        report_feedback
        evaluations → evaluation_scores → evaluation_citations
        evaluation_scores → score_disputes
+       ai_quota_reservations   ← 2026-09-10 D27. before delete 트리거가 원장에 여력을 반납한 뒤 삭제
 3. Storage 정리 없음 — documents는 삭제되지 않음
+4. trial_consents.session_id는 NULL이 됨 — 동의 사실은 남습니다(2절)
+5. profiles.trial_consumed_at은 되돌리지 않습니다 — 체험 소진은 세션이 아니라 계정의 사실입니다(3.1절)
 ```
+
+**2026-09-10 D27·D28·D29로 이 경로에 3가지가 추가됐습니다.**
+
+| 대상 | 동작 | 왜 이 동작인가 |
+|---|---|---|
+| `ai_quota_reservations` | **CASCADE + 트리거 반납** | 행만 지우면 원장의 `held_calls`가 남아 **그 여력이 그날 안에 돌아오지 않습니다**(3.14.2절). 라우트가 먼저 `release_session_quota()`를 부르든 안 부르든 결과가 같습니다 |
+| `trial_consents` | **`set null`** (행 유지) | 동의 사실은 세션의 속성이 아니라 계정의 사실입니다. 세션 삭제로 동의 기록이 사라지면 "동의 없이 데이터를 보냈다"와 구분되지 않습니다(2절) |
+| `profiles.trial_consumed_at` | **손대지 않음** | 되돌리면 체험 세션을 지우는 것만으로 체험이 무한 재생성됩니다(3.1절) |
 
 **`documents`는 함께 지우지 않습니다.** 다른 세션이 같은 이력서를 참조할 수 있고, "같은 이력서로 다시 하기"(지표 3)의
 전제이기 때문입니다(`01_domain_model.md` 4절). 세션 삭제는 Storage를 건드리지 않습니다.
@@ -1202,6 +1815,11 @@ CASCADE만으로 전부 사라지는지는 위 FK 표가 보장합니다. 어떤
 사용자는 설정 화면에서 다른 문서를 고르면 되고, 스키마가 막아야 할 상황이 아닙니다.
 UI 경고에서 이 세션들은 "설정 중인 세션 N건에서 이력서를 다시 골라야 합니다"로 따로 셉니다.
 
+**2026-09-10 — 이 경로는 D27·D28·D29의 영향을 받지 않습니다.** 문서 삭제는 `documents` 행 하나와
+Storage 객체 하나를 지울 뿐이고, 예약·키·동의 어느 것과도 FK로 연결돼 있지 않습니다.
+특히 **문서를 지워도 예약이 반납되지 않습니다** — 세션은 그대로 살아 있고(스냅샷으로 계속 진행 가능),
+반납은 세션이 끝날 때 일어납니다. 이 경로에서 원장을 건드리면 **진행 중인 면접의 여력을 빼앗게 됩니다.**
+
 ### 9.3 경로 3 — 계정 삭제 (`/settings/account`)
 
 ```
@@ -1213,13 +1831,34 @@ UI 경고에서 이 세션들은 "설정 중인 세션 N건에서 이력서를 �
    └ auth.users 삭제 → profiles CASCADE
        → documents CASCADE (트리거가 남은 경로를 큐에 넣어 2단계 누락분을 보정)
        → interview_sessions CASCADE → 세션 하위 전부
+                                    → ai_quota_reservations (트리거가 원장에 여력 반납)   ← D27
        → report_feedback / score_disputes CASCADE
+       → user_api_keys CASCADE (트리거가 vault.secrets의 암호문을 파기)                  ← D28
+       → trial_consents CASCADE  (session_id의 set null보다 user_id의 cascade가 우선)     ← D29
+       → account_events CASCADE
 4. 스위퍼가 큐의 잔여분을 처리
 5. storage_cleanup_queue의 done 행은 30일 후 삭제(운영 로그 보존)
 ```
 
 **2단계와 3단계의 이중 안전장치가 핵심입니다.** Storage 삭제가 실패해도 트리거가 큐에 남기므로
 파일이 조용히 남는 일이 없습니다. 반대로 큐 처리가 실패해도 2단계에서 대부분 이미 지워져 있습니다.
+
+**2026-09-10 D28 — 계정 삭제가 지워야 할 것이 하나 늘었습니다: 타인의 자격증명.**
+
+`public.user_api_keys` 행은 CASCADE로 사라지지만, **키의 암호문은 `vault.secrets`에 있고 CASCADE가 닿지 않습니다.**
+`trg_user_api_keys_purge_secret`(3.15절)이 삭제 직전에 시크릿을 파기합니다.
+
+- **이 트리거가 없으면 핸들을 잃은 암호문이 영원히 남습니다.** 어느 사용자 것인지 알 방법도 사라지므로
+  나중에 정리할 수도 없습니다. 브리프 7절의 실제 삭제 약속과 D28 4항을 동시에 어깁니다.
+- `storage_cleanup_queue`와 달리 **큐를 쓰지 않고 같은 트랜잭션에서 즉시 지웁니다.** Vault는 외부 API가 아니라
+  같은 데이터베이스의 테이블이라 실패하면 삭제 자체가 롤백되고, 부분 삭제 상태가 생기지 않습니다.
+- **키 해제("연결 끊기")도 같은 경로입니다.** `delete from public.user_api_keys where user_id = ...` 한 줄이고,
+  같은 트리거가 암호문을 파기합니다. 소프트 삭제(`status='disconnected'`)를 두지 않은 이유가 여기 있습니다 —
+  "연결을 끊었는데 서버에 키가 남아 있는" 상태를 만들지 않기 위해서입니다.
+- **키 교체도 옛 암호문을 남기지 않습니다.** `set_user_api_key()`가 새 시크릿을 만든 뒤
+  같은 트랜잭션에서 옛 시크릿을 지웁니다(3.15절).
+- **`account_events`는 계정과 함께 사라집니다.** 감사 로그를 남기고 싶은 유혹이 있지만,
+  삭제된 계정의 흔적을 남기는 것은 9.5절에서 지표 집계 테이블을 기각한 것과 같은 이유로 기각합니다.
 
 ### 9.4 스위퍼 (Storage 정리 워커)
 
@@ -1237,7 +1876,8 @@ UI 경고에서 이 세션들은 "설정 중인 세션 N건에서 이력서를 �
 
 - "실제 삭제"는 브리프 7절의 확정 제약입니다. `session_id`를 해시로 익명화하더라도 **사용자가 지운 세션의 흔적이
   남는 것**은 그 약속과 어긋납니다. 지표는 아직 베이스라인 수집 단계라 정확도보다 원칙이 우선합니다.
-- 따라서 이 문서의 테이블 수는 **12개 그대로**이고, `session_metrics_archive` 류의 13번째 테이블은 없습니다.
+- 따라서 삭제 지표용 집계 테이블은 없습니다(`session_metrics_archive` 류). **이 판단은 2026-09-10 조정 뒤에도 그대로입니다** —
+  테이블이 12개에서 17개로 늘었지만 늘어난 5개는 예약·키·동의·감사이지 **삭제된 세션의 흔적이 아닙니다.**
   삭제 트리거도 늘어나지 않습니다(세션 삭제 시 다른 테이블에 무언가를 남기는 경로가 하나도 없습니다).
 - **대가:** 지표 1(완주율)·2(리포트 도달률)·3(재도전율)의 분모가 삭제로 줄어듭니다.
   특히 "면접이 잘 안 풀린 세션일수록 지우기 쉽다"면 완주율이 **실제보다 높게** 나옵니다 —
@@ -1264,9 +1904,21 @@ UI 경고에서 이 세션들은 "설정 중인 세션 N건에서 이력서를 �
 | 9 | `20260909000900_storage_bucket_and_policies.sql` | `documents` 버킷 생성 + `storage.objects` 정책 4개 |
 | 10 | `20260909001000_storage_cleanup_queue.sql` | `storage_cleanup_queue` + RLS(정책 0개) + `enqueue_storage_cleanup()` 트리거 |
 | 11 | `20260909001100_realtime_publication.sql` | `supabase_realtime`에 `interview_sessions` 추가 |
+| **12** | `20260910000100_ai_quota.sql` | **D27.** `ai_quota_ledger`, `ai_quota_reservations` + CHECK + RLS(정책 0개) + unique·부분 인덱스 + 함수 3종(+`revoke/grant`) + `trg_quota_release_on_delete` |
+| **13** | `20260910000200_trial_consents_and_funding_rules.sql` | **D29.** `trial_consents` + RLS + select 정책 + unique 인덱스, 그리고 `enforce_session_funding_rules()` + `trg_sessions_funding_rules`(대상 테이블은 `interview_sessions`) |
+| **14** | `20260910000300_user_api_keys_and_account_events.sql` | **D28.** Vault 확장 확인, `user_api_keys` + CHECK + RLS(정책 0개) + `set_user_api_key()`·`get_user_api_key()`(+`revoke/grant`) + `trg_user_api_keys_purge_secret`, `account_events` + RLS(정책 0개) + 인덱스 |
 
-**파일 개수는 11개 그대로입니다.** D6·D7·D8·D9·D10 어느 것도 새 테이블·새 트리거·새 인덱스를 부르지 않고,
-D8은 SQL이 아니라 프로젝트 설정입니다(6.1절).
+**파일 개수는 11개 → 14개입니다.** 2026-09-10 D27·D28·D29가 **새 테이블 5개를 부르므로 새 파일이 맞습니다**
+(아래 "흡수 규칙"은 **기존 테이블의 컬럼 추가**에 대한 것이고, 새 테이블에는 적용되지 않습니다 —
+`02_ai_architecture.md` 13.6.1절도 같은 판단입니다). 기존 11개 파일 중 손대는 것은 **#4 하나뿐**입니다.
+
+**#13의 트리거가 #4가 아니라 #13에 있는 이유.** `enforce_session_funding_rules()`는 `trial_consents`를 조회합니다.
+#4 시점에는 그 테이블이 없으므로 트리거 생성이 실패합니다. **함수·트리거는 참조하는 테이블이 전부 생긴 뒤에** 붙입니다.
+컬럼(`funding_source`)과 CHECK는 #4에, 그 컬럼을 검사하는 트리거는 #13에 있는 이 분리는 의도적입니다.
+
+**#12·#13·#14의 상호 의존.** #12는 `interview_sessions`만(재원 가드가 `funding_source`를 읽습니다),
+#13은 `interview_sessions`·`profiles`, #14는 `profiles`와 `vault`만 참조합니다.
+셋 사이에는 의존이 없으므로 **순서를 바꿔도 적용됩니다.** 위 번호는 관례일 뿐입니다.
 
 **2026-09-09 리더 조정 3 — 변경분은 별도 ALTER 마이그레이션이 아니라 위 CREATE TABLE 파일에 흡수합니다.**
 
@@ -1280,6 +1932,16 @@ D8은 SQL이 아니라 프로젝트 설정입니다(6.1절).
 | `evaluations.coach_payload` / `ai_contract_version` / `provider` | #7 | `create table`의 컬럼 목록 + `coach_payload` 오브젝트 CHECK |
 | `evaluation_scores.improvement` not null 해제 | #7 | `create table`에서 `not null`을 쓰지 않고 길이 CHECK만 부여 |
 | **(2차) `interview_sessions.resume_text_snapshot` / `jd_text_snapshot`** (D6) | **#4** | `create table`의 컬럼 목록 + 길이 CHECK 2개 + `sessions_snapshot_required_after_ready` 제약 |
+| **(3차) `interview_sessions.funding_source`** (D28) | **#4** | `create table`의 컬럼 목록 + not null + `check (funding_source in ('trial_shared','byok'))`. **기본값 없음** |
+| **(3차) `interview_sessions.pause_reason` CHECK 3개 → 5개** (D28) | **#4** | `create table`의 `sessions_pause_reason_check`를 **처음부터 5개 값으로** 씀. `sessions_pause_reason_only_when_paused`는 그대로 |
+| **(3차) `profiles.trial_consumed_at`** (D28) | **#2** | `create table`의 컬럼 목록. 제약 없음(nullable timestamptz) |
+
+**3차 조정도 같은 규칙입니다** (2026-09-10 D27·D28·D29). 아직 어떤 마이그레이션도 원격에 적용하지 않았으므로
+`ALTER TABLE public.interview_sessions ADD COLUMN funding_source ...`나
+`DROP CONSTRAINT sessions_pause_reason_check` → `ADD CONSTRAINT`를 **만들지 않습니다.**
+`pause_reason`이 3개 값이었던 스키마는 실제로 존재한 적이 없고, `funding_source` 없는 세션 테이블도 마찬가지입니다.
+**단, 신규 테이블 5개는 흡수 대상이 아닙니다** — 기존 파일에 넣을 자리가 없고(FK 순서상 뒤여야 하고),
+`02_ai_architecture.md` 13.6.1절이 새 파일을 지정했습니다.
 
 **2차 조정도 같은 규칙을 따릅니다** (2026-09-09 D6). 아직 어떤 마이그레이션도 원격에 적용하지 않았으므로
 `ALTER TABLE public.interview_sessions ADD COLUMN resume_text_snapshot ...` 파일을 **만들지 않습니다.**
@@ -1295,7 +1957,9 @@ D6은 "컬럼을 나중에 붙인 것"이 아니라 **"처음부터 스냅샷 �
 - 순서는 FK 의존성을 따릅니다(2 → 3 → 4 → 5·6·7 → 8).
 - **이미 적용된 마이그레이션 파일은 절대 수정하지 않습니다.** 변경은 새 파일로 추가합니다.
 - 파괴적 변경(컬럼 삭제, 타입 변경)은 실행 전 리더에게 확인을 받습니다.
-- 적용 확인: 마이그레이션 후 5.4절의 두 쿼리를 실행해 0행인지 검사합니다.
+- 적용 확인: 마이그레이션 후 5.4절의 **세 쿼리**(RLS 미활성 / select 정책 누락 / 함수 실행 권한)를 실행해 0행인지 검사합니다.
+- **`vault` 확장은 Supabase 프로젝트에 기본 활성화되어 있습니다.** #14는 `create extension if not exists supabase_vault with schema vault;`로
+  존재만 확인하고, `vault` 스키마를 **PostgREST 노출 스키마 목록에 추가하지 않습니다**(5.4절 3중 방어의 4번).
 
 ---
 
@@ -1335,7 +1999,7 @@ API 라우트 응답   : camelCase    (sessionId, createdAt, mainQuestionBudget)
 | 대상 | 전달 내용 |
 |---|---|
 | `vercel-platform-engineer` | 테이블·컬럼명은 이 문서 3절이 확정본. 타입 경로 `src/lib/supabase/database.types.ts`. **세션·질문·턴·이벤트·평가 계열은 클라이언트 쓰기 정책이 없으므로 반드시 서버 라우트 + `admin.ts`로 써야 합니다.** 삭제 라우트 3종(세션/문서/계정)이 필요합니다 |
-| `qa-inspector` | 12개 테이블 전부 RLS 활성화. 5.4절 두 쿼리를 회귀 검사에 넣어 주세요. DB CHECK로 강제하지 못하는 **4가지**(질문 depth=부모+1, 축당 인용 최소 1건, 인용문이 실제 부분 문자열인지, **`is_insufficient_evidence = true`인 축에 인용이 0건인지** — 13.3절 R1)는 서버 책임이므로 별도 검증이 필요합니다 |
+| `qa-inspector` | (2026-09-10 기준 **17개**) 테이블 전부 RLS 활성화. 5.4절 쿼리를 회귀 검사에 넣어 주세요. DB CHECK로 강제하지 못하는 **4가지**(질문 depth=부모+1, 축당 인용 최소 1건, 인용문이 실제 부분 문자열인지, **`is_insufficient_evidence = true`인 축에 인용이 0건인지** — 13.3절 R1)는 서버 책임이므로 별도 검증이 필요합니다 |
 | `ai-interview-architect` | 평가 출력 저장 구조는 3.7–3.9절. 인용은 축당 1–3건, `quote_text` 20–160자, `quote_start`/`quote_end` 오프셋 필수, 근거 부족은 `score = NULL` + `is_insufficient_evidence = true`. 8절 대조 결과 참조 |
 | `voice-pipeline-engineer` | **오디오 저장 경로가 없습니다.** `turns.transcript_text`(not null)가 정본, `transcript_raw`에 STT 원문, `stt_confidence`는 0–1 numeric |
 | `shadcn-ui-engineer` | Realtime 구독은 `interview_sessions` 한 테이블, `id=eq.{sessionId}` 필터. Storage 다운로드는 서명 URL만 |
@@ -1347,6 +2011,9 @@ API 라우트 응답   : camelCase    (sessionId, createdAt, mainQuestionBudget)
 | `shadcn-ui-engineer` (2차 / **D6**) | `/documents` **삭제 경고 문구를 바꿔야 합니다.** 문서를 지워도 **과거 세션의 리포트·전사·질문 근거는 그대로 남습니다**(9.2절). 잃는 것은 원본 파일 열람·재추출·"같은 이력서로 다시 하기" 묶음뿐입니다. "과거 리포트가 손상된다"는 취지의 문구는 이제 사실이 아닙니다. 단 `created`/`configuring` 상태 세션은 이력서를 다시 골라야 하므로 따로 셉니다 |
 | `shadcn-ui-engineer` (2차 / **D8**) | 회원가입 화면에 **입력한 이메일을 다시 확인하라는 안내 문구**를 두세요. 확인 메일이 없어 오타 주소로 가입하면 계정 복구 경로가 없습니다(6.1절). 이메일 재입력 필드는 두지 마세요 |
 | `qa-inspector` (2차) | 새 회귀 항목 2개: (1) `configuring → ready` 이후 `resume_text_snapshot`/`jd_text_snapshot`이 채워지는지, (2) 원본 `documents` 행을 지운 뒤에도 과거 세션의 리포트 조회가 온전한지. DB CHECK가 강제하는 부분(`ready` 이후 스냅샷 not null)은 `sessions_snapshot_required_after_ready`가 잡지만, **복사된 내용이 실제 원본과 같은지는 스키마가 보지 못합니다** |
+| `vercel-platform-engineer` (**D30**) | `reserve_session_quota`가 **`trial_reservation_exists:<session_id>`** 예외를 새로 던집니다(3.14.1절). **409**로 매핑하고, 콜론 뒤 세션 id를 응답에 실어 주세요 — UI가 "이어서 하기" 링크에 씁니다. 라우트에 사전 조회를 두지 마세요(동시 요청에서 새고, DB가 이미 막습니다). **같은 세션의 재호출은 통과**하므로 `prepare` 재시도는 그대로 동작합니다. 이전 세션 취소 → 반납 → 재예약 경로가 사용자에게 유일한 해소 수단이므로, 취소 라우트의 `release_session_quota()` 호출을 반드시 유지하세요 |
+| `shadcn-ui-engineer` (**D30**) | 체험 사용자가 두 번째 세션을 `prepare`하면 409가 옵니다. **에러가 아니라 선택지로 보여 주세요** — "이어서 하기"(응답의 세션 id로 이동)와 "이전 세션 취소하고 새로 시작"입니다. 문구에 "한도"·"쿼터"를 쓰지 마세요(`01_product_spec.md` 6.5.5절 금칙어) |
+| `qa-inspector` (**D30**) | 회귀 항목 2개: (1) 같은 사용자가 두 세션의 `prepare`를 **동시에** 쳤을 때 정확히 하나만 성공하고 `ai_quota_ledger.held_calls`가 한 세션분만 늘어나는지, (2) 같은 세션의 `prepare` 재호출은 여전히 멱등하게 통과하는지 |
 | `ai-interview-architect` (2차 / **D1**) | 총점 계산은 서버 책임이며 **`score = NULL`인 축(`is_insufficient_evidence = true`)은 가중치 합 `W`에서 제외**합니다 — 아래 참조 |
 
 ### 12.1 총점 가중치와 저장 구조의 정합 (2026-09-09 **D1**)
@@ -1386,6 +2053,23 @@ if len(scored) == 0:  overall_score = NULL,  evaluations.status = 'succeeded'
   리포트에서 "이 축은 근거가 부족했다"를 보여줄 수 없고, `unique (evaluation_id, axis)` 5행 전제도 깨집니다.
 - **UI는 총점 옆에 몇 개 축이 반영됐는지 함께 보여야 합니다.** 5축 중 2축만 채점된 총점 4.5와
   5축 전부 채점된 4.5는 같은 숫자가 아닙니다. 이 정보는 `score is null` 행 수로 세면 됩니다 — 별도 컬럼을 두지 않습니다.
+
+---
+
+### 12.2 3차 전달 — D27·D28·D29 (2026-09-10)
+
+| 대상 | 전달 내용 |
+|---|---|
+| **전원 (스키마 변경 공지)** | **테이블 12개 → 17개, 인덱스 17개 → 22개, 마이그레이션 11개 → 14개.** 신규: `ai_quota_ledger`·`ai_quota_reservations`·`user_api_keys`·`trial_consents`·`account_events`. 기존 테이블 변경은 **`interview_sessions`에 `funding_source` 추가 + `pause_reason` 5개 값**, **`profiles`에 `trial_consumed_at` 추가** 셋뿐이며 **다른 컬럼은 이름·타입 모두 그대로입니다.** `status` 11개는 변경 없습니다 |
+| `vercel-platform-engineer` (**D27**) | 예약 함수 3종은 **`service_role`로만 호출 가능**합니다(`anon`/`authenticated`에서 `revoke`). `reserve_session_quota`의 시그니처가 13.6.1절과 다릅니다 — **`p_limits jsonb` 인자가 하나 더 있습니다**(DB가 환경변수를 읽을 수 없어, 그날 원장 행에 박을 `limit_calls`를 애플리케이션이 계산해 넘겨야 합니다. `02_ai_architecture.md` 13.6.1절 마지막 문단의 지시대로입니다). 반납 호출 6지점(8.3.4절)을 빠뜨려도 삭제 경로는 트리거가 보증하지만, **정상 종료 경로의 반납은 라우트 책임입니다** — 빠뜨리면 그날 정원이 조용히 줄어듭니다 |
+| `vercel-platform-engineer` (**D28**) | 게이트·예약·소비 호출은 **`funding_source = 'trial_shared'`일 때만**입니다. 실수를 대비해 `reserve_session_quota()`가 `byok` 세션이면 `quota_not_applicable:byok` 예외를 던지고, `consume_session_quota()`는 조용히 0을 반환합니다(3.14.1절). **키 원문은 `get_user_api_key()`(service_role 전용)로만 얻습니다.** 어떤 API 응답에도 키 필드를 두지 마세요 — 노출 가능한 값은 `key_last4`·`status`·`last_verified_at`뿐입니다. 키 저장은 `set_user_api_key(user_id, key, last4)` 한 번이며, **교체는 조회 후 편집이 아니라 전체 교체**입니다 |
+| `vercel-platform-engineer` (**D29**) | 동의 기록 라우트는 `trial_consents`에 **`(user_id, consent_version)` upsert**로 씁니다(같은 버전 재동의는 멱등). `consent_text_sha256`은 **화면에 렌더된 문구 원문(공백 정규화 후)의 SHA-256 hex**입니다 — 서버가 계산합니다. **DB 트리거는 "동의 행이 존재하는가"까지만 검사합니다.** "**현재** 버전에 동의했는가"는 라우트 가드의 책임이고, 없으면 **409**입니다(`01_product_spec.md` 10절) |
+| `vercel-platform-engineer` (신규 컬럼) | `interview_sessions.funding_source`는 **not null + 기본값 없음**입니다. 세션 INSERT에서 이 값을 빠뜨리면 **행이 만들어지지 않습니다**(의도적입니다 — 3.3절). 세션 UPDATE로 이 값을 바꾸려 하면 트리거가 예외를 던집니다. 체험 소진 기록은 **체험 세션에서 후보가 첫 주질문에 답한 턴을 저장하는 트랜잭션 안에서** `update profiles set trial_consumed_at = now() ... where trial_consumed_at is null`입니다(3.1절) |
+| `ai-interview-architect` | **13.6.1절 명세를 그대로 구현했습니다.** 델타는 둘입니다 — (1) `reserve_session_quota`에 `p_limits jsonb` 인자 추가(같은 절의 지시를 시그니처로 옮긴 것), (2) **재원 가드**(`byok` 세션은 예약 행을 만들지 않음, D28). 8.3절 본문 수정이 필요하면 그쪽 문서에서 판단해 주세요 — 이 문서는 `02_*`를 고치지 않습니다 |
+| `qa-inspector` | **17개 테이블 전부 RLS 활성화.** 5.4절이 **두 쿼리 → 세 쿼리**가 됐습니다(함수 실행 권한 검사 추가). 신규 회귀 항목 5개: (1) `funding_source='byok'` 세션에 `ai_quota_reservations` 행이 생기지 않는지, (2) 동의 없이 체험 세션이 `ready`로 가지 않는지, (3) 세션·계정 삭제 후 `ai_quota_ledger.held_calls`가 정확히 되돌아오는지, (4) 계정 삭제 후 `vault.secrets`에 해당 시크릿이 남지 않는지, (5) 어떤 API 응답에도 키 원문이 없는지(**응답 본문 전수 grep**) |
+| `shadcn-ui-engineer` | 화면에 쓸 수 있는 키 값은 **`key_last4`·`status`(`connected`/`invalid`)** 뿐입니다. `keyStatus = 'none'`은 **행이 없는 상태**입니다(별도 값이 아닙니다). `trialStatus`는 `profiles.trial_consumed_at`의 NULL 여부이며, **"1/1"·"남은 횟수" 같은 카운터를 만들 수 있는 숫자를 API가 주지 않습니다**(`01_product_spec.md` 6.5.3절). 예약 원장의 어떤 숫자도 클라이언트에 도달하지 않습니다 — RLS로 차단돼 있습니다 |
+| `voice-pipeline-engineer` | 변경 없음. 오디오 저장 경로는 여전히 없고, 이번 조정은 `turns`를 건드리지 않았습니다. 다만 `pause_reason`이 5개가 되었으므로 **음성 UI가 일시정지 사유를 문자열로 분기한다면 새 값 2개를 처리**해야 합니다(둘 다 `byok` 세션 전용) |
+| `product-architect` (확인 요청) | `01_product_spec.md` 10절이 넘긴 **체험 소진 판정**을 `profiles.trial_consumed_at` 컬럼 저장으로 확정했습니다(파생 기각 — 근거는 3.1절, 핵심은 **세션 삭제로 체험이 재생성되는 구멍**입니다). 또한 6.5.7절 6항의 "계정 계열 감사 로그"를 **`account_events` 테이블**로 신설했습니다 — 제품 요구에서 도출한 테이블이므로 불필요하다고 판단되면 알려 주세요 |
 
 ---
 
@@ -1501,11 +2185,63 @@ indexOf ≥ 0  →  quote_start = idx, quote_end = idx + len(quote_text)
 규정하지 않기 때문입니다. 다만 **면접관·평가자 프롬프트를 채우는 서버 코드가 `documents`가 아니라 세션의
 스냅샷 컬럼에서 읽어야 한다**는 점은 계약 문서에 없는 구현 지침이라 12절로 전달했습니다.
 
+### 13.4 3차 대조 — D27·D28·D29 (2026-09-10)
+
+대조 대상은 `02_ai_architecture.md` 8.3절·13.6.1절, `01_state_machine.md` 1절·2절,
+`01_product_spec.md` 6.5절, `00_input/decisions.md` D27~D29입니다.
+
+| # | 대조 지점 | 원본 | 이 문서 | 판정 |
+|---|---|---|---|---|
+| 1 | 예약 원장 2개 테이블의 컬럼·타입·CHECK | 8.3.2절·13.6.1절 | 3.13·3.14절 | **정합 — 문자 단위 일치** |
+| 2 | `consumed_calls`에 상한 CHECK 금지 | 13.6.1절 명시 | 3.14절에 CHECK 없음 + 근거 서술 | **정합** |
+| 3 | unique `(session_id, model_bucket)` / `idx_quota_res_held` | 13.6.1절 | 4절 #18·#19 | **정합** |
+| 4 | 함수 3종의 이름·인자·반환 | 13.6.1절 | 3.14.1절 | **정합 + 델타 2건**(아래 R8·R10) |
+| 5 | `before delete` 트리거 | 13.6.1절 "필수" | 3.14.2절 + 9.1·9.3절 | **정합** |
+| 6 | 두 테이블 RLS 켜고 정책 0개 | 13.6.1절 | 5.2절 표 + 5.3절 SQL | **정합** |
+| 7 | 5.4절 점검 쿼리 예외 목록 확장 요청 | 13.6.1절 | 5.4절(1개 → 5개) | **정합 — 요청대로 반영** |
+| 8 | `session_events` 값 3종 추가 | 8.3.9절 | 3.6절 | **정합 — 스키마 변경 없음**(값 CHECK가 없음) |
+| 9 | `status` 11개 | `01_state_machine.md` 1절 | 1절·3.3절 | **변경 없음 — 문자 단위 일치 유지** |
+| 10 | `pause_reason` 5개 | 〃(신규 2개 포함) | 1절·3.3절 | **정합 — 순서까지 동일** |
+| 11 | `funding_source` 2개 + not null + 변경 금지 | 〃 + `01_product_spec.md` 10절 | 1절·3.3절(트리거로 불변성 강제) | **정합** |
+| 12 | BYOK 세션은 예약 원장에 행이 없음 | D28, `01_product_spec.md` 10절 | 3.14절 + 함수 재원 가드 | **정합 — DB가 강제**(원본은 라우트 책임으로만 규정) |
+| 13 | 키 암호화 필수(Vault) / 원문 미노출 / 실제 삭제 | D28, 6.5.7절 | 3.15절 5중 강제 + 파기 트리거 | **정합** |
+| 14 | 동의 3요소(누가·언제·문구 버전) | D29, 6.5.4절 | 3.16절(+ 문구 해시) | **정합 — 요구보다 1개 강함** |
+| 15 | 체험 소진 판정 | `01_product_spec.md` 10절이 판단 위임 | 3.1절 `trial_consumed_at` | **결정 완료**(12.2절로 회신) |
+
+**남은 불일치 4건 — 어느 것도 스키마로 해결할 수 없습니다.**
+
+| # | 지점 | 내용 | 성격 |
+|---|---|---|---|
+| R8 | 13.6.1절 함수 시그니처 vs 3.14.1절 | `reserve_session_quota`에 **`p_limits jsonb` 인자를 추가**했습니다. 원본 표에는 없지만 같은 절 마지막 문단이 "계산은 애플리케이션이 해서 넘기라"고 지시했고, **DB는 환경변수를 읽을 수 없어** 원장 행을 만들 때 `limit_calls`를 어디선가 받아야 합니다 | 원본의 지시를 시그니처로 옮긴 것. `ai-interview-architect`에게 전달(12.2절) |
+| R9 | 6.5.4절 "문구 버전" vs 3.16절 트리거 | 트리거는 **동의 행의 존재**만 검사합니다. "**현재** 버전에 동의했는가"는 현재 버전이 애플리케이션 상수라 DB가 알 수 없습니다. 문구를 올린 뒤 옛 버전 동의만 가진 사용자가 DB 층은 통과합니다 | **서버 가드 책임**(409). DB는 마지막 방어선이지 유일한 방어선이 아님 |
+| R10 | 3.15절 `status='connected'` vs 실제 유효성 | 키가 유효한지는 **프로바이더만 압니다.** 사용자가 Google 콘솔에서 키를 지워도 우리 행은 `connected`인 채로 남고, 다음 호출에서야 알게 됩니다(→ `pause_reason='byok_key_invalid'`) | 구조적 한계. `last_verified_at`이 "언제 기준의 사실인가"를 남기는 것이 이 컬럼의 존재 이유 |
+| R11 | 8.3.1절 예약량 vs `limit_calls` 실측값 | 예약량(26/4/3)과 한도 3종이 **전부 환경변수**이고 아직 측정 전입니다(8.3.8절). 한도가 없으면 게이트는 **fail-open**입니다 — 그동안 원장 행이 만들어지지 않아 이 테이블들은 **비어 있는 채로 존재**합니다 | 스키마는 영향 없음. `05_deploy.md` 배포 전 체크리스트 항목 |
+
+**3차 조정에서 발견한 계약 위반은 없습니다.** D27·D28·D29는 평가자·코치 입출력 계약(`02_ai_contracts.md`)을
+전혀 건드리지 않습니다 — 바뀐 것은 **호출을 시작할 수 있는가**와 **누구의 키로 호출하는가**이지
+호출의 입출력 형태가 아닙니다. 13.1절 11개 대조 지점은 **전부 그대로 유효**합니다.
+
 ---
 
 ## 14. 결정 완료
 
-남은 미결 없음. (2026-09-09)
+남은 미결 없음. (2026-09-09 / 2026-09-10 D27~D29 반영 후에도 동일)
+
+**2026-09-10 3차 조정 요약 (D27·D28·D29)**
+
+| 결정 | 이 문서에 반영된 곳 | 스키마 변경 |
+|---|---|---|
+| **D27** 예약 게이트 | 3.13·3.14절(테이블 2개·함수 3개·트리거 1개), 3.6절, 4절, 5.2~5.4절, 9.1·9.3절, 10절 #12 | **있음 — 테이블 2개** |
+| **D28** BYOK | 1절(`funding_source`·`pause_reason`), 3.1·3.3·3.15·3.17절, 9.3절, 10절 #14 | **있음 — 테이블 2개 + 컬럼 2개 + CHECK 확장** |
+| **D29** 체험 동의 | 3.16절, 3.3절(트리거), 5.2절, 2절 FK, 10절 #13 | **있음 — 테이블 1개** |
+
+이 조정이 뒤집은 잠정값은 **없습니다.** 전부 순수 추가이며, 기존 12개 테이블의 컬럼은
+`interview_sessions`의 `funding_source`·`pause_reason`과 `profiles.trial_consumed_at` 외에 **하나도 바뀌지 않았습니다.**
+`status` 11개는 그대로이고, 1절 코드 블록은 `01_state_machine.md` 1절과 **문자 단위로 일치**합니다.
+
+**이 문서가 스스로 내린 판단 2건**(원본 문서가 위임했거나 비어 있던 자리):
+체험 소진을 `profiles.trial_consumed_at`으로 저장(3.1절), 키 수명주기 감사를 `account_events`로 분리(3.17절).
+둘 다 12.2절로 `product-architect`에게 회신했습니다.
 
 이 문서가 잠정값으로 열어 두었던 `[결정 필요]` **6건이 전부 확정됐습니다.**
 전체 결정 기록과 근거는 [`00_input/decisions.md`](00_input/decisions.md)입니다.
