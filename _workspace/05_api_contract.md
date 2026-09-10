@@ -42,6 +42,21 @@
     D27 신규 비전이 이벤트 3종(**`quota_reserved` · `quota_released` · `quota_overflow`**)까지 포함해
     반영해 달라고 `supabase-engineer`에게 요청했습니다. **스키마 변경 요청 아님.**
 
+- 2026-09-10 (6차) **D31 반영 — 2026-09-10 측정치(Vercel Hobby `maxDuration` = 300초)를 계약에 반영.**
+  해당 절만 고쳤고 문서를 다시 쓰지 않았습니다.
+  - **60초 가정이 틀렸습니다.** Hobby는 기본 300초 · 최대 300초입니다(`05_deploy.md` 3절, 확인일 2026-09-10).
+    평가자와 코치를 별도 함수 호출로 체이닝하던 **회피책의 이유가 사라졌습니다.**
+  - **I3 `POST /api/internal/jobs/coach`를 삭제했습니다.** 코치는 I2 워커 호출 안에서 **평가자 다음에 순차 실행**됩니다.
+    **내부 워커 라우트 3종 → 2종**(I1 `jobs/plan` · I2 `jobs/evaluate`). 4절·4.1절·6.2·6.3·8·9절 갱신.
+  - **두 단계를 논리적으로 합치지 않았습니다.** 독립 재시도와 부분 성공(코치 실패 → 점수·인용은 남고
+    `improvement`는 `null`)은 그대로입니다. 바뀐 것은 **전송 계층뿐**입니다.
+    없어지는 것: 내부 HTTP 홉 1개, `JOB_SECRET` 왕복 1회, **"1단계 성공 후 2단계 호출 유실" 실패 모드 1종.**
+  - **#18 `coach/retry`의 진입점이 I2로 바뀝니다** — `{ stage: 'coach_only' }`로 같은 워커를 부릅니다.
+    **프론트 응답 shape는 그대로**입니다(`202 { sessionId, evaluationId, coachStatus: 'running' }`).
+  - `maxDuration` 표(11.2절)를 300초 상한 기준으로 재조정했습니다. **300을 다 쓰지 않습니다** — 근거는 11.2.1절.
+  - 11.3절을 "상한이 60초보다 낮을 경우의 대비"에서 **"확인된 300초 아래에서 남는 위험"**으로 바꿨습니다.
+  - **엔드포인트 수 변화 없음(41개).** 프론트 대응 훅·응답 타입 변화 **없음**.
+
 ---
 
 ## 0. 이 문서의 위상
@@ -196,9 +211,14 @@ type EvaluationResponse = { evaluation: Evaluation | null };
 | # | 메서드 | 경로 | 인증 | 역할 | 상태 전이 |
 |---|---|---|---|---|---|
 | I1 | POST | `/api/internal/jobs/plan` | internal | 플래너 실행 → `context_summary`·오프닝 질문·스냅샷 커밋 | `configuring`→`ready` |
-| I2 | POST | `/api/internal/jobs/evaluate` | internal | 평가자 실행 → `evaluations`·`evaluation_scores`·`evaluation_citations` 저장 후 I3 체이닝 | 실패+잔여 재시도 시 `evaluating`→`completed`, 소진 시 `evaluating`→`failed` |
-| I3 | POST | `/api/internal/jobs/coach` | internal | 코치 실행 → `summary`/`improvements`/`coach_payload`/축별 `improvement` UPDATE | 성공·실패 모두 `evaluating`→`evaluated` |
+| I2 | POST | `/api/internal/jobs/evaluate` | internal | **평가자 → 코치를 한 호출 안에서 순차 실행**(D31, 6.2절). 1단계: `evaluations`·`evaluation_scores`·`evaluation_citations` 저장. 2단계: `summary`/`improvements`/`coach_payload`/축별 `improvement` UPDATE. body의 `stage`가 `'coach_only'`면 1단계를 건너뜁니다(#18 재시도 경로) | 평가 실패+잔여 재시도 시 `evaluating`→`completed`, 소진 시 `evaluating`→`failed`. **코치 단계는 성공·실패 어느 쪽이든 `evaluating`→`evaluated`** |
 | C1 | GET | `/api/cron/daily` | cron | 일 1회 워치독 **5종**(`05_deploy.md` 5절. **5종째는 D27 만료 예약 스윕** — `01_state_machine.md` 7.5절). **`paused`→`completed`로 보낼 때 평가를 함께 등록합니다**(D18 — 이 경로에는 클라이언트가 존재하지 않습니다). **1·2·3단계의 종료 전이는 전부 예약 반납을 동반합니다**(4.7.3절) | `paused`→`completed`(→ 이어서 `completed`→`evaluating`)/`abandoned`, `evaluating`→`failed`, `in_progress`→`paused` |
+
+> **내부 워커 라우트는 2종입니다 (D31 — 3종에서 줄었습니다).** `POST /api/internal/jobs/coach`(구 I3)는
+> **삭제됐습니다.** 코치는 I2 안에서 평가자 다음에 이어 실행되며, 별도의 HTTP 진입점을 갖지 않습니다.
+> `/api/internal/jobs/coach` 경로로 오는 요청은 **404**입니다 — 옛 경로를 남겨 두면 `JOB_SECRET`만 알면
+> 코치를 단독 호출할 수 있는 문이 하나 더 열린 채로 남습니다.
+> **#18 `coach/retry`는 I2를 `{ stage: 'coach_only' }`로 부릅니다.**
 
 ### 4.2 취소(#33)와 삭제(#23)는 **다른 경로**입니다 (D19)
 
@@ -331,7 +351,7 @@ BYOK 사유 2행을 추가해 전이 표가 33행 → 35행이 되었고, 이 �
 | 25 | `paused` → `canceled` | #33 |
 | 26 | `completed` → `evaluating` | **서버 부작용 `enqueueEvaluation`**(6.2절) |
 | 27 | `completed` → `failed` | `enqueueEvaluation` 3회 실패 시(6.2절) |
-| 28 | `evaluating` → `evaluated` | I3 |
+| 28 | `evaluating` → `evaluated` | **I2의 코치 단계 종료 시**(성공·실패 무관 — D31로 I3가 없어졌습니다) |
 | 29 | `evaluating` → `completed` | I2 (재시도 잔여) |
 | 30 | `evaluating` → `failed` | I2 또는 게으른 워치독(6.5절)/C1 |
 | 31 | `evaluated` → `evaluating` | **미대응 — `[later]`.** 전이 표가 "MVP 범위 밖"으로 명시한 행이며, #16은 `evaluated`에 409를 돌려줍니다 |
@@ -410,7 +430,7 @@ releaseSessionQuota(sessionId, fundingSource, buckets, reason)  // 반납 6지�
 | # | 지점 | 호출 | 반납 버킷 |
 |---|---|---|---|
 | 1 | `→ completed` (#15, #9 종료 조건, C1 1단계) | `release(id, ['flash_lite'], 'completed')` | **`flash_lite`만.** `pro`·`flash`는 **절대 반납하지 마세요** — 평가와 코치가 남아 있습니다 |
-| 2 | I3 코치 완료 → `evaluated` | `release(id, null, 'settled')` | 잔여 전부(정산) |
+| 2 | **I2 코치 단계 완료 → `evaluated`** | `release(id, null, 'settled')` | 잔여 전부(정산) |
 | 3 | #33 `cancel` (7개 전이 전부) | `release(id, null, 'canceled')` | 전부 |
 | 4 | C1 `paused → abandoned` | `release(id, null, 'abandoned')` | 전부 |
 | 5 | I2 재시도 소진 → `failed`, I1 플래너 실패, #35 `abandon-preparation` | `release(id, null, 'failed')` | 전부 |
@@ -737,14 +757,38 @@ metaMode    := false   // 센티널 통과 후에는 true. 이후 모든 텍스�
 ### 6.1 왜 요청-응답으로 끝낼 수 없는가
 
 `02_ai_architecture.md` 8.1절: 평가자 25~50s + 코치 20~40s = **정상 경로만 45~90s**,
-재시도(평가 3회·코치 2회) 포함 시 **수 분**. 어떤 플랜의 함수 실행 상한으로도 한 요청 안에 끝낼 수 없고,
-끝난다 해도 사용자의 브라우저 탭이 그동안 열려 있어야 한다는 전제가 생깁니다
-(`01_state_machine.md` 7절: "평가 대기 중 나감 → 평가는 서버에서 계속").
+재시도(평가 3회·코치 2회) 포함 시 **수 분**.
 
-### 6.2 채택안 — **단계 체이닝(step chaining) + Realtime 전달 + 게으른 워치독**
+**실행 상한이 300초라는 사실(D31)은 이 절의 결론을 바꾸지 않습니다.** 이유는 시간이 아니라
+**요청의 수명**입니다 — 사용자가 탭을 닫으면 그 요청은 끝나고, 응답을 기다리던 화면도 없습니다.
+`01_state_machine.md` 7절("평가 대기 중 나감 → 평가는 서버에서 계속")을 지키려면 평가는
+**사용자 요청과 분리된 함수 호출**에서 돌아야 합니다. 그래서 `evaluate`는 여전히 **202를 즉시 반환하고
+`waitUntil`로 워커를 띄웁니다.** D31이 바꾼 것은 그 워커 **안쪽**입니다.
 
-무료 플랜에는 **상시 실행 워커도, 관리형 큐도, 분 단위 크론도 없다는 전제**에서 출발합니다(`05_deploy.md` 3절).
-그래서 큐 인프라를 새로 붙이지 않고, **DB를 큐로 쓰고 함수 호출을 체인으로 잇습니다.**
+### 6.2 채택안 — **워커 1회 호출 + Realtime 전달 + 게으른 워치독** (D31로 단순화)
+
+무료 플랜에는 **상시 실행 워커도, 관리형 큐도, 분 단위 크론도 없다는 전제**에서 출발합니다
+(`05_deploy.md` 3절 — 2026-09-10 확인). 그래서 큐 인프라를 새로 붙이지 않고, **DB를 큐로 쓰고
+사용자 요청과 분리된 함수 호출 하나에 평가 작업 전체를 맡깁니다.**
+
+> **D31로 무엇이 바뀌었나 (2026-09-10).** 초안은 실행 상한을 60초로 가정해 평가자와 코치를
+> **별도 함수 호출로 체이닝**했습니다. 실제 상한은 **300초**이므로 그 회피책의 이유가 사라졌습니다.
+> 이제 **한 워커 호출 안에서 평가자 → 코치를 순차 실행**합니다.
+>
+> **두 단계를 논리적으로 합치지는 않았습니다.** 독립 재시도(평가 3회 / 코치 2회)와 부분 성공
+> (**코치가 실패해도 점수·인용은 남습니다** — `improvement`가 nullable인 이유)은 **의도된 성질**이며
+> 그대로입니다. 바뀐 것은 **전송 계층뿐**입니다.
+>
+> | | 이전 | 이후 |
+> |---|---|---|
+> | 내부 워커 라우트 | **3종**(I1·I2·I3) | **2종**(I1·I2) |
+> | 내부 HTTP 홉 | 2회(evaluate → coach) | **1회**(enqueue → evaluate) |
+> | `JOB_SECRET` 왕복 | 2회 | **1회** |
+> | 실패 모드 | + "1단계 성공 후 2단계 호출 유실" | **그 모드 소멸** |
+> | 단계 경계 | 함수 경계 | **함수 안의 코드 경계**(try/catch 2블록) |
+>
+> **사라진 실패 모드가 이 변경의 본체입니다.** 체이닝 `fetch`가 유실되면 점수는 저장됐는데 세션은
+> `evaluating`에 남아 워치독이 집을 때까지 리포트가 열리지 않았습니다. 이제 그 구간 자체가 없습니다.
 
 **t=0은 사용자 요청이 아니라 `completed` 전이입니다 (D18).**
 평가 등록은 `completed`로 **가는 모든 경로의 서버 부작용**이며, 클라이언트가 시작하지 않습니다.
@@ -785,26 +829,44 @@ metaMode    := false   // 센티널 통과 후에는 true. 이후 모든 텍스�
   아니면 아무것도 하지 않고 돌아옵니다. #9의 종료 판정과 #15가 경합해도 평가는 한 번만 등록됩니다.
 
 ```
-POST /api/internal/jobs/evaluate           (워커 1단계, maxDuration 60s)
-  → 평가자 호출 → 스키마·인용 검증(02_ai_contracts.md 5.3절) → 총점 계산(6.4절)
-  → evaluations/evaluation_scores/evaluation_citations 저장 (한 트랜잭션)
-  → waitUntil(fetch(POST /api/internal/jobs/coach, ...))        ← 2단계로 체이닝
-  → 실패 & attempt < 3 : status='completed'로 되돌리고 attempt_count += 1,
-                          지연 후 자기 자신을 재체이닝 (6.4절)
-  → 실패 & attempt = 3 : status='failed', failure_reason='evaluation_failed'
+POST /api/internal/jobs/evaluate           (워커 — 유일한 평가 워커. maxDuration 240s)
+  body: { sessionId, evaluationId, attempt, stage?: 'full' | 'coach_only' }   기본 'full'
 
-POST /api/internal/jobs/coach              (워커 2단계, maxDuration 60s)
-  → 코치 호출 → 검증(6.3절) → summary/improvements/coach_payload + 축별 improvement UPDATE
+  ── 1단계: 평가 (stage='coach_only'이면 건너뛴다) ────────────────────────────
+  → 평가자 호출 → 스키마·인용 검증(02_ai_contracts.md 5.3절) → 총점 계산(9.1절)
+  → evaluations/evaluation_scores/evaluation_citations 저장 (한 트랜잭션)
+  → 실패 & attempt < 3 : status='completed'로 되돌리고 attempt_count += 1,
+                          지연 후 재시도 (6.4절). **여기서 함수를 끝낸다 — 코치로 내려가지 않는다**
+  → 실패 & attempt = 3 : status='failed', failure_reason='evaluation_failed'. **여기서 끝낸다**
+
+  ── 2단계: 코치 (1단계가 성공했거나 stage='coach_only'일 때만) ──────────────
+  → **같은 함수 호출 안에서 이어서 실행한다.** HTTP 홉 없음
+  → 코치 호출 → 검증 → summary/improvements/coach_payload + 축별 improvement UPDATE
   → 성공·실패 **어느 쪽이든** interview_sessions.status = 'evaluated'
      (코치 실패는 리포트 실패가 아니다 — 02_ai_architecture.md 3절, 04_data_layer.md 3.8절)
 ```
 
+**1단계와 2단계는 서로 다른 try/catch 블록입니다.** 코치에서 던져진 예외가 평가 결과를 되돌리면 안 됩니다 —
+점수·인용은 이미 커밋됐고, 코치 실패의 정의는 "`summary`가 `null`인 채로 `evaluated`"입니다.
+**두 단계를 한 트랜잭션으로 묶지 마세요.** 묶는 순간 부분 성공이 사라지고 `improvement`의 nullable이
+의미를 잃습니다.
+
+| 단계 | 실패 시 세션 status | 사용자가 보는 것 | 재시도 주체 |
+|---|---|---|---|
+| 1단계 평가 | `completed`(잔여) 또는 `failed`(소진) | 대기 화면 / 재시도 버튼 | I2 자기 자신 → 소진 후 #16 |
+| 2단계 코치 | **`evaluated`** (실패가 아닙니다) | **점수·인용이 있는 리포트** + "코칭 다시 받기" | #18 (`stage='coach_only'`) |
+
+**#18 `coach/retry`가 부르는 것도 이 라우트입니다.** `{ stage: 'coach_only' }`를 실어 보내면
+1단계를 건너뛰고 2단계만 돕니다. **코치 전용 엔드포인트를 따로 두지 않는 이유**는, 두 진입점이 갈리면
+"코치 결과를 쓰는 코드"가 두 곳이 되고 축별 `improvement` UPDATE 규약이 조용히 어긋나기 때문입니다.
+
 > **I2가 재시도를 위해 `status='completed'`로 되돌리는 것은 `enqueueEvaluation`을 부르지 않습니다.**
 > 그 함수는 6.2절에 나열한 4개 라우트에서만 호출됩니다. 워커의 내부 되돌림이 등록을 다시 트리거하면
-> `attempt_count`가 리셋되며 무한 루프가 됩니다. **재체이닝은 I2가 직접 합니다.**
+> `attempt_count`가 리셋되며 무한 루프가 됩니다. **재시도는 I2가 직접 합니다**(같은 호출 안의 `sleep` 또는 자기 재호출 — 6.4절).
 
-**각 단계가 자기 함수 호출 하나를 통째로 쓰므로, 어떤 단계도 실행 상한에 닿지 않습니다.**
-평가자 최악 50s < 60s, 코치 최악 40s < 60s입니다.
+**두 단계의 합이 실행 상한 아래인지가 이제 관심사입니다.** 평가자 최악 50s + 코치 최악 40s = **90s**,
+평가 3회 재시도(백오프 2s + 8s 포함)까지 최악으로 겹쳐도 **약 200s**로 `maxDuration = 240`(11.2절) 안입니다.
+Hobby 상한 300초와의 여유 60초는 **일부러 남긴 것**이며 근거는 11.2.1절입니다.
 
 **왜 이 안인가 — 대안과 비교**
 
@@ -812,14 +874,17 @@ POST /api/internal/jobs/coach              (워커 2단계, maxDuration 60s)
 |---|---|
 | 외부 큐(QStash·Inngest 등) | **기각.** 무료 티어 밖의 외부 의존성을 하나 더 늘립니다. 예산 제약("각 프로바이더 무료 티어 안")과 D8·D2가 만든 "외부 의존성 0" 기조에 어긋납니다 |
 | 크론이 큐를 폴링 | **기각(단독으로는).** 무료 플랜의 크론 최소 주기가 분 단위가 아니면 평가가 최대 하루 늦게 시작됩니다. 리포트 대기 화면이 성립하지 않습니다 |
-| 한 라우트에서 평가+코치를 다 돌리고 스트리밍으로 시간 벌기 | **기각.** 사용자가 탭을 닫으면 함수가 종료돼 `evaluating`에 갇힙니다. `01_state_machine.md` 7절이 금지한 상황입니다 |
-| **단계 체이닝 + Realtime + 게으른 워치독** | **채택.** 인프라 추가 0, 단계별 상한 준수, 탭을 닫아도 서버에서 계속 |
+| 한 라우트에서 평가+코치를 다 돌리고 스트리밍으로 시간 벌기 | **기각.** 사용자가 탭을 닫으면 함수가 종료돼 `evaluating`에 갇힙니다. `01_state_machine.md` 7절이 금지한 상황입니다. **300초가 확인된 뒤에도 이 기각은 유효합니다** — 문제는 시간이 아니라 요청의 수명입니다(6.1절) |
+| ~~단계 체이닝(평가 워커 → 코치 워커)~~ | **폐기(D31).** 실행 상한 60초 가정 위에서만 필요했던 회피책입니다. 홉 하나가 유실 지점이었고, 300초가 확인되면서 그 대가를 치를 이유가 없어졌습니다 |
+| **워커 1회 호출(평가→코치 순차) + Realtime + 게으른 워치독** | **채택(D31).** 인프라 추가 0, 상한 준수(합계 최악 ~200s < 240s), 탭을 닫아도 서버에서 계속, **유실 지점 1개 제거** |
 
 **남는 위험과 그 방어**
 
 | 위험 | 방어 |
 |---|---|
-| 체이닝 `fetch`가 실패해 다음 단계가 시작되지 않음 | `evaluations.status='running'` + `started_at`이 큐 역할을 합니다. 게으른 워치독(6.5절)과 일 1회 크론이 재기동합니다 |
+| ~~체이닝 `fetch`가 실패해 다음 단계가 시작되지 않음~~ | **D31로 소멸.** 단계 사이에 `fetch`가 없습니다 |
+| 워커를 띄우는 첫 `fetch`(enqueue → I2)가 실패 | 남은 **유일한** 유실 지점입니다. `evaluations.status='running'` + `started_at`이 큐 역할을 하고, 게으른 워치독(6.5절)과 일 1회 크론이 재기동합니다 |
+| 워커가 상한(240s)에 걸려 중간에 죽음 | 소프트 데드라인 210s에서 **새 단계를 시작하지 않고** 함수를 끝냅니다(11.2.1절). `status='running'`으로 남아 워치독이 집습니다. **상한에 그대로 잘리면 실패 상태를 기록할 시간조차 없다는 것이 여유 60초를 남기는 이유입니다** |
 | `waitUntil`을 쓰지 않아 `fetch`가 잘림 | **`waitUntil` 사용을 계약으로 못박습니다.** await하지 않은 promise는 함수 종료와 함께 취소됩니다 |
 | 같은 평가가 두 번 실행 | 워커는 진입 시 `evaluations`를 `status='running' and id=:evaluationId`로 조건부 UPDATE(`locked_at` 대용으로 `started_at` 갱신)해 선점하고, 갱신 행 수가 0이면 즉시 종료합니다 |
 
@@ -828,7 +893,7 @@ POST /api/internal/jobs/coach              (워커 2단계, maxDuration 60s)
 | 전이 표 행 | 수행 주체 |
 |---|---|
 | `completed`→`evaluating` (평가 워커가 작업을 집음) | **서버.** `→ completed` 전이의 부작용인 `enqueueEvaluation`(6.2절)이며, 호출 지점은 **#15 · #9 · C1**입니다. 클라이언트가 이 전이를 일으키는 경로는 없습니다 (D18) |
-| `evaluating`→`evaluated` (평가 결과 저장 완료) | I3 코치 워커 종료 시 |
+| `evaluating`→`evaluated` (평가 결과 저장 완료) | **I2의 코치 단계 종료 시**(성공·실패 무관). D31로 별도 코치 워커 호출은 없습니다 |
 | `evaluating`→`completed` (평가 실패 + 재시도 잔여) | I2 |
 | `evaluating`→`failed` (재시도 3회 소진 또는 10분 워치독) | I2 또는 워치독(6.5절) |
 | `completed`→`failed` (평가 큐 등록 자체가 실패, 재시도 3회) | `enqueueEvaluation`이 3회 실패 시. `failure_reason='evaluation_enqueue_failed'` |
@@ -861,7 +926,7 @@ attempt 1 실패 → 2s 후 재시도 → attempt 2 실패 → 8s 후 재시도 
   `evaluations.status='running'`으로 남고 게으른 워치독·크론이 다시 집습니다.
   **함수 안에서 분 단위로 잠자는 것은 실행 시간을 그대로 태우는 짓이며 금지합니다.**
 - `evaluations.attempt_count`는 **평가자 시도만** 셉니다(최초 포함, 최대 3 — `04_data_layer.md` 3.7절).
-  **코치 워커는 이 컬럼을 절대 UPDATE하지 않습니다.** 코치 시도는 `session_events`로만 관측합니다(D10).
+  **코치 단계는 이 컬럼을 절대 UPDATE하지 않습니다.** 코치 시도는 `session_events`로만 관측합니다(D10).
 
 ### 6.5 워치독 — 10분 규칙을 무료 플랜에서 지키는 방법
 
@@ -870,7 +935,7 @@ attempt 1 실패 → 2s 후 재시도 → attempt 2 실패 → 8s 후 재시도 
 
 | 겹 | 이름 | 동작 |
 |---|---|---|
-| 1 | **게으른 워치독** | `GET /api/sessions/[sessionId]`와 `GET .../evaluation`이 호출될 때, 해당 세션이 `evaluating`이고 `evaluations.started_at < now() - 10분`이면 **응답을 만들기 전에** 판정합니다: `attempt_count < 3`이면 워커를 재체이닝하고, 아니면 `failed`로 내립니다. **사용자가 리포트 대기 화면에 있으면 폴링/재조회가 이 검사를 자동으로 돌립니다** — 정확히 필요한 사람에게만 정확한 시점에 동작합니다 |
+| 1 | **게으른 워치독** | `GET /api/sessions/[sessionId]`와 `GET .../evaluation`이 호출될 때, 해당 세션이 `evaluating`이고 `evaluations.started_at < now() - 10분`이면 **응답을 만들기 전에** 판정합니다: `attempt_count < 3`이면 **I2를 다시 띄우고**(D31 이후 띄울 워커는 하나뿐입니다), 아니면 `failed`로 내립니다. **사용자가 리포트 대기 화면에 있으면 폴링/재조회가 이 검사를 자동으로 돌립니다** — 정확히 필요한 사람에게만 정확한 시점에 동작합니다 |
 | 2 | **일 1회 크론**(C1) | 아무도 보지 않는 세션의 안전망. 같은 규칙을 배치로 적용합니다 |
 
 **게으른 워치독을 1순위로 두는 이유:** 이 판정이 필요한 유일한 순간은 사용자가 결과를 기다리는 순간이고,
@@ -977,7 +1042,7 @@ export const config = {
 | **#37~#40 키 라우트** (`/api/account/api-key`) | — | **예** | `user_api_keys`(RLS 정책 0개), `vault.secrets`(함수 경유), `account_events`. **접근자 함수 2종이 `service_role`에만 grant돼 있습니다** |
 | **#41 POST `/api/trial-consent`** | — | **예** | `trial_consents`, `account_events`. **`insert` 정책이 없습니다** — 클라이언트 INSERT를 허용하면 동의 화면을 거치지 않고 행을 만들어 게이트를 우회할 수 있습니다 |
 | **예약 게이트**(#3·#6·#16·#18·반납 6지점) | — | **예** | `ai_quota_ledger`, `ai_quota_reservations` — **함수 3종이 `service_role` 전용**(`anon`/`authenticated`에서 revoke) |
-| I1/I2/I3 내부 워커 | 세션·문서·턴 | **예** | `interview_sessions`, `questions`, `turns`, `evaluations`, `evaluation_scores`, `evaluation_citations`, `session_events` |
+| I1/I2 내부 워커 (**2종** — D31) | 세션·문서·턴 | **예** | `interview_sessions`, `questions`, `turns`, `evaluations`, `evaluation_scores`, `evaluation_citations`, `session_events` |
 | C1 크론 | — | **예** | `interview_sessions`, `session_events`, `storage_cleanup_queue`, Storage |
 
 **`admin.ts`를 쓰지 않는 라우트 (클라이언트 쓰기 정책이 있는 4개 테이블만 다룸)**
@@ -1018,7 +1083,7 @@ RLS상으로는 클라이언트가 Supabase 클라이언트로 직접 읽고 쓸
 | `evaluation_citations.citation_index` | I2 | 폐기 후 **0..n-1로 재부여** |
 | `evaluation_scores.weight` | I2 | 페르소나 표(`01_rubric.md` 3절)의 **정규화 전 원값**. AI가 보내면 검증 실패 |
 | `evaluations.overall_score` | I2 | 아래 9.1절 |
-| `evaluations.ai_contract_version` / `provider` / `model_name` | I2·I3 | 애플리케이션 상수 |
+| `evaluations.ai_contract_version` / `provider` / `model_name` | I2 (평가 단계·코치 단계 모두) | 애플리케이션 상수 |
 
 ### 9.1 `overall_score` — 인용이 없는 축은 **가중치 합에서 제외** (D1)
 
@@ -1162,17 +1227,20 @@ export const dynamic = 'force-dynamic';   // 인증 응답이 캐시되면 남�
 **Edge를 쓰지 않는 대가:** 콜드 스타트가 조금 더 깁니다. 면접관 라우트는 세션 중 반복 호출되어
 따뜻하게 유지되므로 실질 영향이 작다고 판단합니다. Phase 3에서 TTFB를 실측해 재검토합니다.
 
-### 11.2 `maxDuration`
+### 11.2 `maxDuration` (**2026-09-10 측정 반영 — Hobby 상한 300초**)
+
+**플랜 상한은 300초입니다**(Hobby 기본 300 / 최대 300, `05_deploy.md` 3절, 확인일 2026-09-10).
+초안의 60초 가정은 틀렸고, 아래 표는 실제 상한 기준으로 다시 잡은 값입니다.
 
 | 라우트 | `maxDuration` | 근거 |
 |---|---|---|
-| #9 SSE `.../turns` | **60** | `02_ai_contracts.md` 8절 "면접관 60초 예산 내". 정상 2.5s, 3단계 백오프 재시도까지 포함해 60s |
-| #26 `/api/documents/[id]/extract` | **60** | 10MB PDF 최악 ~25s + Storage 다운로드 |
-| I1 `jobs/plan` | **60** | 플래너 8~18s + 재호출 1회(V8) |
-| I2 `jobs/evaluate` | **60** | 평가자 25~50s (최악에 근접 — 11.3절 위험) |
-| I3 `jobs/coach` | **60** | 코치 20~40s |
-| C1 `cron/daily` | **60** | 배치 200건 단위. 못 끝내면 다음 날 이어서 (멱등) |
-| #31 `DELETE /api/account` | **60** | Storage 목록·일괄 삭제 |
+| #9 SSE `.../turns` | **90** | `02_ai_contracts.md` 8절의 **"면접관 60초 예산"은 UX 예산이지 플랫폼 상한이 아닙니다.** 그 예산을 60초로 유지한 채, `<<<META>>>` 커밋·turn 저장 같은 **스트림 종료 후 꼬리 작업**과 abort 정리에 30초 여유를 둡니다. 상한에 잘리면 답변은 화면에 흘렀는데 DB에 없는 상태가 됩니다 |
+| #26 `/api/documents/[id]/extract` | **120** | 10MB PDF 최악 ~25s + Storage 다운로드. D26이 "실측 30초 초과 시 비동기로 옮긴다"고 정해 둔 라우트이므로, **관측 구간을 넓게 잡아 실제 분포를 보고 판단**합니다 |
+| I1 `jobs/plan` | **120** | 플래너 8~18s + 재호출 1회(V8) + 스냅샷 커밋. 내부 워커라 UX 지연이 아닙니다 |
+| **I2 `jobs/evaluate`** | **240** | **평가자 25~50s + 코치 20~40s를 한 호출에서 순차 실행**(D31, 6.2절). 재시도 백오프까지 최악 ~200s. **소프트 데드라인 210s**(11.2.1절) |
+| ~~I3 `jobs/coach`~~ | — | **삭제(D31).** 코치는 I2 안에서 돕니다 |
+| C1 `cron/daily` | **240** | 배치 200건 단위. 시간이 길수록 하루치 잔여가 줄고, 못 끝내도 다음 날 이어서 (멱등) |
+| #31 `DELETE /api/account` | **120** | Storage 목록·일괄 삭제. 세션·문서가 많은 계정이 최악입니다 |
 | **#38 PUT `/api/account/api-key` · #40 verify** | **15** | 프로바이더 검증 호출 1회(~1.5s) + Vault 쓰기. 상한에 여유가 큽니다 |
 | **#6 `prepare`** | **15** | `byok`일 때 키 검증 1회가 붙지만(~1.5s) 플래너는 **기다리지 않고 체이닝**합니다 |
 | 그 외 전부 (**#33 cancel · #34 문서 단건 · #35 abandon-preparation · #36 capacity · #37/#39 키 · #41 동의 포함**) | **15** | DB 왕복 1~3회. 15초를 넘으면 그건 버그이지 지연이 아닙니다 |
@@ -1181,23 +1249,47 @@ export const dynamic = 'force-dynamic';   // 인증 응답이 캐시되면 남�
 > **워커의 응답을 기다리지 않으므로** 평가자의 25~50초가 이 라우트의 실행 시간에 들어오지 않습니다.
 > 기다리는 순간 이 설계 전체가 무너집니다.
 
-### 11.3 실행 시간 상한이 60초보다 낮을 경우의 대비 (`05_deploy.md` 3절 `[확인 필요]`)
+#### 11.2.1 **300초를 다 쓰지 않는 이유** — 여유는 낭비가 아니라 실패 경로의 예산입니다
 
-**설계 전체에서 60초에 가장 가까운 것은 I2(평가자 25~50s) 하나뿐입니다.** 여기가 유일한 위험 지점이며,
-상한이 이보다 낮은 것으로 확인되면 아래 순서로 내립니다.
+가장 긴 I2에도 **240초만 줍니다.** 상한과의 차이 60초를 남기는 근거는 셋입니다.
+
+| # | 근거 |
+|---|---|
+| 1 | **상한에 걸린 함수는 실패를 기록할 시간이 없습니다.** 플랫폼이 300초에서 실행을 끊으면 `catch`도 `finally`도 돌지 않습니다. `evaluations.status`는 `running`, 세션은 `evaluating`에 남고 **여력 예약도 반납되지 않습니다**(4.7.3절). 즉 상한 초과는 "느린 실패"가 아니라 **여력이 새는 실패**입니다. 240에서 끊기면 남은 60초가 전부 우리 것이라 상태를 정리할 수 있습니다 |
+| 2 | **소프트 데드라인이 하드 상한보다 먼저 와야 합니다.** I2는 시작 시각을 기록하고, **210초를 넘긴 시점에는 새 단계(코치)나 새 재시도를 시작하지 않고** 함수를 정상 종료합니다. `status='running'`으로 남은 평가는 게으른 워치독이 집습니다(6.5절). 이 규칙이 성립하려면 `maxDuration`이 소프트 데드라인보다 확실히 커야 합니다 |
+| 3 | **추정치는 추정치입니다.** 25~50s·20~40s는 `02_ai_architecture.md` 8.1절의 **미측정 추정**이고, 프로바이더 지연은 우리가 통제하지 못합니다. 상한을 실측 최악에 딱 맞추면 추정이 20%만 빗나가도 1번 상황이 됩니다 |
+
+> **`maxDuration`을 올리는 데 드는 비용은 0이 아닙니다.** Hobby의 과금 단위는 실행 시간이며,
+> 상한을 크게 잡을수록 **폭주한 함수가 태울 수 있는 시간**도 커집니다. 상한은 "여기까지는 정상"이
+> 아니라 **"여기를 넘으면 버그"** 라는 선언이므로, 라우트마다 근거 있는 값을 따로 줍니다.
+> 15초짜리 DB 라우트를 300으로 올리지 않는 이유도 같습니다 — 15초를 넘으면 그건 지연이 아니라 버그입니다.
+
+### 11.3 확인된 300초 아래에서 남는 위험 (`05_deploy.md` 3절 — 확인일 2026-09-10)
+
+**초안이 걱정하던 "상한이 60초보다 낮을 가능성"은 해소됐습니다.** Hobby는 300초입니다.
+그 대신 남는 위험은 **한 호출 안에서 두 단계를 돌리게 되면서 최악 경로가 길어졌다**는 점입니다.
+
+| 위험 | 현재 판단 |
+|---|---|
+| 평가 3회 재시도 + 코치까지 겹쳐 240s에 근접 | 소프트 데드라인 210s가 먼저 잡습니다(11.2.1절). **워치독이 이어받으므로 사용자 관점에서는 지연이지 실패가 아닙니다** |
+| 프로바이더 지연이 추정치를 크게 벗어남 | 아래 조정 순서를 그대로 유지합니다 |
+
+**조정 순서는 바뀌지 않았습니다** (`02_ai_architecture.md` 4.2절 지시 그대로):
 
 ```
-1) Evaluator 모델을 pro → flash 로 내린다   ← 02_ai_architecture.md 4.2절이 지정한 "첫 번째 조정 레버"
+1) Evaluator 모델을 pro → flash 로 내린다   ← "첫 번째 조정 레버"
    (Coach보다 먼저 내리지 않는다 — 인용 정확도가 우선)
-2) 그래도 넘으면 평가를 축 단위로 쪼갠다 (5축 = 5호출 체인).
+2) 그래도 넘으면 평가를 축 단위로 쪼갠다 (5축 = 5호출).
    대가: 호출 수가 5배로 늘어 RPD를 태운다. 인용 검증은 축 단위라 쪼개도 정합성은 유지된다
 3) 대화 전문을 넣는 방침(5.3절)은 마지막까지 건드리지 않는다 — 요약본으로 채점하면 인용 오프셋이
    전부 어긋나 핵심 가치 2번이 무너진다
 ```
 
-**다른 라우트는 상한이 낮아져도 설계 변경이 필요 없습니다.** 사용자 요청 라우트 중 가장 느린 것은
-#26(문서 추출)이며, 이것도 상한에 걸리면 `extraction_status='failed'` + 텍스트 직접 입력 안내라는
-**이미 정의된 실패 경로**로 떨어집니다.
+> **300초가 확인됐다고 해서 1·2번 레버가 필요 없어진 것은 아닙니다.** 그 레버들이 방어하는 진짜 제약은
+> 실행 시간이 아니라 **RPD와 체험 정원**입니다(4.7절). 실행 상한은 그중 한 증상이었을 뿐입니다.
+
+**사용자 요청 라우트는 여유가 큽니다.** 가장 느린 #26(문서 추출)도 최악 ~25s로 120s 상한의 20% 수준이고,
+넘더라도 `extraction_status='failed'` + 텍스트 직접 입력 안내라는 **이미 정의된 실패 경로**로 떨어집니다.
 
 ---
 
@@ -1585,7 +1677,7 @@ D4가 약속한 "접수되었습니다" 확인이 사라지고 사용자가 같�
 | `shadcn-ui-engineer` | SSE 응답에 **`res.json()`을 호출하지 마세요**(#9). 그리고 스트림이 끊기면 재요청이 아니라 **#10으로 재동기화**입니다(5.5절) |
 | `voice-pipeline-engineer` | **P1 회신: STT/TTS 토큰 발급 라우트를 만들지 않습니다.** 브라우저 내장 API를 쓰므로 인증할 프로바이더가 없다는 3.5절 판단을 그대로 수용합니다. P3(`PATCH .../turns/[turnId]`) = #11, P4(multipart 거부) = 5.1절, P5(모달리티 한 트랜잭션) = #12, P6(프리워밍 LLM 미호출) = #32로 각각 반영했습니다. **P2(보류 버퍼)는 M8을 따릅니다 — 7.2절 표의 "접두사이면 버린다"와 반대이니 9절 불일치 #1을 확인해 주세요** |
 | `qa-inspector` | 대조 기준선: (1) 4절 표의 "대응 훅" 열 ↔ 실제 훅의 언랩 코드, (2) 8절 admin 라우트 표 ↔ 실제 `admin.ts` import 지점, (3) 13절 409 목록 ↔ `transitions.ts`가 전이 표와 문자 단위로 같은지, (4) SSE `utterance_chunk.text`에 `<<<`가 없는지, (5) **`quote_start`를 Postgres 문자 함수에 넣는 코드가 없는지 전역 grep**, (6) `admin.ts`가 클라이언트 번들에 들어가지 않는지 |
-| `ai-interview-architect` | 9절이 "서버가 계산하는 값" 목록이며 AI 출력 스키마에 자리가 없어야 하는 필드와 1:1입니다. 11.3절: 실행 상한이 낮으면 **첫 레버는 Evaluator를 flash로** 내리는 것이라는 4.2절 지시를 그대로 따릅니다 |
+| `ai-interview-architect` | 9절이 "서버가 계산하는 값" 목록이며 AI 출력 스키마에 자리가 없어야 하는 필드와 1:1입니다. 11.3절: 예산을 넘으면 **첫 레버는 Evaluator를 flash로** 내리는 것이라는 4.2절 지시를 그대로 따릅니다 (**실행 상한은 300초로 확인됐지만 이 레버가 방어하는 진짜 제약은 RPD입니다** — D31) |
 | `supabase-engineer` | **스키마 변경 요청 없음.** `preparation` 상태는 새 컬럼 없이 `session_events`에서 파생합니다(12.2절). 다만 크론이 `in_progress` 세션을 `updated_at`으로 스캔하는데 `idx_sessions_status_updated` 부분 인덱스가 `in_progress`를 포함하지 않습니다 — MVP 규모에서는 순차 스캔으로 충분하다고 판단하지만, 세션이 수천 건을 넘으면 알려 주세요. **04 문서 반영 요청 2건은 14.1절에 있습니다(스키마 변경 아님).** |
 | `shadcn-ui-engineer` (**2차 / QA 대응 — 응답 shape가 바뀐 4곳**) | (1) **#16의 대응 훅 이름이 `useStartEvaluation` → `useRetryEvaluation`으로 바뀌고 의미가 `failed` 재시도 전용으로 좁혀졌습니다.** 리포트 화면 진입 시 자동 호출을 **삭제**하세요 — 정상 경로에서 항상 409입니다(6.3절). (2) **`Evaluation`에 `myFeedback: ReportFeedback \| null`과 `myDisputes: ScoreDispute[]`가 추가됐습니다**(12.3절). 새로고침 후에도 "접수되었습니다" 배지가 유지되며, 별도 조회 훅을 만들지 마세요. (3) **`GET /api/documents/[documentId]`(#34) + `useDocument`가 신설됐고 응답은 `{ document: DocumentDetail }`, `DocumentDetail`은 `Document` + `linkedSessionCount` + `configuringSessionCount`입니다**(12.4절). 삭제 확인 다이얼로그는 이 값을 읽고, 문구는 "출처 표시가 사라진다"이지 "리포트가 손상된다"가 아닙니다. (4) **#15/#9 응답의 `session.status`는 정상 경로에서 `evaluating`입니다** — `completed`를 기대하는 분기가 있으면 깨집니다(4절 표 아래 경고) |
 | `shadcn-ui-engineer` (**2차 / D19 — 취소는 삭제가 아닙니다**) | "이 세션 버리기"·"폐기"를 **`useDeleteSession`(#23)에서 `useCancelSession`(#33 `POST .../cancel`)으로 옮기세요.** 응답은 `{ session: Session }`(`status='canceled'`)입니다. 두 경로의 차이는 4.2절 표에 있습니다. 세션 목록은 기본으로 취소된 세션을 숨기고 **"취소된 세션 보기" 토글이 `includeCanceled=true`** 를 붙입니다(4.3절, 문자열 `'true'`). 토글을 바꾸면 커서를 버리고 처음부터 다시 조회하세요 |
@@ -1602,6 +1694,11 @@ D4가 약속한 "접수되었습니다" 확인이 사라지고 사용자가 같�
 | `product-architect` | **요청 2건.** (1) `01_state_machine.md` 전이 표 95행(`configuring → failed`)의 트리거 문구에 진입점이 #35라는 사실이 반영되면 좋겠습니다(문구 변경일 뿐 전이 자체는 그대로입니다). (2) `01_product_spec.md`의 `/sessions` 화면 요구에 **"취소된 세션 보기" 토글**을 넣어 주세요(QA F12). API 쪽 `includeCanceled`는 4.3절에 이미 있습니다 |
 | `shadcn-ui-engineer` (**4차 / D30 — 소거법을 버리세요**) | **신규 오류 409 `trial_reservation_exists`를 `usePrepareSession`에서 `code`로 직접 분기하세요.** `details.existingSessionId`가 **항상 채워져** 오므로 "진행 중인 면접으로 가기" 링크는 이 값으로 만들고, **`useDashboard`의 `activeSessions`에서 세션을 찾는 폴백은 삭제하세요**(`06_ui_plan.md` 16절 #10 · 14절 §5 회신). 다른 409 3종(`trial_consent_required`·`byok_key_invalid`·`consent_version_stale`)이 아니면 D30으로 간주하던 소거법도 함께 폐기합니다. 이 오류는 **여력 부족이 아니므로** 503 화면·"내일 오세요" 문구와 섞지 말고, 안내에는 **[이어서 하기]와 [이전 면접 취소하기](#33)** 두 행동을 두세요 |
 | `qa-inspector` (**4차 / D30 검증 요청**) | (1) **#6이 `trial_reservation_exists`를 409로 내는지**, 그리고 이 코드가 `funding_source='byok'` 경로에서 나올 수 없는지. (2) **강제가 라우트가 아니라 `reserve_session_quota`(DB 함수)에 있는지** — 라우트 단독 검사면 동시 요청에서 빠져나갑니다. (3) **`details.existingSessionId`가 비어 있는 응답 경로가 없는지.** (4) **UI에 `activeSessions` 폴백 잔재가 없는지**(grep). (5) **#16·#18에서는 이 코드가 나오지 않는지**(같은 세션의 재예약이므로). (6) 거절 후 **세션이 `configuring`에 남고 설정이 보존되는지** |
+
+| `qa-inspector` (**5차 / D31 검증 요청**) | (1) **`/api/internal/jobs/coach` 파일이 저장소에 남아 있지 않은지** — 경로가 남으면 `JOB_SECRET`만으로 코치를 단독 호출할 수 있는 문이 하나 더 열린 채가 됩니다(4.1절). (2) **I2의 1단계와 2단계가 서로 다른 try/catch이고 한 트랜잭션으로 묶여 있지 않은지** — 묶이면 부분 성공이 사라지고 `improvement`의 nullable이 죽습니다(6.2절). (3) **코치 단계가 `evaluations.attempt_count`를 UPDATE하지 않는지**(6.4절). (4) **소프트 데드라인 210s 검사가 코치 진입 직전에 있는지**(11.2.1절). (5) **`maxDuration`이 라우트 파일과 `vercel.json` 양쪽에서 같은 값인지** — 한쪽만 두면 조용히 기본값으로 떨어집니다. (6) **#18이 `stage: 'coach_only'`로 I2를 부르는지**, 그리고 그 경로에서 1단계가 실행되지 않는지 |
+| `shadcn-ui-engineer` (**5차 / D31 — 프론트 변화 없음**) | **응답 shape·훅·타입이 하나도 바뀌지 않았습니다.** #18의 응답은 그대로 `202 { sessionId, evaluationId, coachStatus: 'running' }`이고, 리포트 대기 화면의 Realtime 재조회 흐름도 그대로입니다. 바뀐 것은 서버 내부의 함수 호출 구조뿐입니다. **다만 코치 완료가 평가 완료 직후에 이어지므로 `evaluating → evaluated` 사이의 체감 간격이 짧아집니다** — "점수만 먼저 보이고 코칭이 나중에 채워지는" 중간 화면을 전제한 구현이 있다면, 그 화면은 이전에도 보장된 적이 없습니다(코치 미완료 판정은 여전히 `evaluation.summary === null` 하나입니다) |
+| `ai-interview-architect` (**5차 / D31**) | **8.1절 지연 추정치가 이제 한 함수 호출의 예산으로 합산됩니다**(평가자 + 코치 ≤ 210s 소프트 데드라인). 두 추정치 중 하나라도 크게 빗나가면 조정 레버는 4.2절 순서 그대로입니다(11.3절). **요청 1건:** 8.2절이 평가 파이프라인을 "2단계 체이닝"으로 서술하고 있다면 **"한 워커 호출 안의 순차 2단계"** 로 문구를 맞춰 주세요 — 단계의 논리적 분리와 독립 재시도는 그대로이므로 **설계 변경이 아니라 문구 정정**입니다. 이 계약은 `02_*` 문서를 고치지 않습니다 |
+| `supabase-engineer` (**5차 / D31**) | **스키마 변경 요청 없음.** `evaluations.status`·`attempt_count`·`started_at`의 용법이 그대로이고, 코치가 별도 함수에서 돌지 않게 됐을 뿐입니다. **확인 요청 1건:** `evaluations`의 선점 UPDATE(`status='running' and id=:evaluationId`)가 이제 **한 호출에서 두 단계 내내 잡혀 있게** 됩니다. `started_at` 갱신을 `locked_at` 대용으로 쓰는 규약(6.2절)이 10분 워치독 기준(`WATCHDOG_EVALUATING_TIMEOUT_MIN`)과 충돌하지 않는지 봐 주세요 — 워커 최악 실행이 240s이므로 10분 안에는 끝납니다만, 두 값의 관계를 명시해 두는 편이 안전합니다 |
 
 ### 14.1 데이터 레이어 변경 요청 (`supabase-engineer`)
 
@@ -1653,7 +1750,7 @@ D4가 약속한 "접수되었습니다" 확인이 사라지고 사용자가 같�
 ```
 
 ```
-[결정 완료 D26] #26 문서 추출은 동기 라우트를 유지한다 (maxDuration 60).
+[결정 완료 D26] #26 문서 추출은 동기 라우트를 유지한다 (maxDuration 120 — D31로 재조정, 구 60).
   근거: AI 호출이 아니라 지연이 예측 가능하고(1~8s), 비동기로 바꾸면 상태·폴링·워커가 통째로
         늘어나는데 그 복잡도를 정당화할 만큼 오래 걸리는 작업이 아니다.
         실패 경로는 이미 정의돼 있다(extraction_status='failed' → 텍스트 직접 입력).
@@ -1662,9 +1759,21 @@ D4가 약속한 "접수되었습니다" 확인이 사라지고 사용자가 같�
 ```
 
 ```
-[확인 필요] Vercel 무료 플랜의 함수 실행 시간 상한과 크론 최소 주기 — 05_deploy.md 3절에 기록한다.
-  11.3절이 상한 < 60초일 때의 조정 순서를 이미 정해 두었으므로, 값이 무엇이든 설계는 성립한다.
-  다만 값을 확인하기 전에는 I2(평가자)의 maxDuration 60을 확정값으로 취급하지 않는다
+[해소 2026-09-10 / D31] Vercel Hobby의 함수 실행 상한 = 300초(기본 300 / 최대 300),
+  크론 최소 주기 = 하루 1회(정밀도 ±59분). 출처와 확인일은 05_deploy.md 3절 표.
+  → 60초 가정이 틀렸으므로 평가·코치 체이닝을 워커 1회 호출로 단순화했다(6.2절).
+  → 내부 워커 라우트 3종 → 2종. maxDuration 표를 11.2절에서 재조정했다.
+  → "일 1회 워치독 + 게으른 워치독"(6.5절) 판단은 크론 제약이 실제로 확인되면서 검증됐다. 그대로 둔다.
+  남은 것: 대역폭·함수 호출 수, 배포 보호 사용 가능 여부 — 05_deploy.md 3절에 여전히 [확인 필요]
+```
+
+```
+[확인 필요 / 유지] 선택 모델(Gemini)의 무료 티어 RPM · RPD · TPM.
+  Google은 이 수치를 문서에 싣지 않고 AI Studio 대시보드에서 계정별로 확인하게 한다(2026-09-10 확인).
+  즉 문서를 더 읽어서 해결될 항목이 아니고, 소유자가 자기 대시보드에서 읽어 환경변수로 주입해야 한다.
+  05_deploy.md 3.1절에 읽는 절차를 적었다. 주입 전까지 D27 예약 게이트는 fail-open이다.
+  → 이 계약이 이 값에 의존하는 지점은 4.7절(예약량)과 10.1절(429 정규화)이며,
+    둘 다 값이 없어도 동작하도록 이미 설계돼 있다
 ```
 
 > 전체 결정 기록: [`00_input/decisions.md`](00_input/decisions.md)

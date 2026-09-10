@@ -63,6 +63,35 @@
 
 ---
 
+### 0.3 스키마가 강제하는 것과 강제하지 않는 것 (2026-09-10 측정 — D32)
+
+**Gemini 구조화 출력이 지원하는 JSON Schema 키워드는 한정적입니다.** 확인한 목록:
+
+| | 키워드 |
+|---|---|
+| **지원(모델이 강제)** | `type` · `title` · `description` · `properties` · `required` · `additionalProperties` · `enum` · `format` · `minimum` · `maximum` · `items` · `prefixItems` · `minItems` · `maxItems` |
+| **미지원(강제되지 않음)** | **`minLength` · `maxLength`** |
+
+출처: [Gemini 구조화 출력 문서](https://ai.google.dev/gemini-api/docs/structured-output), 2026-09-10 확인.
+
+**이 문서에 등장하는 모든 `minLength` / `maxLength`는 "모델에게 주는 힌트 + 서버가 검증하는 계약"이지
+스키마가 막아주는 제약이 아닙니다.** 이 절을 읽지 않고 스키마만 보면 반대로 오해합니다.
+문자열 길이를 어기는 출력은 **정상적으로 도착하며**, 걸러내는 것은 서버 검증이고
+최종 방어선은 DB CHECK입니다. 각 호출의 "서버 검증" 절이 실제 강제 지점입니다.
+
+**반대로, 설계의 핵심 장치들은 스키마가 강제하는 것으로 확인됐습니다.**
+
+- `additionalProperties: false` → **평가자 출력에 `weight`·`overall_score`·`summary` 자리가 없다**는
+  책임 경계가 모델 단에서 막힙니다. 이 문서가 기대는 가장 중요한 장치입니다
+- `enum` → 루브릭 축 5개, `action` 5종 등 유니온이 고정됩니다
+- `minItems`/`maxItems` → 축 정확히 5개, 인용 축당 1–3건이 강제됩니다
+- `minimum`/`maximum` → 점수 1–5 정수가 강제됩니다
+- `["integer","null"]` → 근거 부족 시 `score = null`이 그대로 동작합니다
+
+즉 **깨질 수 있는 것은 문자열 길이 하나**이며, 그 하나는 이미 서버·DB 이중으로 막혀 있습니다.
+
+---
+
 ## 1. 공통 타입 정의 (`$defs`)
 
 아래 정의는 모든 스키마가 `$ref`로 참조합니다. 구현에서는 하나의 파일에 두고 재사용합니다.
