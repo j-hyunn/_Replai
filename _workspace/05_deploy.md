@@ -6,6 +6,13 @@
 
 ## 변경 로그
 - 2026-09-09 최초 작성. 환경변수 16종, 공개/비공개 구분, 크론 1종, 무료 플랜 `[확인 필요]` 자리 확보.
+- 2026-09-10 (2차) **D27·D28·D29 반영.** 기존 절만 고쳤습니다.
+  - **D27** — 예약 게이트 환경변수 **9종 추가**(1.2절, 전부 서버 전용). **한도 3종 미설정 시 fail-open**이 확정 동작이며,
+    배포 전 체크리스트에 "RPD 3종 측정·주입" 항목을 넣었습니다(3.1절·6절). 크론 워치독 **4종 → 5종**(5절, 만료 예약 스윕).
+  - **D28** — Supabase **Vault** 설정 항목(2.4절 S7·S8), 키 유출 방어에 CI 검사 2종 추가(1.3절).
+    **사용자 키는 환경변수가 아닙니다** — Vault에 있고 요청 단위로 복호화됩니다(1.4절).
+  - **D29** — 동의 문구 버전 상수와 배포 시 주의(1.5절). 환경변수가 아니라 **애플리케이션 상수**입니다.
+  - 환경변수 **16종 → 25종**. 공개(`NEXT_PUBLIC_`) 변수는 **여전히 3개** — 이번에 늘어난 것이 하나도 없습니다.
 
 ---
 
@@ -20,7 +27,7 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
 | 변수 | 값의 성격 | 용도 | 노출되어도 되는 이유 |
 |---|---|---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | 프로젝트 URL | 브라우저 Supabase 클라이언트, Realtime, Storage 직업로드 | 공개 엔드포인트입니다 |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | anon 키 | 위와 동일 | **RLS가 전제입니다.** 12개 테이블 전부 RLS가 켜져 있고 정책이 소유자만 허용하므로, 이 키만으로는 남의 데이터에 닿을 수 없습니다. RLS가 하나라도 꺼지면 이 키가 곧 전체 데이터 유출 경로가 됩니다 |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | anon 키 | 위와 동일 | **RLS가 전제입니다.** **17개** 테이블 전부 RLS가 켜져 있고 정책이 소유자만 허용하므로, 이 키만으로는 남의 데이터에 닿을 수 없습니다. RLS가 하나라도 꺼지면 이 키가 곧 전체 데이터 유출 경로가 됩니다. **2026-09-10 신규 5개 중 `ai_quota_ledger`·`ai_quota_reservations`·`user_api_keys`·`account_events` 4개는 RLS 켜고 정책 0개**(`service_role` 전용)이고, `trial_consents`만 본인 행 `select` 정책을 갖습니다 |
 | `NEXT_PUBLIC_SITE_URL` | 배포 URL | 절대 URL 생성(리다이렉트·메타데이터) | 공개 정보 |
 
 **공개 변수는 이 3개가 전부입니다.** 새 `NEXT_PUBLIC_` 변수를 추가할 때는
@@ -43,6 +50,37 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
 | `AI_PROVIDER` | `google` \| `anthropic`. 기본 `google` | `src/lib/ai/roles.ts` | 없음 |
 | `WATCHDOG_EVALUATING_TIMEOUT_MIN` | 기본 `10` | 게으른 워치독·크론 | 없음 |
 | `PAUSED_AUTO_CLOSE_DAYS` | 기본 `7` (D7) | 크론 | 없음 |
+| **`AI_QUOTA_GATE_ENABLED`** | 게이트 전체 on/off. 기본 `true`. **사고 시 배포 없이 끄기 위한 스위치** | `src/lib/quota/gate.ts` | 없음 |
+| **`AI_RPD_LIMIT_FLASH_LITE`** | 측정한 `gemini-2.5-flash-lite`의 RPD **원값**. 기본값 **없음** | 〃 (`limit_calls` 계산) | 없음. 단 **체험 정원이 그대로 드러나므로 서버 전용** |
+| **`AI_RPD_LIMIT_FLASH`** | 〃 `gemini-2.5-flash`. 기본값 **없음** | 〃 | 〃 |
+| **`AI_RPD_LIMIT_PRO`** | 〃 `gemini-2.5-pro`. 기본값 **없음**. **가장 희소한 자원이라 체험 정원을 결정합니다** | 〃 | 〃 |
+| **`AI_QUOTA_SAFETY_MARGIN_PCT`** | 안전 여유. 기본 `15` (`02_ai_architecture.md` 8.3.7절) | 〃 | 없음 |
+| **`AI_QUOTA_RESET_TIMEZONE`** | `quota_date` 계산 타임존. 기본 `America/Los_Angeles` **`[확인 필요]`** — **UTC가 아닐 가능성이 높습니다** | 〃 | 없음 |
+| **`AI_RESERVE_FLASH_LITE_PER_SESSION`** | 세션당 예약량. 기본 `26` (8.3.1절) | 〃 | 없음 |
+| **`AI_RESERVE_FLASH_PER_SESSION`** | 〃 기본 `4` | 〃 | 없음 |
+| **`AI_RESERVE_PRO_PER_SESSION`** | 〃 기본 `3` | 〃 | 없음 |
+
+**예약 게이트 환경변수 9종은 전부 서버 전용입니다 — `NEXT_PUBLIC_` 금지.**
+한도 수치 자체는 비밀이 아니지만, **하루 체험 정원이 그대로 계산되는 값**이고 그 숫자가 브라우저에
+있으면 `06_ui_plan.md`의 금칙어 규칙("무료 티어"·"한도"·"쿼터" 노출 금지)이 무의미해집니다.
+**클라이언트에 나가는 여력 정보는 `GET /api/capacity`의 불리언과 시각 하나뿐입니다**(`05_api_contract.md` 4.7.5절).
+
+**⚠️ 한도 3종이 하나라도 미설정이면 게이트는 열린 채로 동작합니다 (fail-open — 확정 동작).**
+
+> 근거는 `02_ai_architecture.md` 8.3.8절입니다. fail-closed(수치가 없으면 전면 차단)는
+> **환경변수 오타 하나로 서비스가 죽습니다.** fail-open의 대가는 "D27 이전 상태로 되돌아가는 것"인데,
+> 그때도 폴백 사다리 1~4단계가 남아 있으므로 **최악이 이전 설계와 같습니다.**
+> 설계의 실패 모드가 이전 설계보다 나빠지지 않는 쪽을 택합니다.
+>
+> **대신 침묵하지 않습니다:** (a) 부팅 시 경고 로그(`env.server.ts`에서 세 값의 존재를 확인),
+> (b) 6절 배포 전 체크리스트 항목, (c) 게이트 미동작 상태에서 `pause_reason='rate_limited'`가 뜨면
+> `02_ai_architecture.md` 8.3.9절의 관측이 잡습니다. **주입 전까지 D27은 실질적으로 미적용 상태입니다.**
+
+- **`AI_RPD_LIMIT_*`는 원값이고 `limit_calls`는 파생값입니다.**
+  `limit_calls = floor(AI_RPD_LIMIT_<BUCKET> × (1 − AI_QUOTA_SAFETY_MARGIN_PCT / 100))`을
+  **라우트가 계산해 `reserve_session_quota(..., p_limits)`로 넘깁니다**(R8 — DB는 환경변수를 읽을 수 없습니다).
+- **하루 도중에 값을 바꿔도 그날의 판정은 흔들리지 않습니다.** 원장 행 생성 시 `limit_calls`가 박히므로
+  새 값은 **다음 날 첫 예약부터** 적용됩니다(`02_ai_architecture.md` 8.3.5절).
 
 **모델 ID를 환경변수로 오버라이드할 수 있어야 하는 이유**(`02_ai_architecture.md` 4.4절):
 무료 티어 한도를 소진했을 때 **운영자가 배포 없이 모델을 내릴 수 있어야** 합니다.
@@ -57,6 +95,42 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
 | CI 검사 | `grep -rn "NEXT_PUBLIC_.*\(SERVICE_ROLE\|API_KEY\|SECRET\)" src/` 가 **0행**이어야 통과 |
 | CI 검사 2 | 클라이언트 번들(`.next/static/**`)에 `SUPABASE_SERVICE_ROLE_KEY`·`GOOGLE_AI_API_KEY`의 **값**이 없는지 확인 |
 | **AI 프로바이더를 클라이언트에서 직접 부르지 않음** | 고정 제약. 브라우저에서 LLM을 부르는 코드 경로는 하나도 없습니다 |
+| **CI 검사 3 (D28)** | `grep -rn "get_user_api_key\|decrypted_secret" src/` 의 결과가 **`src/lib/ai/credentials.ts` 한 파일뿐**이어야 통과. 복호화 지점이 늘어나는 것을 CI가 잡습니다 |
+| **CI 검사 4 (D28)** | 응답 직렬화에 키가 섞이는 사고 방지 — `grep -rn "select('\*')\|select(\"\*\")" src/app/api/account/api-key/` 가 **0행**. `user_api_keys`를 `select *`로 읽어 그대로 반환하는 경로를 두지 않습니다 |
+
+### 1.4 사용자 API 키(BYOK)는 **환경변수가 아닙니다** (D28)
+
+혼동하기 쉬운 지점이라 못 박습니다.
+
+| | 서비스 공용 키 | **사용자 키(BYOK)** |
+|---|---|---|
+| 어디에 있나 | `GOOGLE_AI_API_KEY` 환경변수 | **Supabase Vault**(`vault.secrets` 암호문). 환경변수에 **넣지 않습니다** |
+| 언제 읽나 | 프로세스 부팅 시 1회 | **요청마다** `get_user_api_key(userId)`로 복호화 |
+| 누가 읽나 | `src/lib/ai/providers/google.ts` | **`src/lib/ai/credentials.ts` 한 곳뿐** (`service_role` 전용 함수) |
+| 어디까지 가나 | 서버 | **`LlmCallContext.apiKey` 안까지.** 반환값·예외·로그·스팬 속성 어디에도 나가지 않습니다 |
+| 쓰이는 세션 | `funding_source='trial_shared'` | `funding_source='byok'` |
+
+- **사용자마다 키가 다르므로 환경변수라는 그릇 자체가 맞지 않습니다.** 환경변수는 배포 단위 상수입니다.
+- **공용 키 폴백은 금지입니다**(`05_api_contract.md` 4.8.2절). 사용자 키가 죽어도 `GOOGLE_AI_API_KEY`로
+  넘어가는 코드 경로가 존재하지 않아야 합니다 — 넘어가면 **D29 동의 없는 이력서·답변이 공용 경로로 나갑니다.**
+- 로그에 남길 수 있는 유일한 키 관련 값은 **`keyFingerprint`(끝 4자리)** 입니다. `ctx`를 통째로
+  직렬화하는 로깅 헬퍼를 두지 않습니다(화이트리스트 방식).
+- **요청 body를 통째로 로깅하는 미들웨어·에러 리포터를 `PUT /api/account/api-key`에 붙이지 마세요.**
+  이 설계에서 키가 샐 수 있는 **유일하게 남은 경로**입니다.
+
+### 1.5 동의 문구 버전은 **애플리케이션 상수**입니다 (D29)
+
+`src/lib/consent/trial-consent.ts` 한 파일이 문구 원문과 버전(`CURRENT_TRIAL_CONSENT_VERSION`)을 갖습니다.
+**환경변수로 빼지 않습니다** — 환경만 바꿔 문구를 바꿀 수 있으면 "무엇에 동의했는가"를 코드에서 답할 수 없습니다.
+
+- 서버 라우트(#41)와 동의 다이얼로그가 **같은 상수를 import**합니다. 사본을 만들면 화면과
+  `consent_text_sha256`이 갈라집니다.
+- **문구를 고치면 버전을 반드시 함께 올립니다.** 올리지 않으면 과거 동의 기록이 **지금은 존재하지 않는 문장**을
+  가리키게 되고, 아무도 그 사실을 알 수 없습니다.
+- **문구 버전을 올린 배포는 사용자 재동의를 유발합니다.** 옛 버전 동의만 가진 사용자는
+  다음 체험 준비에서 `409 trial_consent_required`를 받고 동의 다이얼로그를 다시 봅니다(의도된 동작).
+  DB 트리거는 이를 잡지 못하므로(**동의 행의 존재만 검사**), 배포 후 **서버 가드가 버전을 대조하는지**
+  스모크에서 확인합니다(6절 8단계).
 
 ---
 
@@ -113,6 +187,17 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
 | `GOOGLE_AI_API_KEY` | 운영 키 | **별도 키 권장** — 같은 키를 쓰면 PR 미리보기가 운영 세션의 무료 티어 쿼터를 먹습니다 | 개인 키 |
 | `JOB_SECRET` / `CRON_SECRET` | 각각 다른 난수 32B | 각각 다른 난수 | 임의값 |
 | `NEXT_PUBLIC_SITE_URL` | 운영 도메인 | Vercel 시스템 변수에서 파생 | `http://localhost:3000` |
+| **`AI_RPD_LIMIT_*` 3종** | **실측값**(3.1절) | **Preview 키 기준의 실측값** — 운영값을 그대로 쓰면 원장이 없는 여력을 약속합니다 | 설정 안 함(fail-open) |
+| **`AI_QUOTA_GATE_ENABLED`** | `true` | `true` | `false` 권장 — 로컬에서 게이트에 막히면 개발이 멈춥니다 |
+| **`AI_QUOTA_RESET_TIMEZONE`** | 실측값 | 운영과 **같은 값** | 〃 |
+| **`AI_RESERVE_*` 3종** | 기본값(26/4/3) | 운영과 같은 값 | 〃 |
+
+- **D24(Preview AI 키 분리)가 D27에서 더 중요해졌습니다.** 예약 원장은 **환경이 아니라 키의 여력**을 모사하는
+  장부입니다. Preview가 운영 키를 공유하면 PR 검증이 태운 호출은 **원장 밖**에서 한도를 먹고,
+  원장은 "아직 여유 있음"이라고 말합니다 — 그 어긋남이 곧 `pause_reason='rate_limited'`(면접 도중의 벽)입니다.
+  이것이 `AI_QUOTA_SAFETY_MARGIN_PCT` 15%가 흡수해야 할 1순위 항목입니다(`02_ai_architecture.md` 8.3.7절 1).
+- **Preview는 스테이징 Supabase를 가리키므로 Vault도 별개입니다.** 운영 사용자의 키가 Preview에서
+  복호화될 경로가 없습니다.
 
 - **크론은 Production 배포에서만 실행됩니다.** Preview에서 워치독이 도는 일은 없습니다.
 - **Preview 배포는 배포 보호(Deployment Protection)를 켭니다.** 스테이징이라도 로그인 화면이 공개 인터넷에
@@ -126,8 +211,11 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
 | S2 | Email 이외 provider | 전부 OFF | 소셜 로그인은 `[later]` |
 | S3 | Storage 버킷 | `documents` **하나뿐** (private, 10 MiB, MIME 4종) | 오디오 버킷을 만들면 안 됩니다(`03_voice_pipeline.md` Q2) |
 | S4 | Realtime publication | `interview_sessions` **한 테이블만** | `04_data_layer.md` 8절 |
-| S5 | RLS 확인 쿼리 2종 | 결과 **0행** | `04_data_layer.md` 5.4절. 배포 직후 반드시 실행 |
+| S5 | RLS 확인 쿼리 **3종** | 결과 **0행** | `04_data_layer.md` 5.4절. **2종 → 3종**(함수 실행 권한 검사 추가, 12.2절). 배포 직후 반드시 실행. **테이블 17개 전부 RLS 활성화** |
 | S6 | Site URL / Redirect URLs | 운영·프리뷰 도메인 등록 | 없으면 로그인 리다이렉트가 깨집니다 |
+| **S7** | **Vault 확장** (`supabase_vault`) **활성화** | **ON** | **D28.** `set_user_api_key`/`get_user_api_key`가 `vault.create_secret`·`vault.decrypted_secrets`에 의존합니다. 마이그레이션이 확장을 켜더라도 **새 프로젝트에서 가장 놓치기 쉬운 항목**입니다 |
+| **S8** | **PostgREST 노출 스키마 목록에 `vault`를 넣지 않음** | `public`(+`graphql_public`)만 | **D28.** `vault`가 노출되면 `decrypted_secrets` 뷰가 REST로 조회 가능해집니다. **RLS보다 앞선 방어선이고, 켜져 있으면 나머지 4중 강제가 전부 무의미해집니다** |
+| **S9** | 함수 실행 권한 | `set_user_api_key`·`get_user_api_key`·예약 함수 3종이 **`service_role`에만 grant** | **D27·D28.** `anon`/`authenticated`에서 `revoke`. S5의 3번째 쿼리가 이것을 검사합니다 |
 
 > **이 서비스에는 이메일 발송 경로가 하나도 없습니다**(D2·D8). SMTP 설정을 하지 않습니다.
 
@@ -176,11 +264,21 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
 
 | # | 값 | 그 값으로 계산할 것 |
 |---|---|---|
-| 1 | 모델별 RPM | **동시 세션 상한.** 초과하면 폴백 사다리 3~4단계로 내려갑니다 |
-| 2 | 모델별 RPD | **하루 최대 세션 수** = RPD ÷ 26 (병목 모델 기준). MVP 사용자 20~30명 규모에 맞는지 |
-| 3 | `gemini-2.5-pro`의 RPD | 평가자는 세션당 1회(+재시도 ≤3)이므로 **여기가 리포트 생성의 상한**입니다 |
+| 1 | 모델별 RPM | **동시 세션 상한.** 초과하면 폴백 사다리 3~4단계로 내려갑니다. **RPD와 달리 사전 예약의 대상이 아닙니다**(순간적·자기회복적, `02_ai_architecture.md` 8.3.0-a절) |
+| 2 | 모델별 RPD | **`AI_RPD_LIMIT_*` 3종에 그대로 주입할 값**(1.2절). 이 값이 없으면 게이트는 fail-open입니다 |
+| 3 | `gemini-2.5-pro`의 RPD | **하루 체험 정원 = `floor(유효한도 / AI_RESERVE_PRO_PER_SESSION)`.** 가장 희소한 자원이라 이 값 하나가 정원을 결정합니다. **BYOK 세션은 이 계산 밖이고 개수 제한이 없습니다**(D28) |
 | 4 | TPM | 세션당 입력 61K가 몇 세션까지 동시에 들어가는지 |
 | 5 | 429의 `Retry-After` 유무 | `resumable_after` 계산에 씁니다(`05_api_contract.md` 10.1절). 없으면 다음 날 00:00 UTC |
+| **6** | **리셋이 실제로 일어나는 시각** | **`AI_QUOTA_RESET_TIMEZONE` 확정**(1.2절). 기본값 `America/Los_Angeles`는 추정이며 **UTC가 아닐 가능성이 높습니다** |
+
+**측정 절차 (`02_ai_architecture.md` 8.3.8절):**
+
+```
+1) 프로바이더 문서에서 모델별 RPD 공표값을 읽어 위 표에 기록한다 (확인일·출처 URL 포함)
+2) 공표값이 없거나 모호하면 스테이징 키로 단일 모델을 반복 호출해 429가 뜨는 지점을 측정한다
+3) 리셋 시각을 관측해 AI_QUOTA_RESET_TIMEZONE을 확정한다
+4) 세 값을 운영 환경변수에 넣는다 — 그 전까지 게이트는 열려 있고 D27은 실질적으로 미적용이다 (P1)
+```
 
 **예산 초과 시 조정 순서 (`02_ai_architecture.md` 4.2절이 지정한 순서 그대로):**
 
@@ -211,14 +309,15 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
 | **대역폭** | 오디오를 저장·전송하지 않습니다. 문서는 클라이언트가 Storage에 **직접** 올려 Vercel 대역폭을 쓰지 않습니다(`04_data_layer.md` 7.4절) | Vercel 쪽 대역폭은 사실상 HTML·JS·JSON뿐 |
 | **Supabase DB 용량** | 스냅샷 텍스트가 유일한 증가 요인(세션당 수십 KB 추정, `04_data_layer.md` 14.1절 `[확인 필요]`) | |
 | **Supabase Storage 용량** | D3으로 원본 파일을 계속 보관하므로 **단조 증가**합니다. 줄어드는 힘이 없습니다 | 한도에 닿으면 D3을 되돌리는 정책 결정이 필요합니다 |
-| **AI 무료 티어** | 3.1절 `[확인 필요]` | 유일하게 실측 전까지 확신할 수 없는 항목 |
+| **AI 무료 티어** | 3.1절 `[확인 필요]`. **D27 예약 게이트가 체험 세션을 사전 배급하고, D28 BYOK 세션은 사용자 키를 쓰므로 우리 한도를 전혀 쓰지 않습니다** | 실측 전까지 확신할 수 없는 항목이지만, **막힌 사용자에게 "키 연결"이라는 출구가 생겨 이 위험의 크기가 D27 시점보다 작아졌습니다** |
+| **함수 호출 수 (D27·D28 증가분)** | 세션당 +2~4회(#36 여력 조회, #41 동의 1회, 키 라우트는 계정당 몇 회). 예약·반납은 **별도 호출이 아니라 기존 라우트 안의 DB 함수 호출**입니다 | 무시할 수준입니다. 새 크론도 없습니다(기존 C1에 5단계를 붙였을 뿐) |
 
 **설계상 $0을 유지하는 핵심 3가지**: (1) 오디오 미저장·미전송, (2) 문서 Storage 직업로드,
 (3) Realtime 1테이블 구독으로 폴링 제거. 셋 다 이미 다른 문서에서 확정된 결정입니다.
 
 ---
 
-## 5. 크론 라우트 `GET /api/cron/daily`가 하는 일 (4가지, 순서 고정, 전부 멱등)
+## 5. 크론 라우트 `GET /api/cron/daily`가 하는 일 (**5가지**, 순서 고정, 전부 멱등)
 
 ```
 0. Authorization: Bearer ${CRON_SECRET} 검사 → 불일치 시 401
@@ -238,12 +337,23 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
    storage_cleanup_queue의 pending 200건 → storage.remove() → done / attempt_count += 1
    + documents에 대응 행이 없는 24시간 이상 된 고아 객체 제거
    + done 행 중 30일 지난 것 삭제
+5. 만료 예약 스윕 (D27 신규 — 01_state_machine.md 7.5절 규칙 5)
+   where quota_date < today(AI_QUOTA_RESET_TIMEZONE 기준) and status = 'held'
+   → release_session_quota(..., reason='expired')로 정리
+   ※ idx_quota_res_held 부분 인덱스를 탑니다. 체험 세션 예약에만 해당합니다
 ```
 
 - **각 단계는 배치 상한(200건)을 두고, 못 끝낸 분량은 다음 날 이어서 처리합니다.** 한 번의 실행이
   `maxDuration`을 넘기지 않게 하는 것이 우선이며, 워치독은 하루 늦어도 사용자 경험이 달라지지 않습니다.
 - **단계 하나가 실패해도 다음 단계를 실행합니다.** 스위퍼 실패로 세션 자동 종료가 멈추면 안 됩니다.
-- 실행 결과는 `session_events`(1~3단계, `trigger='scheduler'`)와 애플리케이션 로그(4단계)에 남깁니다.
+- 실행 결과는 `session_events`(1~3단계, `trigger='scheduler'`)와 애플리케이션 로그(4·5단계)에 남깁니다.
+- **1·2·3단계의 종료 전이는 예약 반납을 동반합니다**(`05_api_contract.md` 4.7.3절):
+  `paused → completed`는 `flash_lite`만, `paused → abandoned`와 `evaluating → failed`는 전부.
+  **반납은 멱등이어야 하고, 크론이 두 번 돌아도 여력이 부풀지 않아야 합니다.**
+- **5단계는 안전망이지 정상 경로가 아닙니다.** 여기서 정리되는 행이 꾸준히 나오면
+  **반납 6지점 중 하나가 빠졌다는 신호**입니다(`01_state_machine.md` 7.5절). 건수를 로그에 남기고
+  0이 아니면 원인을 찾습니다 — 원장 행이 날짜별이라 여력 계산에는 이미 영향이 없지만,
+  `held`로 남은 과거 행은 "반납 누락"과 구분되지 않아 관측을 오염시킵니다.
 
 ---
 
@@ -259,7 +369,25 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
 6. 배포 직후: 04_data_layer.md 5.4절 RLS 확인 쿼리 2종 실행 → 각각 0행
 7. 스모크: 로그인 → 세션 생성 → 문서 업로드·추출 → prepare → start → 턴 1회(SSE) →
    complete → evaluate → 리포트 도달
+8. 스모크(2차 — D27·D28·D29): 아래 6항목
+   a. GET /api/capacity 응답에 잔여량·한도 수치가 없는지 (불리언 + 시각 + 상태만)
+   b. 동의 없이 prepare → 409 trial_consent_required (전이하지 않고 configuring 유지)
+   c. 동의 후 prepare → 예약 성공 → session_events에 quota_reserved
+   d. 키 연결(PUT) → 응답에 키 원문이 없는지 (본문 전수 확인, keyLast4만)
+   e. 키를 연결한 계정으로 세션 생성 → funding_source='byok' → ai_quota_reservations에 행이 없는지
+   f. 세션 취소 → ai_quota_ledger.held_calls가 예약 전 값으로 정확히 복귀하는지
 ```
+
+**배포 전 체크리스트 (D27·D28 — 위 절차와 별개로 한 번은 답해야 하는 질문들)**
+
+| # | 항목 | 미충족이면 |
+|---|---|---|
+| **P1** | **`AI_RPD_LIMIT_*` 3종을 측정해 운영 환경변수에 주입했는가** (3.1절) | **게이트가 fail-open으로 동작합니다** — D27은 실질적으로 미적용이고 벽이 다시 면접 도중으로 돌아옵니다. 부팅 경고 로그로 확인하세요 |
+| **P2** | `AI_QUOTA_RESET_TIMEZONE`을 **관측으로 확정**했는가 | 리셋 경계에서 예약과 실제 한도가 어긋납니다. 안전 마진 15%의 3번째 용도가 이 완충입니다 |
+| **P3** | Vault 확장(S7)과 `vault` 미노출(S8)을 확인했는가 | **타인의 자격증명이 REST로 조회 가능해집니다.** 나머지 방어가 전부 무의미해집니다 |
+| **P4** | 함수 실행 권한(S9)이 `service_role` 전용인가 | `authenticated`가 남의 키를 복호화하거나 원장을 조작할 수 있습니다 |
+| **P5** | 동의 문구 버전(1.5절)이 이번 배포에서 올라갔는가 | 올랐다면 **전체 사용자가 재동의**합니다(의도된 동작). 안 올렸는데 문구만 고쳤다면 **과거 동의 기록이 거짓이 됩니다** |
+| **P6** | Preview가 운영 AI 키를 공유하고 있지 않은가 (D24) | PR 검증이 **원장 밖**에서 한도를 먹고, 원장은 여유 있다고 말합니다(2.3절) |
 
 - **마이그레이션 적용 순서가 배포와 어긋나면 런타임에 `undefined`가 흐릅니다.**
   컬럼 추가는 코드 배포보다 **먼저**, 컬럼 삭제는 코드 배포보다 **나중**입니다.
@@ -280,6 +408,11 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
 | 평가 성공률 | `evaluations.status` + `attempt_count` 집계 |
 | 코치 실패 | `session_events`로만 관측(D10). `attempt_count`는 **평가자 시도만** 셉니다 |
 | DB·Storage 용량 | Supabase 대시보드(상시). Storage는 단조 증가하므로 주기적으로 봐야 합니다 |
+| **예약 게이트 (D27, 주간 점검)** | `session_events`의 `quota_reserved`·`quota_released`·`quota_overflow` 3종 + `ai_quota_ledger`의 `denied_count`·`held_calls`. 판정 기준은 `02_ai_architecture.md` 8.3.9절 표 — **`denied_count`가 많은데 `held_calls`에 여유가 있으면 반납이 새고 있는 것**이고, `quota_overflow`가 잦으면 예약량이 실사용보다 작은 것입니다 |
+| **`pause_reason='rate_limited'` 발생** | **0이어야 정상입니다.** 예약이 올바르면 면접 도중 RPD 소진은 구조적으로 일어나지 않습니다. 뜨면 사용자 문제가 아니라 **설계 결함의 신호**이므로 `quota_overflow`로 버킷을 특정해 해당 `AI_RESERVE_*`를 올립니다 |
+| **`funding_source='byok'` 행의 `rate_limited`** | **보안 사고로 다룹니다.** 사용자 키 세션이 우리 공용 한도에 부딪혔다는 뜻이므로 **공용 키 폴백 금지가 깨진 것**이고, D29 동의 없는 데이터가 공용 경로로 나갔을 수 있습니다(`02_ai_architecture.md` 8.3.9절) |
+| **키 수명주기 (D28)** | `account_events` 5종(`api_key_connected`/`replaced`/`disconnected`/`marked_invalid`/`trial_consent_granted`). **키 원문도 해시도 남지 않습니다** — 남는 것은 사실·시각·`key_last4`뿐입니다 |
+| **사용자 키 오류 3분류** | 로그에 `normalizeProviderError`의 `kind`(`transient`/`key_invalid`/`key_quota_exhausted`)와 `keyFingerprint`를 남깁니다. **`key_invalid`가 갑자기 늘면 우리 검증 로직이나 모델 접근 권한을 먼저 의심**하세요 — 사용자들이 동시에 키를 지웠을 리는 없습니다 |
 
 ---
 
@@ -291,6 +424,26 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
 [확인 필요] 3.1절 표 전체 — 선택 모델들의 무료 티어 RPM / RPD / TPM.
             02_ai_architecture.md 8절의 호출 예산 전체가 이 값에 매달려 있다
 [확인 필요] 3.2절 — 모델의 JSON Schema 제약 강제 범위 (평가자 구현 시)
+[확인 필요] AI_QUOTA_RESET_TIMEZONE (3.1절 표 6행) — 기본값 America/Los_Angeles는 추정이다.
+            리셋 시각을 관측해 확정하기 전까지는 날짜 경계에서 예약과 실제 한도가 어긋날 수 있고,
+            안전 마진 15%의 세 번째 용도가 그 완충이다
+```
+
+```
+[결정 완료 D27] 예약 게이트 수치는 전부 환경변수이고, 한도 3종 미설정 시 fail-open이다.
+  근거: fail-closed는 환경변수 오타 하나로 서비스를 죽이는 반면, fail-open의 최악은
+        "D27 이전 설계"와 같다(폴백 사다리 1~4단계가 그대로 남아 있다).
+        설계의 실패 모드가 이전보다 나빠지지 않는 쪽을 택한다.
+        대신 침묵하지 않는다 — 부팅 경고 로그 + 배포 전 체크리스트 P1 + 8.3.9절 관측.
+  전부 서버 전용이다. 한도 수치는 비밀이 아니지만 하루 체험 정원이 그대로 계산되는 값이고,
+  클라이언트에 나가는 여력 정보는 GET /api/capacity의 불리언과 시각 하나뿐이다.
+```
+
+```
+[결정 완료 D28] 사용자 API 키는 환경변수가 아니라 Supabase Vault에 있다 (1.4절).
+  환경변수는 배포 단위 상수이고 사용자 키는 사용자마다 다르므로 그릇 자체가 맞지 않는다.
+  복호화 지점은 src/lib/ai/credentials.ts 한 곳이며 CI 검사 3이 이를 강제한다.
+  공용 키 폴백 경로는 존재하지 않는다 — 넘어가면 D29 동의 없는 데이터가 공용 경로로 나간다.
 ```
 
 ```
