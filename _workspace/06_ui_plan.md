@@ -5,7 +5,9 @@
 > `01_product_spec.md` 7절(화면 11개) · `01_state_machine.md`(상태·전이·4상태) ·
 > `01_rubric.md`(리포트 구성·D1) · `03_voice_pipeline.md` 11·12·14.4절(UI 상태 계약) ·
 > `04_data_layer.md` 7·8·9·12절(Storage·Realtime·삭제) · `05_api_contract.md` **1·12절(훅 타입의 원본)**
-> 함께 읽을 것: `00_input/decisions.md`(**확정 결정 22건** — 판정 기준이며 재논의 대상이 아닙니다)
+> D27~D30 관련 입력: `01_product_spec.md` **6.5·7·10절** · `01_state_machine.md` **4.5절** ·
+> `02_ai_architecture.md` **4.6·13.6.3·13.7절** · `05_api_contract.md` **4.7·4.8·4.9·10.2·13·14절**
+> 함께 읽을 것: `00_input/decisions.md`(**확정 결정 30건** — 판정 기준이며 재논의 대상이 아닙니다)
 
 ## 변경 로그
 - 2026-09-09 최초 작성. 라우트 11개, 훅 34개(엔드포인트 32 + 비엔드포인트 훅), 공용 컴포넌트 트리, 접근성·테마 방침 확정.
@@ -25,6 +27,32 @@
   - **F13** — 머리말의 "확정 결정 17건"을 22건으로 정정. **F14** — 7.2절에 루브릭 축 5개 식별자 매핑 표 추가.
   - 신설 훅 3개(`useCancelSession` `useDocument` `useAbandonPreparation`), 개명 1개, 삭제 0개 → 훅 **37개**.
   - 부수 정정: 5절 이후 본문의 절 번호 상호 참조가 한 칸씩 밀려 있던 것을 실제 절 번호로 맞췄습니다.
+- 2026-09-10 **D27(예약 게이트)·D28(BYOK)·D29(체험 동의)·D30(체험 예약 1건 제한) 반영.** 문서를 재작성하지 않고 해당 절만 고쳤습니다.
+  - **신규 화면 `/settings/api-key`**(4.12절) — 키 연결·교체·해제. **끝 4자리 마스킹만**, 발급 안내, D29 프라이버시 설명, `?next=` 복귀.
+    **키 입력 폼은 이 라우트 한 곳에만 존재합니다**(`01_product_spec.md` 7절 근거 4).
+  - **신규 다이얼로그 2종** — 체험 데이터 처리 동의(4.13절, D29) / 여력·키 안내 3종(4.14절, D27·D28).
+  - **신설 훅 6개** — `useCapacity` `useApiKeyStatus` `useConnectApiKey` `useDisconnectApiKey` `useVerifyApiKey` `useGrantTrialConsent`
+    (계약 #36~#41). 훅 **37개 → 43개**.
+  - **기존 shape 변경 2건** — `Session.fundingSource`(nullable 아님) 추가, **`PauseReason` 3종 → 5종**.
+    재개 패널(4.6.1절)이 **5종 전부**를 분기하며, `byok_quota_exhausted`에는 **재개 가능 시각을 표시하지 않습니다**.
+  - **신규 오류 4종 처리** — 503 `capacity_unavailable`, 409 `trial_consent_required` / `consent_version_stale` /
+    `byok_key_invalid` / `byok_quota_exhausted`. SSE `stream_error.code`에도 뒤 2종이 추가됐습니다(3.3절).
+  - **D30** — 체험 사용자의 두 번째 `prepare`가 409입니다. 4.4절에 **기존 세션으로 보내는 링크**가 있는 안내를 넣었습니다.
+  - **리포트의 키 연결 CTA**는 "같은 이력서로 다시 하기"와 **같은 카드 안**입니다(8.4절). 두 CTA를 경쟁시키지 않습니다.
+  - **여력 부족 화면의 1순위 버튼은 "키 연결하기"** 입니다(4.14절 — `02_ai_architecture.md` 13.7.3절).
+  - 금칙어 검사를 12.1절 옆이 아니라 **4.14.4절**에 상시 검사 항목으로 두었습니다.
+- 2026-09-10 **QA 2차 G2 대응 — D30 소거법·폴백 폐기.** 4.4절만 고쳤고 문서를 재작성하지 않았습니다.
+  - 계약 3차 갱신이 **409 `trial_reservation_exists`** 와 `details.existingSessionId`(**항상 채워짐, `null` 아님**)를
+    확정했습니다(`05_api_contract.md` :1512 · :1530 · 4.7.6절).
+  - **소거법 폐기** — "다른 409 3종이 아니면 D30"으로 판정하던 방식을 삭제하고, `usePrepareSession`의 오류를
+    **`error.code` 직접 분기**로 바꿨습니다(409 4종 + 503 1종). 알 수 없는 `code`는 일반 오류로 떨어집니다.
+  - **`activeSessions` 폴백 삭제** — `[이어서 하기]`의 목적지는 `details.existingSessionId` 하나뿐입니다.
+    추측으로 고른 세션은 사용자를 엉뚱한 면접으로 보냅니다.
+  - D30 안내에 **`[이전 면접 취소하기]`(#33 `useCancelSession`)** 를 추가했습니다 — 취소는 예약 반납을
+    부작용으로 가지므로 막다른 길이 아닙니다. 이 안내를 503 여력 부족 화면과 섞지 않습니다.
+  - **16절 #10 해소 처리**(14절 §5·15절 서술도 함께 정리). **16절 #11도 해소** — `02_ai_architecture.md`
+    13.6.3절에 "API 키"·"한도" 예외가 명문화되어 QA가 grep 히트를 오탐으로 처리할 필요가 없어졌습니다.
+  - 훅 추가·개명·삭제 없음(**43개 그대로**). 새 UI 라이브러리 없음.
 
 ---
 
@@ -65,7 +93,9 @@ src/app/
     │       ├── report/page.tsx                    → /sessions/{id}/report
     │       └── transcript/page.tsx                → /sessions/{id}/transcript
     ├── documents/page.tsx                         → /documents
-    └── settings/account/page.tsx                  → /settings/account
+    └── settings/
+        ├── account/page.tsx                       → /settings/account
+        └── api-key/page.tsx                       → /settings/api-key   ★신규 (D28)
 ```
 
 | # | URL | 페이지 파일 | 렌더 방식 |
@@ -81,6 +111,7 @@ src/app/
 | 9 | `/sessions` | `(app)/sessions/page.tsx` | 클라이언트 |
 | 10 | `/documents` | `(app)/documents/page.tsx` | 클라이언트 |
 | 11 | `/settings/account` | `(app)/settings/account/page.tsx` | 클라이언트 |
+| **12** ★신규 | **`/settings/api-key`** | `(app)/settings/api-key/page.tsx` | 클라이언트 |
 | — | `/sessions/{sessionId}/compare` | **만들지 않음** `[later]` | — |
 
 **정적 세그먼트 우선순위 확인.** `/sessions/new`는 정적 세그먼트이고 `/sessions/[sessionId]`는 동적입니다.
@@ -106,6 +137,16 @@ Realtime 전이 세 경로의 유일한 분기입니다.
   붙입니다 — 그러지 않으면 취소된 세션의 딥링크가 **자기 자신이 보이지 않는 목록**으로 떨어집니다.
 - **`completed`와 `evaluating`은 둘 다 리포트로 보냅니다**(D18). `#15`/`#9` 직후의 정상 상태는
   `completed`가 아니라 `evaluating`이므로, 두 값 중 하나만 처리하는 분기를 쓰면 깨집니다(계약 4절 경고).
+
+**`/settings/api-key`의 `?next=` 복귀 (D28).** 이 화면에는 최소 네 곳에서 딥링크로 들어옵니다 —
+리포트 하단 CTA(8.4절) · 여력 부족 안내(4.14절) · 대시보드 배너(4.3절) · 동의 거부(4.13절).
+전부 `?next={돌아갈 URL}`을 붙이고, 연결 성공 후 그 경로로 `router.replace()` 합니다.
+
+- **`next` 값은 검증합니다.** `/`로 시작하고 `//`·`/\`로 시작하지 않는 **내부 경로만** 받습니다.
+  그 외에는 조용히 무시하고 `/dashboard`로 보냅니다(오픈 리다이렉트 방지).
+- **`next`에 키·토큰 등 어떤 비밀도 싣지 않습니다.** 이 쿼리에 들어가는 것은 **경로뿐**입니다(4.12절 보안 규칙).
+- 준비 화면에서 온 경우 `next`는 `/sessions/new?sessionId={id}`입니다 — 세션은 `configuring`에 그대로
+  남아 있으므로(계약 4.9.2절) 돌아오면 설정이 보존된 채 이어서 준비할 수 있습니다.
 
 **미들웨어 리다이렉트와의 정합**(`05_api_contract.md` 7.2절): 미인증 사용자가 `(app)` 이하로 오면
 `/login?next={원래 경로}`로 302됩니다. 로그인 성공 후 UI는 `next` 쿼리로 복귀하고, 없으면 `/dashboard`입니다.
@@ -159,7 +200,13 @@ const res = await fetchJson<{ sessions: SessionSummary[]; nextCursor: string | n
 ['session', sessionId]                   ['turns', sessionId]
 ['evaluation', sessionId]                ['transcript', sessionId]
 ['documents', {docType, cursor}]         ['account']
+['capacity']                             ['apiKey']
 ```
+
+`['capacity']`와 `['apiKey']`는 **같은 서버 사실의 두 창**입니다(계약 4.7.5절 — `/api/capacity`가
+`user_api_keys`를 함께 읽습니다). 그래서 **키를 바꾸는 뮤테이션 3개(#38·#39·#40)는 성공 시 두 키를 모두
+invalidate** 합니다. 한쪽만 무효화하면 키를 연결한 직후에도 "시작할 수 없어요"가 남아 있게 됩니다.
+`useGrantTrialConsent`(#41) 성공 시에도 `['capacity']`를 invalidate 합니다(`requiresTrialConsent`가 바뀝니다).
 
 Realtime 알림과 상태 전이 뮤테이션은 **해당 키를 무효화(invalidate)** 할 뿐, 캐시에 값을 직접 써넣지 않습니다.
 
@@ -184,6 +231,8 @@ Realtime 알림과 상태 전이 뮤테이션은 **해당 키를 무효화(inval
 | **`useDocument`** ✅신규 | `GET /api/documents/[documentId]` (#34) | `{ document }` | **예** | **`DocumentDetail`** = `Document & { linkedSessionCount: number; configuringSessionCount: number }` (D21) |
 | `useDocumentDownloadUrl` | `GET /api/documents/[documentId]/download-url` | `{ url, expiresInSec }` | 아니오 | `{ url: string; expiresInSec: 60 }` |
 | `useAccount` | `GET /api/account` | `{ profile, stats }` | 아니오 | `{ profile: Profile; stats: AccountStats }` |
+| **`useCapacity`** ★신규 | `GET /api/capacity` (#36) | `{ capacity }` | **예** | **`Capacity`** = `{ canStartSession: boolean; keyStatus: KeyStatus; trialStatus: TrialStatus; nextFundingSource: FundingSource \| null; requiresTrialConsent: boolean; consentVersion: string; availableAtIso: string \| null }` |
+| **`useApiKeyStatus`** ★신규 | `GET /api/account/api-key` (#37) | `{ apiKey }` | **예** | **`ApiKeyStatus`** = `{ keyStatus: KeyStatus; keyLast4: string \| null; provider: 'google' \| null; lastVerifiedAt: string \| null; lastFailureCode: 'auth_rejected' \| 'quota_exhausted' \| 'unknown' \| null; lastFailureAt: string \| null }` — **키 원문 필드가 없습니다** |
 
 - `useDocumentDownloadUrl`은 **자동 실행하지 않습니다**(`enabled: false` + `refetch()`). 만료 60초짜리 URL을
   화면 진입 때마다 발급하면 쓰지도 않을 서명 URL이 쌓입니다. 사용자가 "원본 열기"를 누를 때만 발급합니다.
@@ -193,6 +242,26 @@ Realtime 알림과 상태 전이 뮤테이션은 **해당 키를 무효화(inval
   `myDisputes`는 비어 있어도 **`[]`이고 `null`이 아니므로**, `.map()` 앞에 `?? []`를 두지 않습니다(계약 12.3절).
 - `useDocument`는 **삭제 확인 다이얼로그를 열 때만** 실행합니다(`enabled: false` + `refetch()`).
   목록의 모든 행에 대해 미리 부르면 문서 수만큼 집계 쿼리가 나갑니다.
+
+**`useCapacity`·`useApiKeyStatus`를 쓸 때 틀리기 쉬운 6가지 (D27·D28·D29)**
+
+1. **`canStartSession`을 직접 계산하지 마세요.** `keyStatus === 'connected'`면 여력과 **무관하게 항상 `true`**
+   입니다(계약 4.7.5절). 프론트가 `trialStatus`로 다시 계산하면 BYOK 사용자에게 벽이 생깁니다.
+2. **`availableAtIso === null`을 "내일 오세요"로 렌더하지 마세요.** 체험 소진으로 막힌 경우 `null`이며,
+   **기다려도 풀리지 않는 벽**입니다. 시각 줄 자체를 빼고 키 연결 CTA만 남깁니다(4.14절).
+3. **`consentVersion`을 하드코딩하지 마세요.** `useCapacity` 응답의 값을 그대로 `useGrantTrialConsent`에
+   되돌려 보냅니다. 하드코딩하면 문구를 올린 순간 **409 `consent_version_stale`** 이 납니다.
+4. **동의 여부 판정은 `requiresTrialConsent` 하나입니다.** `#41` 응답의 `consent.sessionId`로 분기하지 마세요 —
+   같은 버전에 이미 동의한 사용자에게는 **기존 행이 그대로 돌아옵니다**(멱등, 계약 14절 함정 2).
+5. **잔여량·한도·버킷 이름은 응답에 없고 앞으로도 없습니다.** 그 값을 요구하는 UI를 설계하지 마세요.
+6. **`ApiKeyStatus`에 키 원문 필드가 없으므로 "보기" 토글·복사 버튼을 만들 수 없습니다.**
+   화면에 쓸 수 있는 키 값은 **`keyLast4` 하나뿐**입니다(계약 4.8.1절 강제 1).
+
+- 두 훅은 `staleTime`을 짧게(30초) 두고, `/dashboard` · `/sessions/new` · 리포트 · `/settings/*` 네 화면에서
+  공유합니다. 화면마다 다시 부르지 않습니다.
+- **`useCapacity`가 실패해도 화면을 오류로 덮지 않습니다.** 시작 버튼을 잠그는 **부차 정보**이므로,
+  실패 시에는 버튼을 활성으로 두고 서버의 503을 받아 4.14절 안내를 띄웁니다.
+  **권위 있는 판정은 언제나 `#3`/`#6`의 응답이지 이 훅이 아닙니다**(계약 4.7.1절 — `#3`의 조회는 비원자적입니다).
 
 ### 3.2 변경 훅 (`useMutation`)
 
@@ -222,6 +291,26 @@ Realtime 알림과 상태 전이 뮤테이션은 **해당 키를 무효화(inval
 | `useDeleteDocument` | `DELETE /api/documents/[documentId]` | — | `{ ok, affectedSessionCount, configuringSessionCount }` | 아니오 | `{ ok: true; affectedSessionCount: number; configuringSessionCount: number }` |
 | `useDeleteAccount` | `DELETE /api/account` | `{ password: string }` | `{ ok: true }` | 아니오 | `void` |
 | `usePrewarm` | `POST /api/sessions/[sessionId]/prewarm` | — | `204`(본문 없음) | — | `void` |
+| **`useConnectApiKey`** ★신규 | `PUT /api/account/api-key` (#38) | `{ apiKey: string }` ← **키 원문이 존재하는 유일한 방향** | `{ apiKey }` | **예** | `ApiKeyStatus` (`keyStatus === 'connected'`). **연결과 교체가 같은 훅**입니다 — 부분 수정이 아니라 **전체 교체** |
+| **`useDisconnectApiKey`** ★신규 | `DELETE /api/account/api-key` (#39) | — | `{ apiKey }` | **예** | `ApiKeyStatus` (`keyStatus === 'none'`, `keyLast4 === null`). ⚠️ **`{ ok: true }`가 아닙니다** — 다른 DELETE 훅과 모양이 다릅니다 |
+| **`useVerifyApiKey`** ★신규 | `POST /api/account/api-key/verify` (#40) | — | `{ apiKey }` | **예** | `ApiKeyStatus`. 성공이면 `lastVerifiedAt` 갱신, 실패면 `keyStatus === 'invalid'` + `lastFailureCode` |
+| **`useGrantTrialConsent`** ★신규 | `POST /api/trial-consent` (#41) | `{ consentVersion: string; sessionId?: string \| null }` | `201`(재동의는 `200`) `{ consent }` | **예** | `TrialConsent` = `{ id; consentVersion; grantedAt; sessionId: string \| null }` |
+
+**⚠️ `useDisconnectApiKey`는 이 문서에서 `{ ok: true }`를 반환하지 않는 유일한 DELETE 훅입니다.**
+`useDeleteSession`·`useDeleteAccount`와 같은 모양이라고 가정해 `void`로 선언하면, 해제 직후 화면이
+`keyStatus`를 갱신하지 못해 **"연결됨"이 남아 있게** 됩니다. 언랩해서 `ApiKeyStatus`를 그대로 씁니다.
+
+**키 뮤테이션 3종(#38·#39·#40)의 공통 규약 — 보안 (D28 6.5.7절)**
+
+| 규칙 | 내용 |
+|---|---|
+| 원문 보관 금지 | 요청 body에 실은 뒤 **폼 상태를 즉시 리셋**합니다(`form.reset()`). 컴포넌트 상태·ref·전역 스토어 어디에도 남기지 않습니다 |
+| 저장소 금지 | **`localStorage`·`sessionStorage`·IndexedDB·쿠키에 키를 넣지 않습니다.** 저장할 이유가 없습니다 — 서버가 보관합니다 |
+| URL 금지 | **쿼리 파라미터·해시·`router.push` 인자에 키가 등장하지 않습니다.** `?next=`에 들어가는 것은 경로뿐입니다 |
+| 재시도 금지 | 실패해도 **자동 재시도하지 않습니다**(`retry: 0`). 재시도는 원문을 메모리에 더 오래 붙잡아 두고, 무효한 키를 반복 제출해 `invalid` 판정을 굳힙니다 |
+| 로깅 금지 | 뮤테이션 변수(`variables`)를 오류 리포터·`console`·`sonner` 토스트 본문에 싣지 않습니다. TanStack Query의 전역 `onError`가 `variables`를 직렬화하지 않는지 확인합니다 |
+| 오류 문구 | 400 `validation_failed`의 `details.fields`에도 **입력값이 되비치지 않습니다**(계약 4.8.1절). 그대로 렌더해도 안전하지만, 렌더 전에 값 포함 여부를 가정하지 않습니다 |
+| 성공 후 | `['apiKey']`·`['capacity']`를 invalidate. `?next=`가 있으면 그 경로로 `router.replace()` |
 
 **`useReportEvent`는 실패해도 사용자에게 아무것도 보여주지 않습니다.** 감사 로그가 실패했다고 면접이 멈추면 안 됩니다.
 다만 `score_card_viewed`가 유실되면 지표 5의 분모가 비므로, 실패 시 1회 재시도합니다.
@@ -256,7 +345,9 @@ type InterviewStreamState = {
   } | null;
   notice: { kind: 'distress_guard' | 'pressure_capped' | 'rate_limit_fallback';
             level: number | null; messageKo: string } | null;
-  error: { code: 'llm_timeout' | 'llm_rate_limited' | 'llm_failed';
+  // ★ D28: byok 세션에서만 나오는 2종이 추가됐습니다 (계약 5.2절·10.2절)
+  error: { code: 'llm_timeout' | 'llm_rate_limited' | 'llm_failed'
+                | 'byok_key_invalid' | 'byok_quota_exhausted';
            retryable: boolean; messageKo: string } | null;
 };
 
@@ -275,6 +366,11 @@ function useInterviewStream(sessionId: string): {
 4. **스트림이 끊기면 재요청하지 않습니다.** `useTurnsResync`(#10)로 재동기화합니다(계약 5.5절).
    재동기화 결과에 면접관 발화가 **없을 때만** 같은 `answerSeq`로 #9를 재시도합니다.
 5. `409 turn_seq_conflict`를 받으면 `details.currentSeq`로 재동기화하고 **LLM을 다시 부르지 않습니다.**
+6. **`stream_error.code`가 `byok_key_invalid` / `byok_quota_exhausted`이면 `retryable`은 항상 `false`이고,
+   서버가 세션을 이미 `paused`로 옮겼습니다**(`01_state_machine.md` 4.5절). UI는 재시도하지 말고
+   `['session', id]`를 invalidate 해 **재개 패널(4.6.1절)로 넘깁니다.** 두 문구는 4.14절의 고정 문안이며,
+   `messageKo`를 그대로 띄우더라도 **프로바이더 원문이 섞여 들어오지 않는지** QA 대조 항목입니다.
+   **`byok_quota_exhausted`에 시각을 덧붙이지 마세요** — `resumableAfter`가 `null`입니다.
 
 **`utterance_done.sessionStatus` — 면접 종료를 알아내는 유일한 신호 (F7 해소)**
 
@@ -364,9 +460,9 @@ function useInterviewStream(sessionId: string): {
 | 항목 | 내용 |
 |---|---|
 | 진입 | 인증 |
-| 이탈 | `/sessions/new`(새 면접), `route-for-status()`로 각 세션 상세 |
-| 훅 | `useDashboard` |
-| shadcn | `Card` `Button` `Badge` `Skeleton` `Separator` `ScrollArea` |
+| 이탈 | `/sessions/new`(새 면접), `route-for-status()`로 각 세션 상세, **`/settings/api-key?next=/dashboard`** |
+| 훅 | `useDashboard` **`useCapacity`** |
+| shadcn | `Card` `Button` `Badge` `Skeleton` `Separator` `ScrollArea` `Alert` `Tooltip` |
 
 **레이아웃**
 
@@ -387,6 +483,27 @@ function useInterviewStream(sessionId: string): {
 - 빈 상태: "아직 면접 기록이 없습니다. 이력서와 JD를 넣고 첫 모의면접을 시작해 보세요." + "새 면접 시작".
 - 오류: 카드 전체를 `ErrorState`로 대체하되 "새 면접 시작" 버튼은 **남깁니다**(대시보드가 죽어도 진입은 살아 있어야 합니다).
 
+**`canStartSession === false`일 때 — 벽에는 반드시 출구가 함께 있습니다 (D28)**
+
+"새 면접 시작"을 `disabled`로 두고, 버튼 **아래**에 `Alert`(`variant="default"`)로 4.14.1절 문안을 띄웁니다.
+`Badge`는 버튼 옆에 하나만: **"오늘 예약 마감"**.
+
+```
+[ 새 면접 시작 ](disabled)   [오늘 예약 마감]
+┌ Alert ────────────────────────────────────────────────┐
+│ 지금은 새 면접을 시작할 수 없어요                       │
+│ (4.14.1절 본문)                                        │
+│ [ 키 연결하기 ](기본)   [ 지난 리포트 보기 ](ghost)     │
+└────────────────────────────────────────────────────────┘
+```
+
+- **1순위 버튼은 "키 연결하기"** 입니다(`02_ai_architecture.md` 13.7.3절). `/settings/api-key?next=/dashboard`.
+- `keyStatus === 'invalid'`이면 이 자리에 **4.14.2절(키 무효) 문안**을 대신 띄웁니다 — 원인이 여력이 아닙니다.
+- **"이어서 할 일"과 "최근 세션"은 그대로 보입니다.** 막힌 것은 *새로 여는 것* 하나뿐이고,
+  그 사실을 안내 마지막 줄이 말합니다. 대시보드 전체를 오류 화면으로 덮지 마세요.
+- 리포트 CTA를 닫은 사용자에게 남는 "조용한 안내"가 이 자리입니다(`01_product_spec.md` 6.5.2절).
+  `keyStatus === 'connected'`이면 이 영역을 **아예 렌더하지 않습니다.**
+
 ---
 
 ### 4.4 `/sessions/new` — 세션 설정
@@ -394,9 +511,9 @@ function useInterviewStream(sessionId: string): {
 | 항목 | 내용 |
 |---|---|
 | 진입 | 인증. 쿼리 `?sessionId=`가 있으면 그 세션을 이어서 설정, 없으면 새로 생성 |
-| 이탈 | 준비 완료 → `/sessions/{id}/ready` · **그만두기(취소) → `/sessions`** · 준비 포기 → `/sessions/{id}/report`(실패 화면) |
-| 훅 | `useCreateSession` `useSession` `useUpdateSessionConfig` `usePrepareSession` `useDocuments` **`useCancelSession`**(그만두기) **`useAbandonPreparation`**(추출 실패 시 준비 포기) |
-| shadcn | `Form` `RadioGroup` `Card` `Select` `Button` `Alert` `Dialog` `AlertDialog` `Skeleton` `Badge` `Tabs`(파일/직접입력) `Textarea` `Progress` |
+| 이탈 | 준비 완료 → `/sessions/{id}/ready` · **그만두기(취소) → `/sessions`** · 준비 포기 → `/sessions/{id}/report`(실패 화면) · **키 연결 → `/settings/api-key?next=/sessions/new?sessionId={id}`** |
+| 훅 | `useCreateSession` `useSession` `useUpdateSessionConfig` `usePrepareSession` `useDocuments` **`useCancelSession`**(그만두기) **`useAbandonPreparation`**(추출 실패 시 준비 포기) **`useCapacity`** **`useGrantTrialConsent`** |
+| shadcn | `Form` `RadioGroup` `Card` `Select` `Button` `Alert` `Dialog` `AlertDialog` `Checkbox` `Skeleton` `Badge` `Tabs`(파일/직접입력) `Textarea` `Progress` |
 
 **세션 행을 언제 만드는가 — UI 소유 결정**
 
@@ -456,6 +573,66 @@ function useInterviewStream(sessionId: string): {
     (계약 4.4절 — #16이 409를 돌려주는 사유입니다). 4.7절 참조.
   - **가드**: 참조 문서 중 하나가 실제로 `extraction_status='failed'`일 때만 서버가 받습니다. 그렇지 않으면
     409 `guard_failed`이며, 그때 사용자가 원하는 것은 포기가 아니라 **취소(#33)** 입니다.
+
+**체험 동의 게이트 — "면접 준비"를 누른 직후, `usePrepareSession` **직전** (D29)**
+
+```
+[면접 준비] 클릭
+   └─ capacity.nextFundingSource === 'trial_shared' && capacity.requiresTrialConsent
+        ├─ 예 → 동의 다이얼로그(4.13절)
+        │        ├─ [동의하고 시작하기] → useGrantTrialConsent({ consentVersion, sessionId })
+        │        │                        → 성공 후 usePrepareSession()
+        │        └─ [내 키를 연결할게요]  → /settings/api-key?next=/sessions/new?sessionId={id}
+        └─ 아니오 → 바로 usePrepareSession()
+```
+
+- **`byok` 세션은 이 다이얼로그를 보지 않습니다**(`nextFundingSource === 'byok'`). 조건 분기를
+  `keyStatus`가 아니라 **`nextFundingSource` + `requiresTrialConsent`** 로 씁니다 — 계약이 그 둘로 판정합니다.
+- **동의를 화면 진입 시점에 미리 받지 않습니다.** 준비를 누르기 전까지는 아직 아무 AI 호출도 일어나지 않습니다.
+- 동의 거부는 **막다른 길이 아닙니다.** 세션은 `configuring`에 남고 설정이 보존되므로,
+  키를 연결하고 돌아오면 같은 화면에서 이어서 준비합니다(계약 4.9.2절).
+- **낙관적 진행 금지.** `useGrantTrialConsent`가 성공한 뒤에 `usePrepareSession`을 부릅니다.
+  둘을 동시에 쏘면 **409 `trial_consent_required`** 로 준비가 실패합니다.
+
+**`usePrepareSession`이 돌려주는 오류 5종(409 4종 + 503 1종) — `error.code`로 직접 분기합니다**
+
+> **소거법 금지.** "다른 코드가 아니면 D30"으로 판정하지 않습니다. 계약 13절이 네 가지 409에 각각
+> 고유한 `code`를 두었으므로(`05_api_contract.md` :1512) 분기는 **언제나 `error.code`의 `switch`**이며,
+> 알지 못하는 `code`는 D30이 아니라 **일반 오류 안내**로 떨어집니다.
+
+| 응답 | 원인 | 화면 |
+|---|---|---|
+| **409 `trial_consent_required`** | 현재 문구 버전 동의가 없음(옛 버전 동의만 있는 경우 포함) | 동의 다이얼로그를 **다시 띄웁니다**. `details.requiredConsentVersion`을 `useGrantTrialConsent`에 씁니다. `['capacity']` invalidate |
+| **409 `consent_version_stale`**(#41에서) | 클라이언트 번들이 옛 문구를 띄우고 있음 | **새로고침 후 다시 띄웁니다**(계약 4.9.1절). 사용자에게는 "안내 문구가 업데이트되었어요. 다시 확인해 주세요" |
+| **409 `trial_reservation_exists`** | 체험 사용자가 이미 `held` 예약을 가진 다른 세션이 있음(D30) | 아래 D30 안내. **목적지는 `details.existingSessionId`** 입니다. 503 화면·"내일 오세요" 문구와 **섞지 않습니다** |
+| **409 `byok_key_invalid`** | 연결한 키가 거절됨(#6의 키 검증 단계) | 4.14.2절 안내 + `/settings/api-key?next=`로 교체 유도 |
+| **503 `capacity_unavailable`** | 공용 여력 소진 | 4.14.1절 `AlertDialog`. **세션은 `configuring`에 남습니다** — "설정은 그대로 저장돼 있어요" 줄이 사실입니다 |
+
+**D30 — 체험 사용자의 두 번째 준비는 409 `trial_reservation_exists`입니다**
+
+체험 사용자는 **동시에 예약 1건**만 가질 수 있습니다(D30). 이미 준비를 마친(또는 준비 중인) 세션이 있는 채로
+다른 세션에서 `prepare`를 부르면 **409 `trial_reservation_exists`** 입니다. 탭을 여러 개 열어 두면
+악의 없이도 발생합니다.
+
+> **이미 준비 중인 면접이 있습니다**
+> 한 번에 하나의 면접만 준비할 수 있어요. 먼저 시작한 면접을 이어서 하거나, 그 면접을 취소한 뒤
+> 새로 시작해 주세요.
+>
+> `[이어서 하기]`  `[이전 면접 취소하기]`  `[여기 남기]`
+
+- **목적지는 `details.existingSessionId` 하나뿐입니다.** 계약이 이 값을 **항상 채워 보내며 `null`이 아니라고**
+  못박았으므로(`05_api_contract.md` :1530 · 4.7.6절), `[이어서 하기]`는
+  `route-for-status(useSession(details.existingSessionId))`로 보냅니다.
+- **`useDashboard`의 `activeSessions`에서 세션을 찾는 폴백은 폐기했습니다.** 추측으로 고른 세션은 사용자를
+  엉뚱한 면접으로 보냅니다. `existingSessionId`가 없으면 링크를 만들지 말고 일반 오류 안내로 떨어뜨립니다
+  — 틀린 목적지보다 낫습니다(QA 4차 검증 항목: `activeSessions` 폴백 잔재 grep).
+- **`[이전 면접 취소하기]`는 `useCancelSession`(#33)** 을 `details.existingSessionId`에 대해 부릅니다.
+  취소는 예약 반납을 부작용으로 가지므로(계약 4.7.3절) 성공 후 `usePrepareSession`을 다시 부르면 통과합니다.
+  10.1절의 취소 확인 `AlertDialog`를 그대로 재사용합니다 — 확인 없이 남의 세션을 지우지 않습니다.
+- 이 안내에는 **키 연결 CTA를 넣지 않습니다.** 사용자가 할 일은 키 연결이 아니라 **기존 면접 정리**입니다.
+  같은 이유로 **여력 부족(503) 화면·"내일 오세요" 문구와 섞지 않습니다** — 여력이 남아 있어도 나오는 오류입니다.
+- 안내 문구에 "예약"이라는 내부 용어를 쓰지 않습니다 — 사용자에게는 "준비 중인 면접"입니다.
+- **`byok` 세션에서는 이 코드가 나오지 않습니다.** 예약 자체를 하지 않으므로 분기에 도달할 수 없습니다.
 
 **상태별 렌더링**
 
@@ -546,13 +723,32 @@ function useInterviewStream(sessionId: string): {
 
 #### 4.6.1 재개 패널 (`paused`)
 
-`pause_reason`별로 문구와 버튼이 다릅니다.
+`pause_reason`별로 문구와 버튼이 다릅니다. **2026-09-10 D28로 3종 → 5종이 되었습니다**(계약 12절).
+5종을 **전부** 분기해야 하며, 모르는 값이 오면 `user_requested`의 중립 문구로 폴백합니다
+(모르는 값 때문에 재개 패널이 비면 사용자가 세션에 갇힙니다).
 
-| `pauseReason` | 문구 | 버튼 |
-|---|---|---|
-| `user_requested` | "면접을 일시정지했습니다. 마지막 질문부터 이어서 진행합니다." | [이어서 하기] [여기서 마치기] **[이 면접 그만두기]**(취소 — 기록은 남습니다) |
-| `rate_limited` | "지금은 이어갈 수 없습니다. **{resumableAfter}** 이후 '이어서 하기'를 누르면 마지막 질문부터 계속됩니다." | [이어서 하기](시각 전에는 `disabled` + 남은 시간) [여기서 마치기] |
-| `connection_lost` | "연결이 끊어져 면접이 멈췄습니다. 마지막 질문부터 이어서 진행합니다." | [이어서 하기] [여기서 마치기] |
+| `pauseReason` | 원인 주체 | 문구 | 버튼 |
+|---|---|---|---|
+| `user_requested` | 사용자 | "면접을 일시정지했습니다. 마지막 질문부터 이어서 진행합니다." | [이어서 하기] [여기서 마치기] **[이 면접 그만두기]**(취소 — 기록은 남습니다) |
+| `rate_limited` | 우리 | "지금은 이어갈 수 없습니다. **{resumableAfter}** 이후 '이어서 하기'를 누르면 마지막 질문부터 계속됩니다." | [이어서 하기](시각 전에는 `disabled` + 남은 시간) [여기서 마치기] |
+| `connection_lost` | — | "연결이 끊어져 면접이 멈췄습니다. 마지막 질문부터 이어서 진행합니다." | [이어서 하기] [여기서 마치기] |
+| **`byok_key_invalid`** ★신규 | **사용자** | 4.14.2절 고정 문안 — "연결하신 키로 접속할 수 없었어요. 키가 삭제되었거나 권한이 바뀌었을 수 있습니다." | **[키 교체하기]**(1순위, `/settings/api-key?next=/sessions/{id}/interview`) [이어서 하기] [여기서 마치기] |
+| **`byok_quota_exhausted`** ★신규 | **사용자** | 4.14.3절 고정 문안 — "연결하신 키의 사용량이 오늘 한도에 도달했어요. Google AI Studio에서 확인하실 수 있습니다." | [이어서 하기] [여기서 마치기] (+ Google AI Studio 링크는 본문 안의 텍스트 링크) |
+
+**신규 2종에서 절대 하면 안 되는 것 (D28 · `01_state_machine.md` 4.5절)**
+
+- **재개 가능 시각을 표시하지 마세요.** 두 사유 모두 `resumableAfter`가 **`null`** 입니다.
+  `rate_limited`용 카운트다운 컴포넌트를 그대로 재사용하면 `null`에 "잠시 후"·"Invalid Date"가 렌더됩니다.
+  **시각 줄과 카운트다운을 조건부로 완전히 제거**하고, [이어서 하기]도 `disabled`로 두지 않습니다 —
+  키를 고친 사용자는 **지금 당장** 이어서 할 수 있어야 합니다.
+- **"내일 다시 오세요"를 쓰지 마세요.** 우리는 사용자 계정의 리셋 시각을 모릅니다.
+  대신 **확인할 곳**(Google AI Studio)을 알려 주는 것이 정확합니다.
+- **"공용으로 계속하기" 같은 선택지를 만들지 마세요.** 체험이 남아 있어도 마찬가지입니다 —
+  D29 동의를 받지 않은 이력서·답변이 공용 경로로 나가게 됩니다(계약 4.8.2절, 보안 사고 취급).
+- **세션은 잃지 않습니다.** 둘 다 `paused`이고 대화 로그는 그대로이며 7일 재개 창(D7)이 동일합니다.
+  그 사실을 문구 아래 한 줄로 함께 말합니다.
+- `byok_key_invalid`에서 키를 교체하고 돌아오면 **`['session', id]`를 invalidate** 한 뒤 재개 패널을
+  다시 그립니다. 교체 성공만으로 자동 재개하지 않습니다 — 재개는 사용자의 명시적 행동입니다.
 
 - **재개 시한 안내**: `pausedAt + 7일`(D7)을 "이 세션은 {날짜}까지 이어서 할 수 있습니다"로 표시합니다.
 - "여기서 마치기"는 `answeredMainQuestionCount >= 1`일 때만 활성(전이 가드). 0이면 비활성 + 이유 툴팁.
@@ -568,8 +764,8 @@ function useInterviewStream(sessionId: string): {
 | 항목 | 내용 |
 |---|---|
 | 진입 | `status`가 `completed` `evaluating` `evaluated` `failed` 중 하나 |
-| 이탈 | "같은 이력서로 다시 하기" → `/sessions/new?sessionId=` (복제) · "대화 전문" → `/sessions/{id}/transcript` · `/sessions` |
-| 훅 | `useSession` `useEvaluation` **`useRetryEvaluation`**(`failed`일 때만) `useRetryCoach` `useTranscript`(꼬리질문 요약용) `useReportFeedback` `useCreateDispute` `useReportEvent` `useCreateSession`(복제) `useSessionRealtime` |
+| 이탈 | "같은 이력서로 다시 하기" → `/sessions/new?sessionId=` (복제) · "대화 전문" → `/sessions/{id}/transcript` · `/sessions` · **키 연결 → `/settings/api-key?next=/sessions/{id}/report`** |
+| 훅 | `useSession` `useEvaluation` **`useRetryEvaluation`**(`failed`일 때만) `useRetryCoach` `useTranscript`(꼬리질문 요약용) `useReportFeedback` `useCreateDispute` `useReportEvent` `useCreateSession`(복제) `useSessionRealtime` **`useCapacity`**(키 CTA 노출 판정) |
 | shadcn | `Card` `Badge` `Progress` `Accordion` `Dialog` `RadioGroup` `Textarea` `Button` `Alert` `Separator` `Skeleton` `Tooltip` `ScrollArea` |
 
 **`status`에 따른 4개 화면 — 같은 라우트, 다른 본문**
@@ -712,16 +908,253 @@ function useInterviewStream(sessionId: string): {
 |---|---|
 | 진입 | 인증 |
 | 이탈 | 계정 삭제 성공 → `/` |
-| 훅 | `useAccount` `useDeleteAccount` `useSignOut` |
+| 훅 | `useAccount` `useDeleteAccount` `useSignOut` **`useApiKeyStatus`**(상태 표시 전용) |
 | shadcn | `Card` `Button` `AlertDialog` `Input` `Label` `Alert` `Separator` `Skeleton` `Badge` |
 
 - 표시: `profile.email` / `displayName` / `defaultJobRole` / 가입일,
   그리고 `stats` — 세션 {n}건 · 문서 {n}건 · 저장 용량 {x} MB.
+- **AI 키 — 상태 한 줄 + 링크만입니다. 폼을 두지 않습니다** (D28 · `01_product_spec.md` 7절 근거 4).
+
+  | `keyStatus` | 이 화면에 보이는 것 |
+  |---|---|
+  | `none` | "연결된 키 없음" + `[키 연결하기]` → `/settings/api-key?next=/settings/account` |
+  | `connected` | "연결됨 · ****{keyLast4}" + `[키 관리]` |
+  | `invalid` | `Badge variant="destructive"` "키를 다시 확인해 주세요" + `[키 관리]` |
+
+  - 훅은 **`useApiKeyStatus` 하나만** 추가합니다. `useConnectApiKey`·`useDisconnectApiKey`·`useVerifyApiKey`를
+    이 화면에서 부르지 않습니다 — **키 입력 폼이 두 곳에 있으면 보안 규칙도 두 곳에서 검증해야 합니다.**
+  - `keyLast4` 외의 키 값은 이 화면에도 존재하지 않습니다. 복사 버튼·"보기" 토글을 두지 않습니다.
+  - 계정 삭제 확인 문구(10.4절)에 **"연결하신 AI 키도 함께 삭제됩니다"** 한 줄을 추가합니다(D28 보안 4항).
 - `storageBytes`는 MB로 반올림해 표시합니다.
 - **로그아웃**과 **계정 삭제**를 시각적으로 멀리 둡니다. 계정 삭제는 `Card`를 `border-destructive`로 분리.
 - 삭제: 10.4절.
 - `displayName` / `defaultJobRole` 편집 UI는 **만들지 않습니다** — 수정 엔드포인트가 계약에 없습니다(14절 §4).
   읽기 전용으로 표시합니다. **없는 API를 가정해 폼을 만들지 않습니다.**
+
+
+### 4.12 `/settings/api-key` — AI 키 연결·교체·해제 ★신규 (D28)
+
+| 항목 | 내용 |
+|---|---|
+| 진입 | 인증. 딥링크 4곳(리포트 CTA · 여력 부족 안내 · 대시보드 배너 · 동의 거부) + `/settings/account` 링크 |
+| 이탈 | `?next=` 경로(검증 통과 시), 없으면 `/dashboard` |
+| 훅 | `useApiKeyStatus` `useConnectApiKey` `useDisconnectApiKey` `useVerifyApiKey` |
+| shadcn | `Card` `Form` `Input` `Label` `Button` `Alert` `AlertDialog` `Badge` `Separator` `Skeleton` `Accordion`(발급 안내) `Tooltip` |
+
+**화면 구성 — 위에서 아래로 5개 블록**
+
+```
+① 현재 상태          Badge + 한 줄 (none / connected·****{last4} / invalid)
+② 키 입력 폼         Input(type="password") + [연결하기] / [키 교체하기]
+③ 발급 안내          Accordion — Google AI Studio에서 키를 만드는 단계
+④ 왜 키를 연결하나   D29 프라이버시 설명 (체험 = 공용, 본인 키 = 본인 계정)
+⑤ 연결 해제          keyStatus !== 'none'일 때만. border-destructive 카드로 분리
+```
+
+**① 현재 상태**
+
+| `keyStatus` | 표시 | 부가 |
+|---|---|---|
+| `none` | "연결된 키 없음" | ②의 버튼은 **[연결하기]** |
+| `connected` | `Badge` "연결됨" + **`****{keyLast4}`** | `lastVerifiedAt`을 "마지막 확인: {상대시간}"으로. `[지금 확인하기]`(`useVerifyApiKey`) |
+| `invalid` | `Badge variant="destructive"` **"키를 다시 확인해 주세요"** | `lastFailureCode`를 4.14.2/4.14.3절 문안으로 매핑. ②의 버튼은 **[키 교체하기]** |
+
+- `lastFailureCode` → 문구 매핑은 `src/lib/api-key/failure-code-ko.ts` **한 곳**에만 둡니다
+  (`auth_rejected` → 4.14.2절 / `quota_exhausted` → 4.14.3절 / `unknown` → "키를 확인하는 중 문제가 있었어요. 다시 확인해 주세요").
+- **`lastFailureCode`를 그대로 화면에 출력하지 않습니다.** 값은 영어 식별자이고, 번역해서 서버로 되돌려 보내지도 않습니다.
+
+**② 키 입력 폼 — 이 서비스에서 키 원문을 다루는 유일한 곳**
+
+| 규칙 | 내용 |
+|---|---|
+| 필드 | `Input type="password"`, `autoComplete="off"`, `spellCheck={false}`, `name="apiKey"` |
+| **"보기" 토글 없음** | 만들 수 있어도 만들지 않습니다. 입력 중 어깨너머 노출과 스크린샷 유출을 줄이는 쪽이 오타 방지보다 중요합니다. 오타는 **연결 시 프로바이더 검증 1회**(#38)가 즉시 잡습니다 |
+| **복사 버튼 없음** | 되돌려줄 값이 없습니다. `ApiKeyStatus`에 원문 필드가 존재하지 않습니다 |
+| 연결 = 교체 | `keyStatus`와 무관하게 **같은 `useConnectApiKey`(#38)** 입니다. 부분 수정이 아니라 전체 교체이므로 "기존 키 일부만 고치기" UI를 만들지 않습니다 |
+| 제출 후 | **즉시 `form.reset()`.** 성공·실패 어느 쪽이든 입력값을 화면과 메모리에서 지웁니다 |
+| 대기 표시 | 프로바이더 검증이 포함돼 **~1.5초** 걸립니다(계약 #38). 버튼을 `disabled` + 스피너로 두고, 이 지연이 정상이라는 것을 "키를 확인하고 있어요"로 말합니다 |
+| 실패 | `Alert variant="destructive"` 인라인. **입력값을 오류 문구에 되비추지 않습니다** |
+| 성공 | `sonner` 토스트 "키를 연결했어요" → `['apiKey']`·`['capacity']` invalidate → `?next=`로 `router.replace()` |
+
+**③ 발급 안내 (`Accordion`, 기본 접힘)**
+
+Google AI Studio에서 키를 만드는 단계를 번호 목록으로 둡니다. 외부 링크는 `target="_blank" rel="noopener noreferrer"`.
+**우리가 대신 발급해 줄 수 없다**는 사실을 분명히 하고, 스크린샷은 넣지 않습니다(외부 화면은 자주 바뀝니다).
+
+**④ 왜 키를 연결하나 — D29 프라이버시 설명 (제약이 아니라 업그레이드로 씁니다)**
+
+> **본인 키를 연결하면 무엇이 달라지나요**
+>
+> 체험 면접은 Google의 무료 AI 서비스로 진행됩니다. 입력하신 이력서와 답변을 Google이 서비스
+> 개선에 사용할 수 있고, 검토자가 읽을 수 있습니다.
+> 본인 API 키를 연결하면 이 과정을 거치지 않고, 언제든 면접을 시작하실 수 있습니다.
+>
+> 연결하신 키는 **암호화해서 보관**하며, 화면에는 **끝 4자리만** 보여 드립니다.
+> 연결을 해제하거나 계정을 삭제하시면 **키도 함께 실제로 삭제**됩니다.
+
+- 4.13절 동의 다이얼로그와 **첫 두 문장이 같습니다.** 두 곳의 문구는
+  `src/lib/consent/trial-consent.ts`의 **같은 상수를 import** 합니다(계약 4.9.1절 — 사본을 만들면 해시가 갈라집니다).
+- 마지막 두 줄(보관·삭제)은 이 화면 전용이며 동의 해시 대상이 **아닙니다.** 상수를 나눠 둡니다.
+
+**⑤ 연결 해제 (`keyStatus !== 'none'`일 때만)**
+
+- `border-destructive` 카드로 분리하고 `AlertDialog`로 확인합니다.
+- 확인 문구: **"연결하신 키를 지웁니다. 저장된 키는 실제로 삭제되며 되돌릴 수 없습니다.
+  진행 중인 면접은 이어서 할 수 없게 되고, 지난 리포트는 그대로 남습니다."**
+- 해제 후 `keyStatus === 'none'`이 되어 **체험이 남아 있으면 체험 경로로, 없으면 벽**이 됩니다.
+  그 결과를 확인 다이얼로그에서 미리 말하지 않습니다 — 체험 잔여를 노출하는 셈이 됩니다(금칙, 4.14.4절).
+
+**보안 — 이 화면에서 지켜지지 않으면 다른 어디서도 지켜지지 않습니다**
+
+1. **키 원문을 화면 어디에도 다시 표시하지 않습니다.** 입력 직후에도 마스킹뿐입니다.
+2. **`localStorage`·`sessionStorage`·IndexedDB·쿠키에 키를 넣지 않습니다.**
+3. **URL·쿼리 파라미터·해시에 키가 등장하지 않습니다.** `?next=`에는 경로만 들어갑니다.
+4. **폼은 이 라우트에만 존재합니다.** `/settings/account`는 상태 한 줄 + 링크뿐입니다(4.11절).
+5. 자동 재시도 없음(`retry: 0`), 뮤테이션 `variables`를 로깅·토스트에 싣지 않음(3.2절 표).
+6. 이 페이지를 **서버 컴포넌트로 만들지 않습니다** — 폼 값이 서버 액션 페이로드로 흐르는 경로를 늘리지 않고,
+   계약이 정한 `PUT /api/account/api-key` 하나로 모읍니다.
+
+**상태별 렌더링**
+
+| 상태 | 표현 |
+|---|---|
+| 로딩 | ①②를 `Skeleton`으로. ③④는 정적이므로 **즉시 보입니다**(읽을거리가 먼저 보이는 편이 낫습니다) |
+| 오류(`useApiKeyStatus` 실패) | ① 자리에 `ErrorState`. **②는 그대로 둡니다** — 상태를 못 읽어도 키를 연결할 수는 있어야 합니다 |
+| 빈 상태 | 해당 없음(`keyStatus === 'none'`이 정상 상태입니다) |
+
+---
+
+### 4.13 체험 데이터 처리 동의 다이얼로그 ★신규 (D29)
+
+| 항목 | 내용 |
+|---|---|
+| 어디서 | `/sessions/new`에서 "면접 준비"를 누른 직후, `usePrepareSession` **직전**(4.4절) |
+| 조건 | `capacity.nextFundingSource === 'trial_shared'` **그리고** `capacity.requiresTrialConsent === true` |
+| 훅 | `useGrantTrialConsent`(#41) |
+| shadcn | `Dialog` `Checkbox` `Button` `Label` `Alert` |
+| 컴포넌트 | `src/components/session/TrialConsentDialog.tsx` |
+
+**문안 — `01_product_spec.md` 6.5.4절의 초안을 그대로 씁니다**
+
+> **체험 면접을 시작하기 전에 확인해 주세요**
+>
+> 체험 면접은 Google의 무료 AI 서비스로 진행됩니다. 입력하신 이력서와 답변을 Google이 서비스
+> 개선에 사용할 수 있고, 검토자가 읽을 수 있습니다.
+> 본인 API 키를 연결하면 이 과정을 거치지 않습니다.
+>
+> ☐ 위 내용을 확인했고 체험 면접 진행에 동의합니다
+>
+> `[동의하고 시작하기]`  `[내 키를 연결할게요]`
+
+| 규칙 | 내용 |
+|---|---|
+| 기본값 | `Checkbox`는 **체크되지 않은 상태**. 미리 동의시켜 두지 않습니다 |
+| 활성 조건 | 체크 전에는 [동의하고 시작하기]가 `disabled` |
+| 거부 경로 | [내 키를 연결할게요] → `/settings/api-key?next=/sessions/new?sessionId={id}`. **막다른 길이 아닙니다** |
+| 닫기 | `Esc`·바깥 클릭으로 닫을 수 있고, 닫으면 **아무 일도 일어나지 않습니다**(준비를 시작하지 않습니다) |
+| 문구 출처 | **`src/lib/consent/trial-consent.ts` 한 곳.** 이 파일의 상수를 import 하며 **두 번째 사본을 만들지 않습니다** — 서버가 같은 상수로 해시를 계산합니다(계약 4.9.1절) |
+| 버전 | 화면에 버전 문자열을 노출하지 않되, `useCapacity`의 `consentVersion`을 **그대로** `#41`에 보냅니다 |
+| 기록 | 동의 성공 후에만 `usePrepareSession()`. 순서를 뒤집지 않습니다 |
+| D16과 분리 | **마이크 권한 안내(9절)와 합치지 마세요.** 주체(브라우저 vs 우리)도 시점도 다릅니다 |
+| 접근성 | `Dialog`에 `aria-describedby`로 본문을 연결하고, 열릴 때 포커스를 **본문 첫 문장**에 둡니다(버튼이 아닙니다 — 읽기 전에 누르게 하지 않습니다) |
+
+- `byok` 세션은 이 다이얼로그를 **보지 않습니다.**
+- 사용자가 이미 같은 버전에 동의했다면 `requiresTrialConsent`가 `false`여서 다이얼로그 자체가 뜨지 않습니다.
+  그럼에도 서버가 409 `trial_consent_required`를 주면 **캐시가 낡은 것**이므로 `['capacity']`를 invalidate 하고 다시 띄웁니다.
+
+---
+
+### 4.14 안내 문구 3종 — **원인이 다르면 사용자가 할 일도 다릅니다** (D27·D28)
+
+세 상황은 **원인 주체와 복구 경로가 전부 다릅니다.** 문구를 하나로 합치거나 서로 베끼지 마세요.
+문안은 `src/lib/blocked/blocked-copy.ts` **한 곳**에 두고, **오류 `code`로 조회**합니다.
+프로바이더 오류 메시지를 화면에 그대로 띄우지 않습니다.
+
+| # | 상황 | 트리거 | 원인 주체 | 1순위 버튼 |
+|---|---|---|---|---|
+| 4.14.1 | 공용 여력 소진 | `canStartSession === false` / **503 `capacity_unavailable`** | **우리** | **[키 연결하기]** |
+| 4.14.2 | 사용자 키 무효 | **409 `byok_key_invalid`** / `stream_error` / `keyStatus === 'invalid'` | **사용자** | **[키 교체하기]** |
+| 4.14.3 | 사용자 키 사용량 소진 | **409 `byok_quota_exhausted`** / `stream_error` | **사용자** | [이어서 하기] (+ Google AI Studio 링크) |
+
+> **⚠️ 503을 무조건 4.14.1로 렌더하지 마세요 (계약 14절 함정 1 · 15절 #11).**
+> `useCapacity`의 **`keyStatus === 'invalid'`이면 진짜 원인은 여력이 아니라 무효한 키**입니다.
+> 이 사용자에게 "오늘 면접이 모두 찼습니다"라고 말하면 **내일 다시 와도 똑같이 막힙니다.**
+> 분기는 다음 한 줄입니다.
+>
+> ```
+> 503 capacity_unavailable 수신
+>   └─ capacity.keyStatus === 'invalid' ? 4.14.2(키를 다시 확인해 주세요) : 4.14.1(여력 부족)
+> ```
+
+#### 4.14.1 공용 여력 소진 — 벽에 출구를 함께 둡니다
+
+> **지금은 새 면접을 시작할 수 없어요**
+>
+> 오늘 진행할 수 있는 면접이 모두 찼습니다.
+> **본인 API 키를 연결하면 지금 바로 시작할 수 있어요.**
+> 이미 진행 중인 면접과 지난 리포트는 그대로 보실 수 있습니다.
+>
+> `[키 연결하기]`  `[지난 리포트 보기]`
+
+- **1순위 버튼은 "키 연결하기"** 입니다. "확인"이 1순위이면 D28로 얻은 유일한 이득이 사라집니다.
+- `availableAtIso`가 **`null`이 아닐 때만** 부차 정보로 한 줄 덧붙입니다:
+  "{내일 오전 0시} 이후에 다시 열립니다." **`null`이면 이 줄을 아예 렌더하지 않습니다** — 기다려도 풀리지 않습니다.
+- **재시도 버튼을 두지 않습니다.** 지금 다시 눌러도 같은 결과입니다.
+- #6에서 거절된 경우 한 줄 더: **"지금까지 입력하신 설정은 그대로 저장돼 있어요."**
+  #3에서 거절된 경우에는 세션 자체가 없으므로 **그 줄을 뺍니다**.
+- 노출 방식: 대시보드·세션 목록에서는 `Alert`(4.3절), **사용자가 방금 시도해 실패한 경우(503)에는 `AlertDialog`**.
+  토스트로 흘려보내지 마세요 — 사용자가 무언가를 눌렀고 그것이 실패했습니다.
+
+#### 4.14.2 사용자 키가 유효하지 않음 — "다시 확인해 주세요"
+
+> **연결하신 키를 다시 확인해 주세요**
+>
+> 연결하신 키로 접속할 수 없었어요. 키가 삭제되었거나 권한이 바뀌었을 수 있습니다.
+> 새 키로 교체하시면 마지막 질문부터 이어서 진행합니다.
+>
+> `[키 교체하기]`  `[여기서 마치기]`
+
+- **"오늘 면접이 모두 찼습니다"라고 말하지 않습니다.** 원인이 우리 쪽이 아닙니다.
+- **"내일 다시 오세요"를 쓰지 않습니다.** 기다린다고 풀리는 문제가 아닙니다 — 사용자가 키를 고쳐야 합니다.
+- `details.keyLast4`가 오면 **"****{keyLast4} 키"** 로 어느 키인지 짚어 줍니다. 그 외 키 값은 표시하지 않습니다.
+- 면접 도중이면 **세션을 잃지 않는다**는 사실을 함께 말합니다(`paused`, 7일 재개 창).
+
+#### 4.14.3 사용자 키의 사용량이 소진됨 — **시각을 지어내지 않습니다**
+
+> **연결하신 키를 지금은 쓸 수 없어요**
+>
+> 연결하신 키의 사용량이 오늘 한도에 도달했어요. Google AI Studio에서 확인하실 수 있습니다.
+> 사용량이 회복되면 마지막 질문부터 이어서 진행합니다.
+>
+> `[이어서 하기]`  `[여기서 마치기]`   (본문에 Google AI Studio 링크)
+
+- **재개 가능 시각을 제시하지 않습니다.** `resumableAfter`도 `details.availableAtIso`도 없습니다.
+  없는 정보를 지어내면 **그 시각에 다시 온 사용자가 또 막힙니다**(`01_state_machine.md` 4.5절 규칙 2).
+- **"내일 다시 오세요"를 쓰지 않습니다.** 우리가 아는 사실이 아닙니다. 대신 **확인할 곳**을 알려 줍니다.
+- **[이어서 하기]를 `disabled`로 두지 않습니다.** 결제를 활성화했거나 사용량이 회복된 사용자는 즉시 이어서 할 수 있어야 합니다.
+- 4.14.2와 **첫 문장부터 다릅니다.** 한쪽은 "키가 잘못됐다", 다른 쪽은 "키는 멀쩡한데 지금은 못 쓴다"입니다.
+  사용자가 할 일이 각각 **키 교체**와 **잠시 후 재개**로 갈립니다.
+
+#### 4.14.4 문구 금칙 — 상시 검사 항목 (`02_ai_architecture.md` 13.6.3절 · `01_product_spec.md` 6.5.5절)
+
+**사용자에게 보이는 어떤 문자열에도 넣지 않습니다.**
+
+```
+"무료 티어"  "티어"  "쿼터"  "quota"  "한도"  "레이트 리밋"  "rate limit"
+"RPD"  "RPM"  "예약분"  "토큰"  "버킷"  "잔여"  "1/1"  "남은 횟수"
+```
+
+| 예외 | 범위 |
+|---|---|
+| **"API 키"** | 허용합니다. 사용자가 Google에서 발급받을 것의 **이름**입니다 |
+| **"한도"** | **4.14.3절 한 곳에서만** 허용합니다. 그것은 우리 내부 사정이 아니라 **사용자 본인 계정의 사실**이고, 감추면 사용자가 원인을 찾을 수 없습니다(`01_product_spec.md` 6.5.6절이 명시한 예외). **4.14.1·4.14.2에는 쓰지 않습니다** |
+
+- **체험 잔여 횟수 카운터를 노출하지 않습니다.** "1/1"·"남은 횟수"·"무료 체험 잔여" 어느 것도 만들지 않습니다.
+  그 순간 제품이 요금제처럼 보입니다. 체험은 "첫 면접"이지 "무료 쿠폰"이 아닙니다(6.5.3절).
+- `trialStatus`는 **분기 조건으로만** 쓰고 **화면에 렌더하지 않습니다.**
+- 서버가 준 `message`를 그대로 렌더하는 경로(`ErrorState`)도 이 검사 대상입니다.
+  계약이 `details`에 버킷·잔여량·한도를 넣지 않기로 했지만(계약 13절), **UI가 그 약속에 기대어 검사를 생략하지는 않습니다.**
+- 검사 방법: `src/lib/blocked/blocked-copy.ts`와 `src/components/**`에 대한 **금칙어 grep을 QA 항목으로** 둡니다(17절).
 
 ---
 
@@ -740,14 +1173,20 @@ src/components/
 │   ├── ConfirmDeleteDialog.tsx  AlertDialog + 확인 문구 입력 + 잃는 것/남는 것 목록 (삭제 전용)
 │   ├── ConfirmCancelDialog.tsx  AlertDialog. 취소(#33) 전용 — 파괴적 스타일을 쓰지 않는다
 │   ├── LoadingCard.tsx          Skeleton 조합
-│   └── LiveRegion.tsx           aria-live 전용(시각적으로 숨김)
+│   ├── LiveRegion.tsx           aria-live 전용(시각적으로 숨김)
+│   └── BlockedNotice.tsx        ★ 안내 3종의 유일한 껍데기 (4.14절). code → 문안 + 버튼을 blocked-copy.ts에서 조회
 ├── session/
 │   ├── SessionListItem.tsx      /dashboard · /sessions 공용
 │   ├── SessionStatusBadge.tsx   status → 한국어 라벨 + 토큰 (한 곳)
 │   ├── PersonaCard.tsx          /sessions/new
 │   ├── JobRoleRadioGroup.tsx
 │   ├── ModalityRadioGroup.tsx
+│   ├── TrialConsentDialog.tsx   ★ 체험 동의 (4.13절, D29). trial-consent.ts 상수를 import
 │   └── DocumentPicker.tsx       보관함/업로드/직접입력 3탭. /sessions/new · /documents 공용
+├── account/
+│   ├── ApiKeyStatusRow.tsx      ★ 상태 한 줄 (4.11·4.12절 ① 공용). keyLast4 외의 키 값을 받지 않는다
+│   ├── ApiKeyForm.tsx           ★ 키 입력 폼. /settings/api-key에만 마운트된다 (4.12절 ②)
+│   └── ApiKeyDisconnectCard.tsx ★ 연결 해제 (4.12절 ⑤)
 ├── interview/
 │   ├── ConversationLog.tsx      ★ 음성·텍스트 공용. 모달리티를 모른다
 │   ├── TurnBubble.tsx           면접관/후보 공용. isCorrected · sttConfidence 힌트
@@ -784,6 +1223,14 @@ src/components/
    같은 상태가 화면마다 다르게 불립니다.
 3. **`ConfirmDeleteDialog`가 삭제 3종(세션·문서·계정)의 공통 껍데기**입니다. "잃는 것 / 남는 것"을
    props로 받아 10.2~10.4절의 각 문구를 채웁니다.
+5. **`BlockedNotice`가 안내 3종의 유일한 사본입니다**(4.14절). 화면마다 문구를 다시 쓰면
+   같은 상황이 화면마다 다르게 불리고, 금칙어 검사 지점이 흩어집니다. 이 컴포넌트는 **문구를 받지 않고
+   `code`를 받습니다** — `capacity_unavailable` / `byok_key_invalid` / `byok_quota_exhausted`.
+   문구를 prop으로 받게 만드는 순간 호출부에서 아무 문장이나 들어올 수 있습니다.
+6. **`ApiKeyForm`은 `/settings/api-key`에만 마운트됩니다**(D28 6.5.7절). 재사용 가능한 컴포넌트로
+   만들어 두되 **다른 화면에서 import 하지 않습니다** — 폼이 두 곳에 있으면 보안 규칙도 두 곳에서 검증해야 합니다.
+   `ApiKeyStatusRow`는 반대로 두 화면에서 공용이며, **`keyLast4` 외의 키 값을 받는 prop이 없습니다.**
+
 4. **`ConfirmCancelDialog`를 `ConfirmDeleteDialog`와 합치지 않습니다**(D19). 한 컴포넌트로 묶고 prop으로
    문구만 바꾸면, `variant="destructive"`와 "되돌릴 수 없습니다"가 취소 흐름에 새어 들어옵니다.
    **두 동작이 다르다는 사실을 컴포넌트 경계로 강제합니다**(10.1절).
@@ -1198,12 +1645,37 @@ const isEvaluating =
 - `status === 'failed'`가 되면 4.7절 실패 화면 + `failureReason`이 **평가 계열일 때만** [평가 재시도]
   (`useRetryEvaluation`. `failed → evaluating`은 이 훅의 **유일한** 용도입니다 — D18).
 
-### 8.4 "같은 이력서로 다시 하기" (북극성 지표 3)
+### 8.4 "같은 이력서로 다시 하기" + 키 연결 CTA — **같은 카드 안** (북극성 지표 3 · D28)
 
-- 리포트 **하단**에 큰 버튼으로 둡니다.
+- 리포트 **하단**에 큰 버튼으로 둡니다. **리포트 본문(점수·인용·개선점)을 가리지 않습니다.**
 - `useCreateSession({ sourceSessionId: session.id })` → 새 세션이 직군·페르소나·문서를 복제한 채
   `created`로 생성 → `/sessions/new?sessionId={newId}`.
 - 복제 후 설정 화면에서 **무엇이 복제되었는지 요약**을 보여 주고, 페르소나만 바꿔 다시 볼 수 있게 합니다.
+
+**키 연결 CTA는 이 카드 안에 들어갑니다 — 별도 카드·배너·모달로 만들지 마세요 (D28 · 6.5.2절)**
+
+```
+┌ Card ────────────────────────────────────────────────────┐
+│  다시 해 보실 준비가 되셨나요                              │
+│  [ 같은 이력서로 다시 하기 ]        ← 1순위, 큰 버튼        │
+│  ─────────────────────────────────────────────────────    │
+│  다음 면접부터는 본인 API 키로 진행됩니다.                  │
+│  연결하시면 입력하신 이력서와 답변이 Google의 서비스 개선에 │
+│  쓰이지 않고, 언제든 바로 시작하실 수 있어요.               │
+│  [ 키 연결하기 ]  [ 나중에 ]        ← 2순위, 같은 카드 안   │
+└──────────────────────────────────────────────────────────┘
+```
+
+| 규칙 | 내용 |
+|---|---|
+| **경쟁 금지** | 두 CTA를 **다른 카드**에 두거나 키 CTA를 위에 올리면 **북극성 지표가 깎입니다.** "다시 하기"가 1순위, 키 CTA는 같은 카드 안 2순위입니다 |
+| 노출 조건 | `capacity.keyStatus !== 'connected'` **그리고** `session.fundingSource === 'trial_shared'`. **키를 이미 연결한 사용자에게는 렌더되지 않습니다** |
+| 위치 | 리포트를 **다 읽은 뒤**의 하단. 상단 고정 배너·인터스티셜 모달을 만들지 않습니다 |
+| 닫기 | [나중에]로 닫을 수 있고, 닫으면 이 세션에서 다시 뜨지 않습니다(`localStorage`에 세션 id 단위로 기록 — **키가 아니라 "닫았다"는 사실만**) |
+| 닫은 뒤 | 대시보드에 **조용한 안내**가 남습니다(4.3절). 리포트에서 닫았다고 경로가 사라지지 않습니다 |
+| 문구 | 제약이 아니라 **업그레이드**로 씁니다. "키가 없으면 못 합니다"가 아니라 "연결하면 이렇게 좋아집니다" |
+| 금칙어 | 4.14.4절 목록이 그대로 적용됩니다. **체험 잔여 카운터를 여기에 절대 넣지 마세요** — 가장 넣고 싶어지는 자리입니다 |
+| 시점 | **면접 도중에는 절대 요구하지 않습니다.** 진행 중인 면접을 인질로 삼는 구조가 됩니다(6.5.2절) |
 
 ---
 
@@ -1378,6 +1850,17 @@ const { data: doc } = useDocument(documentId);   // DocumentDetail
 - 한국어 줄바꿈: `word-break: keep-all`을 본문 기본값으로 둡니다(단어 중간 끊김 방지).
   버튼 라벨은 영어 기준으로 크기를 잡지 않고 `min-w`와 `px`로 여유를 둡니다.
 
+**D27~D30이 추가한 접근성 요구 4가지**
+
+1. **키 입력(`Input type="password"`)에 `Label`을 연결**하고, 오류는 `aria-describedby`로 필드에 붙입니다.
+   `Alert`만 띄우고 필드와 연결하지 않으면 스크린리더 사용자가 어느 필드의 문제인지 알 수 없습니다.
+2. **동의 다이얼로그(4.13절)는 열릴 때 포커스를 본문 첫 문장에 둡니다.** 버튼에 두면 읽기 전에 누르게 됩니다.
+   `Checkbox`와 그 설명은 같은 `Label`로 묶어 클릭 영역을 넓힙니다.
+3. **안내 3종(4.14절)은 `role="alert"`** 로 두어 화면 갱신 없이도 읽히게 합니다. 단, 대시보드의 상시
+   `Alert`(4.3절)는 `role="status"`입니다 — 방금 일어난 사건이 아니라 현재 상태이기 때문입니다.
+4. **키 상태를 색·`Badge`로만 구분하지 않습니다.** `none`/`connected`/`invalid` 셋 다 **한국어 텍스트**가
+   함께 있어야 합니다(4.11·4.12절 표). 마스킹 `****{keyLast4}`는 시각 기호가 아니라 텍스트로 읽힙니다.
+
 ---
 
 ## 12. 테마 토큰 사용 방침
@@ -1460,18 +1943,27 @@ Radix `Toast`를 직접 조립하는 쪽은 접근성 처리를 스스로 떠안
 | 3 | 리포트의 **꼬리질문 요약** 파생 필드 | 루브릭 5절이 리포트 `[MVP]` 구성으로 요구 | (선택) `Evaluation`에 `followUpSummary: { mainQuestionId, questionText, maxDepth }[]` | **`useTranscript`로 계산 가능**하므로 차단 요인이 아닙니다. 리포트 화면에서 왕복이 1회 늘어납니다 |
 | 4 | **프로필 수정** (`PATCH /api/account`) | `displayName` / `defaultJobRole`을 사용자가 바꿀 수 없습니다 | MVP 범위 밖이면 그대로 두어도 됩니다 | 4.11절대로 **읽기 전용 표시**. 편집 UI를 만들지 않습니다 |
 
-**1·2번은 계약 2차 갱신에서 해소됐습니다.** 남은 3·4번은 없어도 화면이 성립하므로 **추가 요청이 없습니다.**
-3번(꼬리질문 요약)은 `useTranscript`로 파생 계산하고(7.4절), 4번(프로필 수정)은 읽기 전용으로 둡니다(4.11절).
+**1·2번은 계약 2차 갱신에서, 5번은 계약 3차 갱신에서 해소됐습니다.** 3·4번은 없어도 화면이 성립하므로
+**남은 요청은 없습니다.** 3번(꼬리질문 요약)은 `useTranscript`로 파생 계산하고(7.4절),
+4번(프로필 수정)은 읽기 전용으로 둡니다(4.11절).
+
+| ~~5~~ | ~~D30(체험 예약 1건 제한)의 오류 `code`와 `details`~~ | — | **✅ 해소(계약 3차 갱신).** 13절에 **409 `trial_reservation_exists`** 가 추가되고 `details.existingSessionId`가 **항상 채워진다고** 확정됐습니다(`05_api_contract.md` :1512 · :1530 · 4.7.6절). 요청한 (a)·(b) 둘 다 그대로 반영됐습니다 | **잠정 동작 폐기.** 소거법과 `activeSessions` 폴백을 4.4절에서 **삭제**하고 `error.code` 직접 분기로 바꿨습니다 |
 
 **신설 엔드포인트 3개를 받았습니다 — 회신 완료.** `#33 cancel`(D19) · `#34 GET 문서 단건`(D21) ·
 `#35 abandon-preparation`(F8). 대응 훅 `useCancelSession` · `useDocument` · `useAbandonPreparation`을
 3절 표에 넣었고, 응답 봉투와 **언랩 여부를 계약 4절 표와 다시 대조했습니다**(전부 `{ 리소스 }` 단일 키 → **언랩 예**).
 
+**신설 엔드포인트 6개(#36~#41)도 회신 완료 — 2026-09-10, D27·D28·D29.**
+대응 훅 `useCapacity` · `useApiKeyStatus` · `useConnectApiKey` · `useDisconnectApiKey` · `useVerifyApiKey` ·
+`useGrantTrialConsent`를 3.1·3.2절에 등록했습니다. **6개 전부 단일 키 봉투(`{ capacity }` / `{ apiKey }` /
+`{ consent }`)이므로 언랩 = 예**이며, 특히 **#39 `DELETE`가 `{ ok: true }`가 아니라 `{ apiKey }`** 라는
+점을 3.2절 경고로 못박았습니다. 훅 총계는 **37개 → 43개**입니다.
+
 ---
 
 ## 15. 남은 결정
 
-**이 절에 있던 4건이 확정 결정 23건으로 모두 해소됐습니다. 남은 `[결정 필요]`는 없습니다.**
+**이 절에 있던 4건이 확정 결정(현재 30건)으로 모두 해소됐습니다. 남은 `[결정 필요]`는 없습니다.**
 
 | 초안의 미결 | 결과 |
 |---|---|
@@ -1490,6 +1982,10 @@ Radix `Toast`를 직접 조립하는 쪽은 접근성 처리를 스스로 떠안
   명시.** 회원가입 화면의 이메일 재확인 문구(D8)와 짝을 이룹니다.
   영향: 이 문서 4.2절, 04_data_layer.md 6.1절
 ```
+
+**2026-09-10 D27~D30은 새로운 `[결정 필요]`를 만들지 않았습니다.** 넷 다 확정 결정이며 이 문서는 따르기만 합니다.
+**D30의 오류 `code` 대기 항목(14절 §5 / 16절 #10)도 계약 3차 갱신으로 해소됐습니다** — `trial_reservation_exists`와
+`details.existingSessionId`가 확정되어 이 문서에 반영을 마쳤습니다.
 
 **남은 1건은 이 문서 단독으로 정할 수 없습니다** — 인증 흐름(`04_data_layer.md` 6.1절)과 짝을 이루므로
 `supabase-engineer`·리더의 확정이 필요합니다. 잠정값대로 구현해도 화면은 성립합니다.
@@ -1510,6 +2006,10 @@ Radix `Toast`를 직접 조립하는 쪽은 접근성 처리를 스스로 떠안
 | **8** ✅신규 | `01_product_spec.md` 7절 `/sessions` 화면 요구 vs 이 문서 4.9절 | 제품 스펙의 `/sessions` 요구에 **"취소된 세션 보기" 토글이 없습니다**(QA F12 — `canceled`·"취소"라는 단어가 `01_product_spec.md`·`01_domain_model.md` 어디에도 없음). UI는 D19에 따라 토글을 만듭니다 | `product-architect`가 스펙에 토글 요구를 추가해 주세요. **UI 쪽은 계약 4.3절(`includeCanceled`)에 이미 맞춰 두었으므로 차단 요인은 아닙니다** |
 | **9** ✅신규 | `01_state_machine.md` 2절 전이 표 95행 (`configuring → failed` 트리거) vs `05_api_contract.md` #35 | 전이 표의 트리거 문구가 "사용자가 재시도 포기"라고만 적혀 있고 **진입점이 #35라는 사실이 없습니다.** UI는 추출 실패 배너 안의 [이 세션 준비 포기]를 그 진입점으로 구현합니다(4.4절) | `product-architect`가 트리거 문구에 진입점을 반영해 주세요(문구 변경일 뿐 전이는 그대로). 계약 4.4절이 이미 같은 요청을 냈습니다 |
 
+| ~~10~~ | ~~`00_input/decisions.md` **D30** vs `05_api_contract.md` **13절 오류 표**~~ | **✅ 해소(계약 3차 갱신).** 13절에 **409 `trial_reservation_exists`** 가 추가되고 `details.existingSessionId`가 **항상 채워진다**고 확정됐습니다(`05_api_contract.md` :1512 · :1530 · 4.7.6절) | **4.4절에 반영 완료.** 소거법과 `useDashboard`의 `activeSessions` 폴백을 **삭제**하고 `error.code` 직접 분기로 바꿨으며, `[이어서 하기]`의 목적지를 `details.existingSessionId`로 고정하고 `[이전 면접 취소하기]`(#33)를 함께 두었습니다 |
+| ~~11~~ | ~~`02_ai_architecture.md` **13.6.3절 금칙어 목록** vs `01_product_spec.md` **6.5.6절**~~ | **✅ 해소.** `02_ai_architecture.md` 13.6.3절이 금칙어 목록에 **"API 키"·"한도" 예외를 명문화**했습니다. 세 문서가 더 이상 충돌하지 않습니다 | **UI 방침 변경 없음.** "한도"는 여전히 **4.14.3절 한 곳에서만** 쓰고 4.14.1·4.14.2에는 쓰지 않습니다(4.14.4절). QA는 이제 이 두 단어의 grep 히트를 **오탐이 아니라 명문화된 예외**로 처리하면 됩니다 |
+| **12** ★신규 | `02_ai_architecture.md` **13.6.3절 ①②의 문구** vs `01_product_spec.md` **6.5.5절** | 13.6.3절 ①②의 문안은 **D27 시점**의 것이라 키 연결 CTA가 없고 "{availableAtIso} 이후에 다시 시작할 수 있어요"가 본문에 고정돼 있습니다. D28 이후 `availableAtIso`는 **체험 소진 시 `null`** 이므로 그대로 쓰면 빈 문장이 남습니다 | 13.7.3절이 이미 "1순위 버튼을 키 연결하기로 바꾸라"고 지시했으므로 **UI는 6.5.5절 + 13.7.3절 문안을 채택**했습니다(4.14.1절). 13.6.3절 ①②의 본문도 같은 문안으로 갱신되면 세 문서가 한 문장을 말하게 됩니다 |
+
 ---
 
 ## 17. 다른 팀에 전달할 사항
@@ -1523,5 +2023,12 @@ Radix `Toast`를 직접 조립하는 쪽은 접근성 처리를 스스로 떠안
 | `ai-interview-architect` | **F7 회신 완료.** `02_ai_contracts.md` 3.5절에 `sessionStatus`가 추가되어 `02`·`05`·`06` 세 문서가 같은 `utterance_done` 페이로드를 말합니다. UI는 `sessionStatus === 'completed'`에서 입력창을 닫고 리포트 대기로 보냅니다(3.3절). `action`이 `InterviewerAction` 5개 값 유니온으로 좁혀진 것도 반영했습니다 |
 | `qa-inspector` (**2차 / QA 대응 회신**) | **F1**(8.1절 자동 호출·[평가 시작하기] 삭제, `useRetryEvaluation` 개명) · **F2**(10절 재편 — 취소 10.1절 신설, "폐기"를 `useCancelSession`으로 이동, 4.9절 토글) · **F3**(7.5·7.6절 `myFeedback`/`myDisputes` 복원 + 중복 제기 차단) · **F4**(10.3절 `useDocument` 사전 건수) · **F11**(15·16절의 D18·D19 미결을 확정 서술로 교체) · **F13**(머리말 22건) · **F14**(7.2절 축 5개 식별자 매핑 표) 전부 반영했습니다. **`sonner`는 D22로 확정**이므로 5절 "미검증"의 `[확인 필요]`가 해소됩니다 — 판정 기준은 13절 마지막 항목에 적어 두었습니다 |
 | `qa-inspector` | 대조 기준선: (1) **3절 훅 표의 "언랩" 열 ↔ 실제 훅 코드** — 언랩 여부가 가장 흔한 불일치 지점입니다, (2) 1절 라우트 표 ↔ 실제 `src/app/**/page.tsx` 존재 여부(모든 `href`·`router.push`가 이 표의 URL과 일치하는지), (3) 4상태 문자열이 `src/lib/voice/*`와 `src/components/interview/*`에서 **문자 단위로 일치**하는지(Q3), (4) `coachPayload`·`improvements` 내부 키가 **snake_case 그대로**인지(camelCase로 고친 코드가 있으면 런타임 `undefined`), (5) `EvaluationJobAccepted`에서 `axes`/`overallScore`를 읽는 코드가 없는지, (6) 하드코딩 색(`#`, `rgb(`, `bg-[`, Tailwind 팔레트 직접 사용)이 없는지 전역 grep, (7) `useEvaluation` 호출이 리포트 화면에서 생략되지 않는지(생략하면 `report_first_viewed_at`이 안 찍혀 지표 2가 빔), (8) `score_card_viewed` 이벤트가 축당 1회 전송되는지(지표 5의 분모), (9) `persona-meta.ts`의 주질문 수·깊이가 `01_state_machine.md` 3절 표와 같은지, (10) **"폐기"·"그만두기" 문구가 `useDeleteSession`이 아니라 `useCancelSession`에 연결됐는지**(D19 — 여기가 틀리면 사용자가 확인 없이 기록을 잃습니다), (11) **리포트 화면에 `useRetryEvaluation` 호출이 `status === 'failed'` 분기 밖에 있지 않은지**(D18 — 그 밖의 호출은 전부 409), (12) `axis-meta.ts`의 축 5개 식별자가 7.2절 표와 문자 단위로 같은지, (13) `package.json`에 `sonner` 외 UI 라이브러리가 없는지 |
+
+| `vercel-platform-engineer` (**3차 / D27·D28·D29·D30 회신**) | **신설 6개(#36~#41) 전부 훅으로 받았습니다** — 3.1·3.2절. 봉투가 모두 단일 키라 **언랩 = 예**이며, **#39 `DELETE`가 `{ apiKey }`를 돌려준다는 점**을 다른 DELETE 훅과 다르다고 명시해 두었습니다. `Session.fundingSource`와 `PauseReason` 5종도 반영했고(4.6.1절), 신규 오류 4종의 화면을 4.14절에 고정 문안으로 두었습니다. **14절 §5 요청은 회신 수령 — 추가 요청 없음.** `trial_reservation_exists` + `details.existingSessionId`를 받아 4.4절의 소거법과 `activeSessions` 폴백을 **삭제**했고, `[이어서 하기]`는 `existingSessionId`로만, `[이전 면접 취소하기]`는 #33으로 연결했습니다. 확인 1건: `useCapacity`를 `staleTime` 30초로 화면 4곳에서 공유하고, **권위 있는 판정은 `#3`/`#6` 응답으로만** 받습니다(4.7.1절의 비원자성을 UI가 메우려 하지 않습니다). 이 사용 패턴이 맞다면 그대로 갑니다 |
+| `ai-interview-architect` (**3차**) | 13.7.3절 4개 지시를 **전부 반영**했습니다 — (1) 여력 부족 화면의 1순위 버튼을 **[키 연결하기]** 로(4.14.1절), (2) 키 오류 문구를 `code`로 조회하는 **고정 문안**으로(4.14.2·4.14.3절, `blocked-copy.ts` 단일 사본), (3) "API 키" 허용 예외 유지(4.14.4절), (4) 체험 잔여 카운터 **미노출**. **요청 1건(16절 #12).** #11(금칙어 "한도" 예외)은 13.6.3절에 **"API 키"·"한도" 예외가 명문화되어 해소**됐습니다 — 감사합니다. 남은 것은 13.6.3절 ①②의 본문 문안을 `01_product_spec.md` 6.5.5절 문안으로 갱신해 주세요 — 현재 문안은 D27 시점의 것이라 키 연결 CTA가 없고, `availableAtIso`가 `null`일 수 있다는 사실(D28)이 반영돼 있지 않습니다 |
+| `voice-pipeline-engineer` (**3차**) | **`pause_reason` 5종을 재개 패널이 전부 분기합니다**(4.6.1절). 음성 UI가 일시정지 사유를 표시한다면 신규 2종(`byok_key_invalid`·`byok_quota_exhausted`)에 **재개 가능 시각·카운트다운을 렌더하지 마세요** — `resumableAfter`가 `null`입니다. `stream_error.code`에 2종이 늘어난 것도 3.3절에 반영했고, **두 사유에서 [이어서 하기]를 `disabled`로 두지 않습니다.** 폴백 사다리 1·2단계는 `byok` 세션에서도 그대로 동작한다는 판단을 UI 쪽에서도 동일하게 전제합니다 |
+| `product-architect` (**3차**) | **요청 없음.** `01_product_spec.md` 6.5·7·10절을 그대로 따랐습니다 — `/settings/api-key` 신설과 근거 4항, 온보딩 순서(가치 → 요구), 리포트 CTA를 "같은 이력서로 다시 하기"와 **같은 카드 안**에 둔 것, 여력 부족 화면의 1순위 버튼, 체험 잔여 카운터 금지, 키 마스킹 4자리까지 반영했습니다. 동의 문안은 6.5.4절 초안을 **한 글자도 바꾸지 않고** 썼습니다(4.13절) |
+| `supabase-engineer` (**3차**) | **스키마 변경 요청 없음.** UI는 키 원문을 어떤 경로로도 받지 않으며(`ApiKeyStatus`에 자리가 없습니다), 키를 `localStorage`·URL·쿼리에 넣지 않습니다. 확인 1건: 계정 삭제 확인 문구에 **"연결하신 AI 키도 함께 삭제됩니다"** 를 넣었습니다(4.11절) — 실제 동작(cascade + Vault 삭제)과 일치하는지만 봐 주세요 |
+| `qa-inspector` (**3차 대조 기준선 — D27·D28·D29·D30**) | (1) **키 원문이 클라이언트 코드 어디에도 저장되지 않는지** — `localStorage`/`sessionStorage`/`indexedDB`/`document.cookie`에 대한 전역 grep, 그리고 `router.push`·`href`·`?next=`에 키가 실리는 경로가 없는지. (2) **키 입력 폼(`ApiKeyForm`)이 `/settings/api-key` 외의 페이지에서 import 되지 않는지.** (3) **"보기" 토글·복사 버튼이 없는지** — 있으면 존재하지 않는 값을 읽는 코드입니다. (4) **금칙어 grep**(4.14.4절 목록) — 유일한 허용 예외는 "API 키" 전역과 **4.14.3절의 "한도"** 뿐입니다. (5) **체험 잔여 카운터가 없는지** — `trialStatus`가 분기 조건 외에 렌더에 쓰이면 위반입니다. (6) **재개 패널이 `PauseReason` 5종을 전부 분기하는지**, 신규 2종에 **시각·카운트다운·`disabled`가 없는지**. (7) **503을 받았을 때 `keyStatus === 'invalid'` 분기가 있는지** — 없으면 무효한 키 사용자에게 "내일 오세요"를 말하게 됩니다. (8) **리포트의 키 CTA가 "같은 이력서로 다시 하기"와 같은 카드 안**이고 `keyStatus === 'connected'`에서 렌더되지 않는지. (9) **여력 부족 안내의 1순위 버튼이 [키 연결하기]** 인지 — D28의 유일한 이득입니다. (10) **`useDisconnectApiKey`가 `{ apiKey }`를 언랩하는지**(`void`로 선언하면 화면이 갱신되지 않습니다). (11) **`consentVersion`이 하드코딩돼 있지 않은지** — `useCapacity` 응답에서 와야 합니다. (12) **동의 문구가 `src/lib/consent/trial-consent.ts` 단일 상수인지**(사본이 있으면 서버 해시와 갈라집니다). (13) **`useGrantTrialConsent` 성공 전에 `usePrepareSession`이 호출되지 않는지.** (14) **D30 409 안내에 기존 세션으로 가는 링크가 실제로 있는지** |
 
 > 전체 결정 기록: [`00_input/decisions.md`](00_input/decisions.md)
