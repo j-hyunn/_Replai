@@ -7,6 +7,9 @@
 
 ## 변경 로그
 - 2026-09-09 최초 작성. 브리프 9절 #1(질문 풀 확보), #2(압박 상한) 결정. 무료 티어 모델 선택, 5초 지연 예산 분해, 인젝션 방어, 실패·재시도 정책 정의.
+- 2026-09-10 **D28 대응 — BYOK 도입으로 예약 게이트의 적용 범위가 체험 세션으로 좁혀짐.** 8.3.0절에 배급 범위 명시(BYOK 세션은 원장에 행을 만들지 않는다), 8.3.1·8.3.4·8.3.7·8.3.9·8.3.10의 "정원"을 **체험 정원**으로 정정. 4.4절 프로바이더 추상화에 **세션별 키 전달(`LlmCallContext`)** 과 키 취급 규칙 추가. 4.6절 신설 — **사용자 키 오류 3분류 정규화**(`pause_reason` 매핑 원본). 5.4절 신설 — D29 하에서의 체험 세션 컨텍스트 판단. 13.7절 신설 — D28 소유자별 전달 사항. **모델 선택(4.2절)은 변경 없음(D27과 동일, Gemini 유지). 폴백 사다리 1~3단계도 변경 없음.**
+- 2026-09-10 **QA 2차 대응(`07_qa_report.md` G4).** (1) `reserve_session_quota`를 **4인자**(`+ p_limits jsonb`)로 정정 — 8.3.3절 호출 예시, 8.3.5절 SQL, 13.6.1절 시그니처 표. 한도 수치는 환경변수에서 계산해 서버가 주입한다(확정본 `04_data_layer.md` 3.14.1절). (2) **D30 — 체험 예약은 사용자당 동시 1건** 을 반영. 8.3.3절에 근거와 범위(예약 소유자는 여전히 세션, 제한하는 것은 동시 `held` 개수뿐), 8.3.5절에 진입부 가드 순서(**재원 가드 D28 → 동시 예약 가드 D30 → 버킷 루프**)와 예외 3종 매핑 표, 13.6.1절에 요약을 추가. **BYOK는 예약을 하지 않으므로 해당 없음.**
+- 2026-09-10 **D27 대응 — 레이트 리밋 방어를 사후 대응에서 사전 예약으로 전환.** 8.3절 전면 재작성(일당 한도 RPD의 모델별 버킷 예약 모델: 예약 원장 2테이블, 조건부 UPDATE 기반 동시성, 반납 규칙, 평가·코치 몫 선점, 안전 여유, 한도 수치 환경변수화). 8.1절에 모델별 버킷 분해 추가, 8.2절에 게이트 라우트 추가, 13.6절 소유자별 전달 사항 신설, 14절에 D27 결정 기록. **모델 선택(4.2절)은 변경 없음 — Gemini 무료 티어 유지($0 확정). 폴백 사다리 1~3단계(RPM 대응)도 유지.**
 
 ---
 
@@ -155,16 +158,87 @@ $1.00/$5.00 per MTok), **무료 티어가 존재하지 않는다.** 따라서 MV
 
 ```
 lib/ai/
-  provider.ts        // interface LlmProvider { complete(req): Promise<Result>, stream(req): AsyncIterable }
+  provider.ts        // interface LlmProvider { complete(req, ctx): Promise<Result>, stream(req, ctx): AsyncIterable }
+  credentials.ts     // resolveCallCredentials(sessionId) — 세션의 funding_source로 키를 고른다 (서버 전용)
+  errors.ts          // normalizeProviderError() — 4.6절의 3분류
   providers/google.ts
   providers/anthropic.ts   // 예산이 열릴 때를 대비해 껍데기만 먼저 둔다
   roles.ts           // AGENT_MODEL: Record<AgentRole, {provider, model, params}>
+                     // ROLE_BUCKET: Record<AgentRole, ModelBucket>
 ```
 
 - 에이전트 코드는 모델 ID를 직접 참조하지 않고 `roles.ts`의 역할 상수만 참조한다.
 - 역할 상수는 5개: `interviewer` `summarizer` `planner` `evaluator` `coach`.
 - 모델 ID·온도·최대 토큰은 전부 이 파일 한 곳에 있고, 환경변수로 오버라이드 가능해야 한다
   (한도 소진 시 운영자가 배포 없이 모델을 내릴 수 있어야 함).
+
+#### 4.4.1 세션별 키 — `complete()` / `stream()` 시그니처 확장 (D28)
+
+D28 이전에는 프로바이더 계층이 **프로세스 전역의 공용 키 하나**를 암묵적으로 집어 썼다. BYOK 이후에는
+**어느 키로 부르는지가 세션마다 다르므로**, 키는 모듈 스코프에서 읽는 값이 아니라 **호출마다 넘기는 인자**다.
+
+```ts
+type FundingSource = 'trial_shared' | 'byok';
+type ModelBucket   = 'flash_lite' | 'flash' | 'pro';
+
+/** 호출 1건의 재원·귀속 정보. 절대 로깅 대상이 아니다. */
+interface LlmCallContext {
+  sessionId: string;          // null 불가 — 예약/소비 기록과 오류 귀속의 키
+  role: AgentRole;            // ROLE_BUCKET[role]으로 버킷이 결정된다
+  fundingSource: FundingSource;
+  /** funding_source='byok'일 때만 채워진다. 서버에서 복호화된 평문이며 이 객체 밖으로 나가지 않는다. */
+  apiKey: string;
+  /** 관측용 표시값. 로그·이벤트에 남길 수 있는 유일한 키 관련 값 */
+  keyFingerprint: string;     // 끝 4자리 (예: "…a1b2")
+}
+
+interface LlmProvider {
+  complete(req: CompletionRequest, ctx: LlmCallContext): Promise<CompletionResult>;
+  stream(req: CompletionRequest, ctx: LlmCallContext): AsyncIterable<StreamChunk>;
+}
+```
+
+**규칙 — 구현이 지켜야 할 것.**
+
+1. **`ctx`는 선택 인자가 아니다.** 기본값을 두거나 생략을 허용하면 "깜빡하면 공용 키"가 되어
+   D29 동의 없는 데이터가 공용 경로로 나간다. 타입 수준에서 필수로 둔다.
+2. **`apiKey`를 프로바이더 클라이언트 인스턴스에 캐시하지 않는다.** 클라이언트는 호출마다
+   `ctx.apiKey`로 만들거나(권장) 키를 인자로 받는 형태여야 한다. 세션 A의 키가 붙은 싱글턴을
+   세션 B가 재사용하는 사고가 이 캐시에서 나온다.
+3. **`fundingSource`와 `apiKey`의 정합성을 진입부에서 단언한다.**
+   `byok`인데 `apiKey`가 비었으면 **호출하지 않고 즉시 실패**한다. 공용 키로 대체하지 않는다(4.4.3).
+4. **`consume_session_quota()`는 `fundingSource === 'trial_shared'`일 때만 호출한다.**
+   BYOK 세션은 공용 원장을 건드리지 않는다 — 예약 행이 없으므로 소비를 세면 `overflow`만 만든다(8.3.0).
+
+#### 4.4.2 키 취급 — 복호화는 서버에서만, 어디에도 남기지 않는다 (D28 6.5.7)
+
+- **복호화 지점은 `credentials.ts` 하나다.** `resolveCallCredentials(sessionId)`가 세션의
+  `funding_source`를 읽어 공용 키 또는 사용자 키(Vault 복호화)를 돌려준다. 다른 어떤 모듈도 복호화하지 않는다.
+- **평문 키는 `LlmCallContext` 밖으로 나가지 않는다.** 반환값·예외·스팬 속성·`session_events.detail`·
+  메트릭 라벨 어디에도 넣지 않는다. 남길 수 있는 것은 `keyFingerprint`(끝 4자리)뿐이다.
+- **프로바이더 오류 객체를 그대로 던지거나 로깅하지 않는다.** SDK 예외에는 요청 헤더가 통째로 붙어
+  있는 경우가 있다. 반드시 `normalizeProviderError()`(4.6절)를 통과한 결과만 상위로 올린다.
+- **`ctx`를 통째로 로깅하지 않는다.** 로깅 헬퍼는 `{ sessionId, role, bucket, fundingSource, keyFingerprint }`
+  만 뽑는 화이트리스트 방식이어야 한다. 객체를 통째로 직렬화하는 순간 키가 샌다.
+- 키는 `NEXT_PUBLIC_` 계열 어디에도 닿지 않는다(고정 제약).
+
+#### 4.4.3 공용 키 폴백 금지 — 프로바이더 계층에서 구조적으로 막는다
+
+> **사용자 키가 실패했을 때 공용 키로 재시도하는 코드 경로는 존재하지 않는다.**
+> 폴백하면 D29 동의를 받지 않은 이력서·답변이 공용 경로로 나가고, 사용자는 그 사실을 모른다.
+> `01_state_machine.md` 2절·4.5절이 이를 금지했다.
+
+구현상 이 금지는 **주석이 아니라 구조로** 걸어야 한다.
+
+- 재시도(11.4절)와 폴백 사다리 3단계 백오프는 **같은 `ctx`로만** 재호출한다. 재시도 루프가 `ctx`를
+  다시 만들거나 인자를 비우고 부르는 형태가 되면 금지가 무너진다 — `ctx`는 루프 밖에서 한 번 만들어 고정한다.
+- 체험 잔여 여부는 이 판단에 **들어오지 않는다.** BYOK 세션의 키가 죽었을 때 "마침 체험이 남았으니
+  공용으로 돌리자"는 것이 정확히 금지된 동작이다.
+- `funding_source`는 세션 생성 시 확정되고 세션이 끝날 때까지 바뀌지 않으므로(`01_state_machine.md` 1절),
+  **세션 중간에 재원이 바뀌는 정상 경로 자체가 없다.** 사용자가 키를 교체한 뒤 `paused → in_progress`로
+  재개하는 것은 같은 `funding_source = 'byok'` 안에서 키만 바뀌는 것이지 재원 전환이 아니다.
+- 반대 방향(체험 세션이 사용자 키로 넘어가기)도 금지다. 이유는 대칭이 아니라 단순하다 —
+  사용자가 그 세션에 자기 토큰을 쓰겠다고 말한 적이 없다.
 
 ### 4.5 공통 호출 파라미터
 
@@ -179,6 +253,51 @@ lib/ai/
 **평가자만 temperature 0인 이유:** 평가는 재시도 가능해야 하고(`01_state_machine.md`), 같은 대화 로그에
 같은 점수가 나와야 이의 제기(지표 5)에 대응할 수 있다. 면접관은 반대로 매번 같은 꼬리질문이 나오면
 재시도율(지표 3, 북극성)이 죽으므로 0.7을 쓴다.
+
+---
+
+### 4.6 사용자 키 오류 정규화 — 3분류 (D28, 이 절이 원본)
+
+프로바이더가 돌려주는 상태 코드는 **그대로 쓸 수 없다.** 401·403·429는 원인이 겹치고,
+같은 429가 "60초 뒤 풀리는 분당 한도"일 수도 "오늘은 끝난 일당 한도"일 수도 있다.
+`01_state_machine.md` 4.5절과 `01_product_spec.md` 6.5.6절이 요구하는 것은 **복구 주체가 다른 세 부류**다.
+
+`normalizeProviderError(raw, ctx)`는 프로바이더의 원시 오류를 아래 세 값 중 하나로 접는다.
+**상위 계층은 원시 오류를 보지 않는다.**
+
+| 분류 | 프로바이더 신호 | 판정 조건 | `pause_reason` | 사용자에게 |
+|---|---|---|---|---|
+| **`transient`** | 429(분당), 500·502·503·504, 네트워크 타임아웃, 스트림 중단 | 3단계 백오프(최대 60초) 안에 회복됨 | **없음 — `paused`로 가지 않는다** | 아무것도 보이지 않는다(면접이 계속된다) |
+| **`key_invalid`** | 401, 403, `API_KEY_INVALID` 계열, 프로젝트/모델 접근 거부 | **재시도 1회 후에도 동일 인증 거절** | `byok_key_invalid` | "연결하신 키로 접속할 수 없었어요…" → 키 교체 |
+| **`key_quota_exhausted`** | 429 중 일당·계정 한도 계열(`RESOURCE_EXHAUSTED` + 일당 지표), 결제 미활성 거부 | **3단계 백오프로 회복되지 않음** | `byok_quota_exhausted` | "연결하신 키의 사용량이 오늘 한도에 도달했어요…" → Google AI Studio 확인 |
+
+**판정 규칙 — 순서가 중요하다.**
+
+1. **먼저 `transient`를 배제한다.** 어떤 오류든 폴백 사다리 3단계 백오프를 **먼저** 태운다.
+   회복되면 그것으로 끝이고 사용자에게는 아무 일도 일어나지 않는다. 이 단계를 건너뛰고 곧장
+   `key_quota_exhausted`로 내리면, **분당 한도에 순간적으로 부딪힌 멀쩡한 키를 죽은 키로 신고**하게 된다.
+2. **`key_invalid`는 재시도 1회 후에 판정한다**(`01_state_machine.md` 4.5절 규칙 6).
+   일시적 네트워크 오류를 키 문제로 오인해 "키를 확인하세요"라고 말하면, 사용자는 멀쩡한 키를
+   지우고 다시 발급받는다. 인증 거절은 재시도해도 같은 답이 오므로 이 1회는 값싸다.
+3. **429의 갈림길은 "60초 뒤에도 같은가"이다.** 우리는 사용자 계정의 잔여량을 조회할 수단이 없으므로
+   (8.3.2절의 이유와 동일), 분당인지 일당인지는 **회복 여부로만** 구분한다. 프로바이더가 응답 본문에
+   일당 한도를 명시하면 그것을 우선 신뢰하되, **없다고 해서 분당으로 가정하지 않는다.**
+4. **애매하면 `key_invalid`가 아니라 `key_quota_exhausted`로 접는다.** 두 문구의 대가가 비대칭이기
+   때문이다 — 한도 문제를 "키를 확인하세요"로 잘못 말하면 사용자가 멀쩡한 키를 파괴하지만,
+   키 문제를 "한도에 도달했어요"로 잘못 말하면 사용자는 Google AI Studio에서 진짜 원인을 보게 된다.
+   회복 가능한 오해 쪽으로 틀린다.
+
+**분류 결과에 절대 포함되지 않는 것**: 프로바이더 오류 메시지 원문, 요청 헤더, 키 평문·해시.
+정규화 결과는 `{ kind, retryable, keyFingerprint, sessionId }`뿐이며, 사용자에게 보이는 문구는
+`06_ui_plan.md`가 `kind`로 조회하는 고정 문안이다. **프로바이더 문구를 그대로 흘리지 않는다**(6.5.7절 5).
+
+**체험 세션(`trial_shared`)에는 이 3분류를 적용하지 않는다.** 공용 키가 한도에 부딪히는 것은
+사용자 계정의 사정이 아니라 **우리 예약 모델의 결함 신호**이므로, 기존 `pause_reason = 'rate_limited'`
+경로가 그대로 담당하고 8.3.9절이 관측한다. `byok_*` 두 사유는 `funding_source = 'byok'`에서만 나온다.
+
+**완주율(지표 1) 집계에서 `byok_key_invalid` · `byok_quota_exhausted`는 분리한다.**
+사용자 계정 사정으로 끊긴 세션을 "압박을 못 견디고 이탈"로 세면 제품 지표가 틀린다
+(`01_state_machine.md` 4.5절과 동일한 요구).
 
 ---
 
@@ -226,6 +345,42 @@ lib/ai/
 
 **전달 형식**: 인용 검증을 위해 각 후보 발화에 `turn_id`와 **0부터 시작하는 문자 오프셋 기준 원문**을
 그대로 넣는다. 마크다운 장식이나 따옴표 추가 금지 — 한 글자라도 바뀌면 `quote_start`/`quote_end`가 어긋난다.
+
+### 5.4 체험 세션에서 이력서를 줄여야 하는가 (D29 판단)
+
+**질문.** 체험 세션은 우리 키로 무료 티어에 이력서를 보내고, Google 약관상 사람이 읽을 수 있다(D29).
+그렇다면 체험 세션에서만 이력서를 줄여 보내야 하는가.
+
+**판단: 본문 내용은 줄이지 않는다. 5.1~5.3절의 컨텍스트 전략은 재원과 무관하게 동일하다.**
+
+근거는 셋이다.
+
+1. **줄이면 체험이 나빠지고, 나빠진 체험이 곧 제품의 실패다.** 이력서 원문은 플래너가 꼬리질문의
+   재료(프로젝트명·수치·기술 스택·역할·기간)를 뽑는 유일한 출처다. 여기서 사실을 깎으면 질문이
+   일반화되고, 그것은 정확히 "이력서를 안 읽은 면접관"의 인상을 만든다. 그런데 **체험은 사용자가
+   제품의 가치를 보는 단 한 번의 기회**이고 그 직후가 키를 요구하는 지점이다(6.5.2절).
+   북극성 지표(지표 3 재시도율)를 가장 직접적으로 깎는 선택이다.
+2. **줄이는 것은 D29가 요구한 해결이 아니다.** D29의 답은 "덜 보내기"가 아니라 **"숨기지 않고 동의를
+   받기"** 다. 사용자가 무슨 일이 일어나는지 알고 동의한 뒤에도 우리가 몰래 품질을 깎는다면,
+   사용자는 자기가 승낙한 것보다 나쁜 것을 받는다.
+3. **노출 면적은 이미 최소화되어 있다.** 5.1절이 이력서 원문을 **플래너 단 1회**에만 주기로 한 것은
+   지연·TPM 때문이었지만, D29 하에서 두 번째 정당화를 얻는다 — 면접관 23회·평가자·코치는
+   원문이 아니라 `context_summary`와 전사만 본다. 즉 세션당 26회 호출 중 이력서 원문이 외부로
+   나가는 것은 **1회뿐**이다. 여기서 더 줄일 여지는 구조적으로 크지 않다.
+
+**다만 값이 싼 최소화 하나는 권고한다(내용 손실 0).**
+
+이력서 상단의 **연락처 식별자(전화번호·이메일·주소·생년월일)** 는 면접 질문의 재료가 전혀 아니면서
+가장 민감한 항목이다. 문서 추출 단계에서 이 패턴을 마스킹해도 질문 품질은 한 글자도 나빠지지 않는다.
+이름·회사명·프로젝트명은 **마스킹하지 않는다** — 그것을 지우면 질문이 성립하지 않는다.
+
+- 이것은 **체험 전용 분기가 아니라 전 세션 공통**이어야 한다. BYOK 세션에서도 연락처는 여전히 쓸모없다.
+- 적용 지점은 컨텍스트 조립이 아니라 **문서 추출**(`04_data_layer.md`)이므로 이 문서의 소유 밖이다.
+  13.7절에 `supabase-engineer` 앞 **권고**로 남긴다. 필수 요구사항이 아니라 권고인 이유는,
+  D29의 동의가 이미 이 데이터 전송을 정당화하고 있어 **이것이 없다고 설계에 구멍이 생기지는 않기** 때문이다.
+
+**하지 않기로 한 것**: 체험 세션에서만 이력서 상한(12,000자)을 낮추는 것, 체험 세션에서 JD를 생략하는 것,
+플래너를 체험에서만 `flash_lite`로 내리는 것. 셋 다 프라이버시 이득이 미미한데 체험 품질을 직접 깎는다.
 
 ---
 
@@ -321,6 +476,18 @@ lib/ai/
 
 **세션 합계(정상 완주 기준): 호출 26회, 입력 약 61,000토큰, 출력 약 8,000토큰.**
 
+**이 26회는 예약의 단위가 아니다 (D27).** 무료 티어의 RPD는 모델마다 따로 걸리므로,
+26이라는 총합은 어떤 한도와도 대응하지 않는다. 예약은 아래 **모델별 버킷 3개**로 나눠서 한다.
+
+| 버킷 (`model_bucket`) | 모델 | 이 버킷을 쓰는 역할 | 세션당 정상 호출 | 재시도 포함 | **세션당 예약량(기본값)** |
+|---|---|---|---|---|---|
+| `flash_lite` | `gemini-2.5-flash-lite` | `interviewer`, `summarizer` | 23 | +α | **26** |
+| `flash` | `gemini-2.5-flash` | `planner`, `coach` | 2 | 4 | **4** |
+| `pro` | `gemini-2.5-pro` | `evaluator` | 1 | 3 | **3** |
+
+**`pro` 3회가 가장 희소한 자원이고, 하루에 가능한 세션 수를 사실상 혼자 결정한다.**
+버킷 정의·예약·반납·동시성은 8.3절이 전부 다룬다.
+
 ### 8.2 `vercel-platform-engineer`에게 주는 결론
 
 | 라우트 성격 | 최대 소요 | 요구 |
@@ -329,15 +496,487 @@ lib/ai/
 | 플래너 | ~20s | 동기 라우트에 두지 말 것. `configuring → ready`는 작업 큐 + 폴링/Realtime |
 | 평가 + 코치 | **최대 ~90s (재시도 포함 시 수 분)** | HTTP 라우트에 두면 안 된다. 큐 기반 백그라운드 워커 + 워치독 10분(`01_state_machine.md`) |
 
-### 8.3 무료 티어 한도에 대한 방어
+**추가로, 두 라우트에 예약 게이트가 걸린다 (D27 — 8.3절).**
+`POST /api/sessions`(#3)는 여력 조회 후 부족하면 세션을 만들지 않고 **503**,
+`POST /api/sessions/[id]/prepare`(#6)는 플래너를 띄우기 전에 **원자적 예약**을 잡고 실패하면 **503**.
+어느 쪽도 AI를 호출하지 않으므로 지연은 DB 왕복 수준(~150ms)이다.
 
-- **RPM**: 면접관 호출은 사용자 발화 간격에 묶여 실질 1~2 RPM. 병목은 동시 세션 수다.
-  동시 세션 N개면 대략 `1.5 × N` RPM. `[확인 필요]` 모델별 RPM을 확인해 동시 세션 상한을 정하고,
-  초과 시 `01_state_machine.md` 4절 폴백 사다리 3~4단계로 내려간다.
-- **RPD**: 세션당 26회. 일당 한도가 예컨대 1,000회면 하루 약 38세션. MVP 사용자 20~30명 규모에 부합.
-- **TPM**: 세션당 입력 61K. 요약 전략(5.2절)이 없으면 20턴 × 전문 재전송으로 3~4배가 된다. 이것이 요약의 주 목적.
-- **한도 도달 신호**: 429/한도 오류를 프로바이더별로 정규화해 `RateLimitError`로 던지고,
-  `session_events`에 `event_name = 'rate_limit_fallback'`으로 단계와 함께 기록한다(지표·튜닝 근거).
+### 8.3 일당 한도(RPD) 사전 예약 — 벽을 세션 시작 전으로 옮긴다 (D27, 적용 범위는 D28이 좁힘)
+
+#### 8.3.0 적용 범위 — **예약 게이트는 체험 세션만 배급한다** (D28)
+
+> **이 절 전체(8.3.1~8.3.10)는 `funding_source = 'trial_shared'` 세션에만 적용된다.**
+> `funding_source = 'byok'` 세션은 예약을 조회하지도, 잡지도, 반납하지도 않는다.
+
+D28 이전 이 절은 전 사용자를 대상으로 읽혔다. **더는 아니다.** BYOK는 공유 자원을 배급하는 대신
+**자원 자체를 사용자별로 분리**하므로, 사용자 키로 도는 세션은 우리 공용 여력과 아무 관계가 없다.
+
+| | `trial_shared` | `byok` |
+|---|---|---|
+| 쓰는 키 | 서비스 공용 키 | 사용자가 연결한 본인 키 |
+| #3 문 앞 조회(8.3.3절) | **적용** | **건너뜀** — 무조건 통과 |
+| #6 확정 예약(8.3.3절) | **적용** | **건너뜀** — `reserve_session_quota()`를 호출하지 않는다 |
+| `ai_quota_reservations` 행 | **생긴다** | **생기지 않는다** |
+| `ai_quota_ledger.held_calls` 증감 | 있음 | **없음** |
+| 소비 기록 `consume_session_quota()`(8.3.4절) | **호출** | **호출하지 않음** |
+| 반납(8.3.4절 표 전체) | **적용** | 해당 없음 — 잡은 것이 없다 |
+| 여력 소진 시 | 503 `capacity_unavailable` | **일어나지 않는다** |
+| 한도에 부딪히면 | `pause_reason = 'rate_limited'`(예외 경로, 8.3.9절) | `byok_key_invalid` / `byok_quota_exhausted`(4.6절) |
+
+**구현상의 못.** 게이트와 원장을 만지는 모든 지점 — 문 앞 조회, `reserve_session_quota()`,
+`consume_session_quota()`, `release_session_quota()` — 은 진입부에서 `funding_source`를 확인하고
+`byok`이면 **공용 원장을 건드리지 않는다.** 다만 반환 방식은 함수마다 다르다(8.3.5절 확정) —
+`reserve_session_quota()`는 **예외 `quota_not_applicable:<funding_source>`** 를 던지고(사전 경로이므로 분기 버그가
+즉시 드러나야 한다), `consume_session_quota()`는 **아무것도 하지 않고 0을 반환**한다(AI 호출 직전 경로이므로
+예외가 곧 면접 중단이 된다). 분기를 라우트마다 흩어 놓지 말고
+이 네 함수의 진입부 하나로 모은다. 흩어 놓으면 한 군데를 빠뜨리는 순간
+**BYOK 세션이 공용 원장을 갉아먹어 체험 정원이 조용히 줄어든다** — 게다가 이 오류는
+"체험 정원이 왜인지 부족하다"로만 보여 원인을 찾기 어렵다.
+
+**BYOK 세션에 소비를 기록하지 않는 이유**는 절약이 아니라 정합성이다. 예약 행이 없는 세션에
+`consumed_calls`를 올리면 `consumed > reserved`가 되어 8.3.9절의 `quota_overflow` 관측이
+**전부 거짓 양성으로 오염된다.** 그 관측은 "예약량이 실사용보다 작다"는 유일한 직접 증거이므로
+오염시키면 안 된다.
+
+**대신 얻는 것 — 벽에 출구가 생긴다.** 여력이 없을 때 할 수 있는 말이 "내일 오세요"에서
+**"키를 연결하면 지금 바로 시작할 수 있어요"** 로 바뀐다. 13.6.3절 문구에 키 연결 CTA를
+1순위 버튼으로 넣는 것이 이 절의 실질적 귀결이다(`01_product_spec.md` 6.5.5절, 13.7.3절).
+
+---
+
+#### 8.3.0-a RPM과 RPD는 다른 문제다 — 폴백 사다리는 그대로 둔다
+
+초안의 방어는 **전부 사후 대응**이었다. 429를 받으면 그때 `01_state_machine.md` 4절 폴백 사다리를
+내려가고, 마지막에 `paused` + `pause_reason = 'rate_limited'`로 면접을 세웠다. 이 구조에서는
+**벽이 언제나 면접 도중에 온다.** 26번째 호출에서 걸릴지 3번째에서 걸릴지 모르는 채 시작하기 때문이다.
+
+D27은 이 벽을 **세션 시작 전으로 옮긴다.** 다만 옮기는 대상은 한 종류뿐이다.
+
+| 한도 | 성격 | 방어 방식 | 근거 |
+|---|---|---|---|
+| **RPM**(분당 요청) | 순간적·자기회복적. 60초 뒤면 다시 열린다 | **사후 대응 유지** — 폴백 사다리 1~3단계(TTS 텍스트화 → STT 텍스트 전환 → 지수 백오프) | 몇 초 뒤 풀릴 것을 미리 예약해 막으면 가용성만 깎는다. 동시 세션 수가 병목이고, 그건 시작 전에 알 수 없다 |
+| **TPM**(분당 토큰) | 위와 동일 | 사후 대응 유지 + 요약 전략(5.2절)으로 상시 절감 | 위와 동일 |
+| **RPD**(일당 요청) | **누적적·비가역**. 소진되면 그날은 끝이다 | **사전 예약** — 8.3.1~8.3.8 | 한 세션의 호출량이 **예측 가능**(8.1절)하므로 시작 시점에 확인하고 잡아둘 수 있다 |
+
+**폴백 사다리 1~3단계는 삭제하지 않는다.** RPM 초과에는 여전히 그것이 정답이다.
+바뀌는 것은 4단계뿐이며, 4단계는 8.3.9절에서 **정상 경로가 아닌 예외 경로로 강등**된다.
+
+**이것은 사용자 등급이 아니다.** 사용자를 나누지 않고 전원이 같은 하루 여력을 나눠 쓴다.
+개인별 상한이 아니라 서비스 전체의 가용성이고, 성격은 "오늘 예약이 마감된 상담 창구"에 가깝다.
+
+---
+
+#### 8.3.1 예약 단위 — 26회를 한 덩어리로 보지 않고 **모델별 버킷 3개**로 나눈다
+
+무료 티어의 RPD는 **모델마다 따로 걸린다.** `flash-lite`가 넉넉해도 `pro`가 바닥나면 평가가 죽는다.
+26이라는 총합은 **어떤 한도와도 대응하지 않는 숫자**이므로 예약 단위가 될 수 없다.
+
+| 버킷 (`model_bucket`) | 모델 (4.2절) | 이 버킷을 쓰는 역할 | 세션당 정상 호출 | 재시도 포함 최악 | **세션당 예약량(기본값)** |
+|---|---|---|---|---|---|
+| `flash_lite` | `gemini-2.5-flash-lite` | `interviewer`, `summarizer` | 23 (20턴 + 요약 3) | 면접관 백오프 재시도 α | **26** |
+| `flash` | `gemini-2.5-flash` | `planner`, `coach` | 2 (1 + 1) | 플래너 ≤2 시도, 코치 ≤2 시도 = 4 | **4** |
+| `pro` | `gemini-2.5-pro` | `evaluator` | 1 | 평가 ≤3 시도 = 3 | **3** |
+
+- 버킷은 **모델 단위**이지 역할 단위가 아니다. 같은 모델을 쓰는 역할은 같은 한도를 나눠 먹으므로
+  같은 버킷에 넣어야 계산이 맞는다. 4.4절 `roles.ts`에 `AGENT_MODEL` 옆으로
+  `ROLE_BUCKET: Record<AgentRole, ModelBucket>` 매핑을 함께 둔다.
+- **`pro` 3회가 가장 희소한 자원이다.** 무료 티어에서 Pro 계열의 RPD는 Flash 계열보다 한 자릿수 작은 것이
+  일반적이고(수치는 `[확인 필요]`), 세션당 예약량 3은 **하루에 가능한 체험 세션 수를 결정하는 유일한 값**이 된다.
+  즉 `가능 체험 세션 수 = floor(pro 유효한도 / 3)`이 사실상의 **체험 정원**이다.
+  **이것은 서비스 정원이 아니다**(D28) — BYOK 세션은 이 계산 밖이고 개수 제한이 없다(8.3.0절).
+- 버킷을 나눈 두 번째 이득: 면접이 끝난 뒤 `flash_lite` 26개를 **먼저 반납**할 수 있다(8.3.4절).
+  한 덩어리였다면 평가가 끝날 때까지 26개 전부가 묶여 있었을 것이다.
+- **예약량 자체가 환경변수다**(8.3.8절). 위 숫자는 8.1절 추정에서 유도한 **기본값**이며 측정 후 조정한다.
+
+---
+
+#### 8.3.2 여력 계산 — **새 테이블 2개(예약 원장)를 둔다.** 기존 데이터 파생은 불가능하다
+
+**먼저 파생을 검토했고 기각했다.**
+
+| 파생 후보 | 왜 안 되는가 |
+|---|---|
+| 오늘 생성된 `interview_sessions` 행 수 × 26 | 세션 수는 **호출 수가 아니다.** 3턴에서 끝난 세션과 20턴 세션이 같게 잡히고, 취소·실패 세션이 영원히 여력을 깎는다. 모델별 분해도 불가능하다 |
+| 오늘의 `turns` 행 수 | 면접관 호출만 근사할 뿐 플래너·요약·평가·코치가 빠진다. 재시도로 실패한 호출은 `turns`에 흔적이 없는데 RPD는 **실패한 호출도 센다** |
+| `session_events` 집계 | 상태 전이 감사 로그이지 호출 로그가 아니다. 호출 1건 = 이벤트 1건인 관계가 성립하지 않는다 |
+| 프로바이더 API로 잔여 쿼터 조회 | Google AI Studio 무료 티어에 **잔여량 조회 엔드포인트가 없다**. 429를 받아야만 알 수 있고, 그건 정확히 우리가 없애려는 사후 대응이다 |
+
+결정적인 이유는 따로 있다. **파생값에는 "예약"을 표현할 자리가 없다.** 파생은 *이미 일어난 일*만 세는데,
+사전 예약은 *아직 일어나지 않은 호출*을 미리 잡아두는 일이다. 그리고 8.3.5절의 동시성 요구
+(초과 예약 원천 차단)는 **원자적으로 증가시킬 수 있는 단일 행**을 요구한다. 집계 쿼리로는 만들 수 없다.
+
+**그래서 테이블 2개를 만든다.** 하나는 원자적 카운터, 하나는 반납 근거다.
+
+```
+ai_quota_ledger        (quota_date, model_bucket)  ← 그날·그 버킷의 총 보유량. 원자적 조건부 UPDATE 대상
+ai_quota_reservations  (session_id, model_bucket)  ← 세션이 얼마를 잡았고 얼마를 썼는지. 반납량의 근거
+```
+
+**`ai_quota_ledger` — 그날의 카운터 (행 수: 하루 3행)**
+
+| 컬럼 | 타입 | 제약·의미 |
+|---|---|---|
+| `quota_date` | `date` | not null. **복합 PK 1**. 프로바이더 리셋 시각 기준의 날짜(8.3.8절 `AI_QUOTA_RESET_TIMEZONE`) |
+| `model_bucket` | `text` | not null. **복합 PK 2**. CHECK `in ('flash_lite','flash','pro')` |
+| `limit_calls` | `integer` | not null, CHECK `>= 0`. **그날 유효한도의 스냅샷**. 행 생성 시 환경변수에서 계산해 박는다(8.3.7절). 이후 환경변수를 바꿔도 **그날의 판정은 흔들리지 않는다** |
+| `held_calls` | `integer` | not null default 0, CHECK `>= 0`. 현재 예약 보유 총량. 이 값만이 원자적으로 증감한다 |
+| `granted_total` | `integer` | not null default 0 | 그날 누적 승인량(관측용, 감소하지 않음) |
+| `denied_count` | `integer` | not null default 0 | 그날 거절 횟수(관측용). **0이 아니면 체험 정원이 실수요보다 작다는 신호** |
+| `created_at` / `updated_at` | `timestamptz` | not null default `now()` |
+
+**`ai_quota_reservations` — 세션별 보유분**
+
+| 컬럼 | 타입 | 제약·의미 |
+|---|---|---|
+| `id` | `uuid` | PK, default `gen_random_uuid()` |
+| `session_id` | `uuid` | not null, → `interview_sessions(id) on delete cascade` |
+| `model_bucket` | `text` | not null, CHECK `in ('flash_lite','flash','pro')` |
+| `quota_date` | `date` | not null. 예약이 잡힌 날. 원장 행과 같은 값 |
+| `reserved_calls` | `integer` | not null, CHECK `>= 0`. 잡아둔 양 |
+| `consumed_calls` | `integer` | not null default 0, CHECK `>= 0`. 실제로 쓴 양. **상한 CHECK를 걸지 않는다** — 초과가 곧 관측 대상이다(8.3.9절) |
+| `released_calls` | `integer` | not null default 0, CHECK `>= 0`. 반납한 양 |
+| `status` | `text` | not null default `'held'`, CHECK `in ('held','released','overflow')` |
+| `created_at` / `updated_at` | `timestamptz` | not null default `now()` |
+
+- **unique `(session_id, model_bucket)`** — 세션이 같은 버킷을 두 번 잡지 못한다. 재예약 멱등성의 근거(8.3.3절).
+- 인덱스 `idx_quota_res_date_status (quota_date, status) where status = 'held'` — 크론 스윕용(8.3.4절).
+- 두 테이블 모두 **RLS 켜고 정책 0개**. `storage_cleanup_queue`(`04_data_layer.md` 3.12절)와 같은 패턴이며
+  `service_role`만 접근한다. 사용자가 자기 예약을 직접 읽을 이유가 없고, 읽히면 서비스 전체 여력이 노출된다.
+
+**여력 조회(읽기 전용)는 원장 3행만 본다.**
+
+```sql
+select model_bucket, limit_calls, held_calls, limit_calls - held_calls as available
+  from public.ai_quota_ledger
+ where quota_date = $1;   -- 3행. 인덱스 불필요(PK 조회)
+```
+
+---
+
+#### 8.3.3 예약 시점 — **문 앞 조회(#3)** 와 **확정 예약(#6)** 의 2단
+
+`01_state_machine.md` 2절 전이 표에서 후보는 셋이었다.
+
+| 후보 전이 | 채택 | 이유 |
+|---|---|---|
+| (없음) → `created` (#3 `POST /api/sessions`) | **조회만** | 아직 AI 호출이 하나도 없다. 여기서 예약을 홀드하면 설정 화면에서 이탈한 세션이 여력을 물고 늘어진다. 다만 D27의 "여력이 없으면 **세션을 만들지 않는다**"를 지키려면 **비원자적 사전 조회**는 여기서 해야 한다 |
+| `configuring` → `ready` (#6 `POST .../prepare`) | **확정 예약(권위)** | **세션의 첫 AI 호출인 플래너가 바로 여기서 뜬다.** 예약 없이 통과시키면 첫 호출부터 한도 밖이 될 수 있다. 사용자가 직군·이력서·JD를 다 채운 시점이라 "정말 하려는 세션"임이 확인된 지점이기도 하다 |
+| `ready` → `in_progress` (#8 `POST .../start`) | 기각 | 플래너 호출이 이미 예약 밖에서 일어난 뒤다. 게다가 준비를 다 마친 사용자에게 시작 버튼에서 거절을 통보하게 되는데, **면접 도중 끊기는 것 다음으로 나쁜 순간**이다 |
+
+**채택: 조회는 문 앞(#3)에서, 홀드는 준비(#6)에서.**
+
+```
+#3 POST /api/sessions                     ── 문 앞 조회 (비원자적, 홀드 없음)
+   여력 부족 → 403이 아니라 503 capacity_unavailable, 세션 행을 만들지 않는다
+   통과      → created 세션 생성. 이 시점에 잡아둔 것은 없다
+
+#6 POST /api/sessions/[id]/prepare        ── 확정 예약 (원자적, 전 버킷 all-or-nothing)
+   1. reserve_session_quota(sessionId, quotaDate,
+                            {pro:3, flash:4, flash_lite:26},          -- p_request
+                            {pro:N, flash:N, flash_lite:N})           -- p_limits (환경변수에서 계산해 서버가 주입)
+   2. 실패 → 503 capacity_unavailable. **전이하지 않는다.** 세션은 configuring에 남는다
+             (설정은 보존된다 — 내일 그대로 이어서 준비할 수 있다)
+   3. 성공 → session_events에 quota_reserved 기록 → I1 플래너 작업 체이닝 → 202
+```
+
+- **문 앞 조회를 두는 이유**는 정확도가 아니라 **거절 시점**이다. 이력서를 올리고 JD를 붙여넣은 뒤에
+  거절당하는 것보다 "새 면접 시작"을 누른 즉시 듣는 편이 낫다. 조회는 홀드하지 않으므로
+  두 사용자가 동시에 통과할 수 있지만, **권위 있는 판정은 #6의 원자적 예약**이 내린다.
+  통과 후 #6에서 거절될 수 있다는 사실을 설계에 포함한다(드물고, 손실은 설정 입력뿐이다).
+- **`ready → configuring`(#7 되돌리기) 후 재준비**: `reserve_session_quota`는 **멱등**이다.
+  `(session_id, model_bucket)`에 이미 `held` 행이 있으면 목표치와의 **차이만** 추가로 잡는다.
+  차이가 0이면 원장을 건드리지 않는다. 재준비로 플래너가 한 번 더 도는 비용은 `flash` 버킷의
+  재시도 여유(4 중 2)가 흡수한다.
+- **예약은 세션에 붙지 사용자에게 붙지 않는다.** 한 사용자가 하루에 여러 세션을 열면 그만큼 잡는다.
+  이것이 D27의 "사용자를 나누지 않는다"를 지키는 방식이다.
+- **다만 동시에 `held`인 예약은 사용자당 1건이다 (2026-09-10 D30).** 위 문장을 뒤집는 것이 아니다 —
+  예약의 소유자는 여전히 **세션**이고 하루 총량에 사용자별 상한을 두지도 않는다. 제한하는 것은
+  **같은 시각에 열려 있는 `held` 예약의 개수**뿐이며, 앞 세션을 끝내거나 취소하면(취소는 반납을 부작용으로
+  갖는다) 다음 세션을 얼마든지 시작할 수 있다.
+  - **왜 필요한가.** `trial_consumed_at`은 **첫 주질문에 답한 시점**에 기록되는데 예약은 **`prepare` 시점**에
+    잡힌다. 그 틈에서 세션만 여러 개 만들어 `prepare`를 반복하면 **실제 체험은 0회인데 `pro` 3 × N을 동시에
+    점유**할 수 있고, `pro`가 체험 정원을 결정하므로(8.3.1절) **한 사용자가 그날의 체험 정원을 통째로 잠근다.**
+    악의가 없어도 브라우저 탭 몇 개로 발생한다.
+  - **강제 지점은 `reserve_session_quota()` 진입부다**(8.3.5절). 라우트에서 "held 예약이 있나?"를 먼저 조회하는
+    방식은 두 요청이 같은 순간에 조회하면 **둘 다 통과**한다.
+  - **BYOK에는 해당하지 않는다.** 예약 자체를 하지 않으므로 셀 `held` 행이 없다(8.3.0절).
+
+---
+
+#### 8.3.4 소비 기록과 반납 — **반납량 = `reserved − consumed`**
+
+**소비는 호출 직전에, 낙관적으로 센다.**
+
+4.4절 프로바이더 추상화의 `complete()` / `stream()` 진입부에서 `consume_session_quota(sessionId, bucket, 1)`을
+**호출을 보내기 전에** 실행한다. 성공 후가 아니다.
+
+> **왜 사전 증가인가.** RPD는 **성공한 호출이 아니라 시도한 호출**을 센다 — 429로 끝난 호출도 한도를 먹는다.
+> 사후 증가로 바꾸면 실패·타임아웃한 호출이 장부에서 누락되고, 그만큼 **반납이 과다해져** 다음 사용자가
+> 있지도 않은 여력을 예약한다. 과대 계상은 안전한 방향(덜 반납)이고 과소 계상은 위험한 방향이다.
+> 낙관적 증가는 안전한 쪽으로 틀린다.
+
+**반납 시점 — 세션이 그 버킷을 더 쓸 수 없게 된 순간마다.**
+
+| 전이 | 반납 대상 버킷 | 근거 |
+|---|---|---|
+| `in_progress` → `completed` / `paused` → `completed` | **`flash_lite`만** | 면접이 끝났으므로 면접관·요약 호출은 더 없다. **`pro`·`flash`는 계속 잡고 있는다** — 평가와 코치가 남아 있다(8.3.6절) |
+| `evaluating` → `evaluated` | 잔여 전부 (정산) | 평가·코치가 끝났다. 세션의 AI 호출이 완전히 종료 |
+| 모든 상태 → `canceled` (#33) | 전부 | 세션이 더 진행되지 않는다 |
+| `paused` → `abandoned` (크론) | 전부 | 위와 동일 |
+| → `failed` (전 경로) | 전부 | 위와 동일. 단 `failure_reason`이 평가 계열이면 사용자가 #16으로 재시도할 수 있으므로 **재시도는 그때 새로 예약한다**(8.3.6절) |
+| `configuring` → `ready` 실패(플래너 작업 자체 실패) | 전부 | 예약만 잡고 세션이 시작되지 못했다 |
+| 행 삭제 (#23 / #31) | 전부 | `ai_quota_reservations`의 `before delete` 트리거가 처리한다(아래) |
+
+**반납량은 어림하지 않고 정확히 계산한다.**
+
+```
+released := greatest(reserved_calls - consumed_calls, 0)
+```
+
+`consumed_calls`가 이미 정확한 실측값이므로 보수적 어림이 필요 없다. 3턴에서 끝난 세션은
+`flash_lite`를 26 중 22 근처를 되돌려주고, 이것이 하루 체험 정원을 실질적으로 늘린다.
+`consumed > reserved`인 경우 반납은 0이고 `status = 'overflow'`로 남긴다(8.3.9절 관측 대상).
+
+**삭제 경로 누수 방지 — 트리거로 막는다.**
+`interview_sessions` 삭제는 `on delete cascade`로 예약 행을 지운다. 행만 사라지고 원장의 `held_calls`가
+그대로면 **그 여력은 영영 돌아오지 않는다**(계정 삭제 #31에서는 한 번에 여러 건이 샌다).
+따라서 `ai_quota_reservations`에 `before delete` 트리거를 걸어, `status = 'held'`면 지우기 전에
+원장에서 `reserved − consumed`를 차감한다. 라우트가 반납을 잊어도 데이터베이스가 보증한다.
+
+**만료 스윕 — 크론 워치독에 1종 추가.**
+`quota_date < today`이면서 `status = 'held'`인 행은 `released`로 정리한다.
+원장 행이 날짜별이라 여력 계산에는 이미 영향이 없지만, `held` 상태로 남은 과거 행은
+"반납 누락"과 구분되지 않아 관측을 오염시킨다. `05_api_contract.md` C1 `GET /api/cron/daily`에 붙인다.
+
+---
+
+#### 8.3.5 동시성 — **조건부 UPDATE 한 문장.** 읽고 나서 쓰지 않는다
+
+두 사용자가 동시에 마지막 여력을 예약하려는 상황이 초과 예약의 유일한 발생 경로다.
+`select ... 여력 확인 후 insert`는 확인과 쓰기 사이에 창이 생기므로 쓰지 않는다.
+
+**핵심은 원장 행 하나에 대한 조건부 UPDATE다.** 조건이 UPDATE 문 안에 들어가므로 행 잠금이
+직렬화를 보장하고, 별도의 advisory lock도 `serializable` 격리 수준도 필요 없다.
+
+```sql
+update public.ai_quota_ledger
+   set held_calls    = held_calls + p_n,
+       granted_total = granted_total + p_n,
+       updated_at    = now()
+ where quota_date  = p_date
+   and model_bucket = p_bucket
+   and held_calls + p_n <= limit_calls   -- ← 여력 판정이 UPDATE 안에 있다
+returning held_calls;
+-- 0행 반환 = 여력 없음. 경합에서 진 쪽은 여기서 확실히 진다
+```
+
+**세 버킷은 all-or-nothing이다.** `pro`만 잡고 `flash_lite`를 못 잡은 세션은
+"면접은 되는데 평가가 안 되는" 상태이거나 그 반대이며, 둘 다 D27이 없애려는 상황이다.
+따라서 세 버킷의 예약을 **하나의 plpgsql 함수 = 하나의 트랜잭션**에 넣고, 어느 하나라도 0행이면
+예외를 던져 전체를 롤백한다.
+
+```sql
+create or replace function public.reserve_session_quota(
+  p_session_id uuid,
+  p_quota_date date,
+  p_request    jsonb,         -- {"pro":3,"flash":4,"flash_lite":26}
+  p_limits     jsonb          -- {"pro":N,"flash":N,"flash_lite":N} — 원장 행 생성 시 박을 limit_calls
+) returns table (model_bucket text, granted integer, held_after integer, limit_calls integer)
+language plpgsql security definer set search_path = public as $$
+-- ① 재원 가드 (D28) — 세션의 user_id·funding_source를 함께 읽는다
+--      funding_source is null      → raise exception 'session not found: %'
+--      funding_source <> 'trial_shared' → raise exception 'quota_not_applicable:%', funding_source
+-- ② 동시 예약 가드 (D30) — 버킷 루프 **이전**
+--      perform pg_advisory_xact_lock(hashtextextended('trial_quota_reservation:' || v_user_id::text, 0));
+--      같은 사용자의 다른 세션에 status='held' 예약이 있으면
+--        raise exception 'trial_reservation_exists:%', v_existing_session_id
+--      (r.session_id <> p_session_id 조건으로 같은 세션의 멱등 top-up은 통과시킨다)
+-- ③ 버킷 처리 순서: pro → flash → flash_lite  (희소한 것 먼저 + 데드락 회피용 고정 순서)
+-- 각 버킷마다:
+--   1) insert into ai_quota_ledger (quota_date, model_bucket, limit_calls)
+--        values (p_quota_date, bucket, (p_limits->>bucket)::int)   -- 한도는 인자로 받는다
+--        on conflict (quota_date, model_bucket) do nothing      -- 그날 첫 예약이 행을 만든다
+--   2) 이미 held 행이 있으면 목표치와의 차이만 추가(멱등)
+--   3) 위 조건부 UPDATE. 0행이면  raise exception 'quota_exhausted:%', bucket  → 전체 롤백
+--   4) insert/update ai_quota_reservations (session_id, model_bucket) — unique 충돌 시 top-up
+$$;
+```
+
+- **인자는 4개다 (2026-09-10 정정).** `p_limits`가 늘었다. `limit_calls`는
+  `floor(AI_RPD_LIMIT_<BUCKET> × (1 - AI_QUOTA_SAFETY_MARGIN_PCT/100))`인데 **DB는 환경변수를 읽을 수 없으므로**
+  애플리케이션이 계산해 넘긴다. 확정본은 `04_data_layer.md` 3.14.1절이며 `05_api_contract.md`도 4인자로 호출한다.
+- **진입부 가드 2종의 순서를 바꾸지 말 것 — 재원(D28) → 동시 예약(D30) → 버킷 루프.**
+  재원 가드가 먼저여야 BYOK 세션이 advisory lock을 잡지 않고 즉시 튕긴다.
+- **예외 3종은 전부 `이름:값` 형식이다.** 라우트는 `:` 앞을 코드로, 뒤를 값으로 파싱한다
+  (`04_data_layer.md` 3.14.1절과 동일).
+
+  | 예외 | 값 | HTTP |
+  |---|---|---|
+  | `quota_exhausted:<bucket>` | 소진된 버킷 | **503 `capacity_unavailable`** |
+  | `quota_not_applicable:<funding_source>` | 재원(사실상 `byok`) | 내부 오류 — 라우트 분기 버그의 신호다 |
+  | `trial_reservation_exists:<existing_session_id>` | 기존 `held` 세션 id | **409** — 응답에 세션 id를 실어 UI가 "이어서 하기" 링크를 만든다. 같은 사용자의 세션 id이므로 노출해도 타인 정보가 새지 않는다 |
+
+- `consume_session_quota()`는 같은 재원 확인을 하되 **`byok`이면 예외를 던지지 않고 아무것도 하지 않은 채 0을 반환**한다.
+  이 함수는 **AI 호출 직전 경로**에 있어서, 예외를 던지면 분기 실수가 곧 면접 중단이 된다.
+  **예약은 막고(사전), 소비는 흘려보낸다(사후).**
+- 호출부는 `quota_exhausted:<bucket>` 예외를 잡아 **503 `capacity_unavailable`** 로 매핑한다.
+- 고정 순서(pro → flash → flash_lite)는 두 트랜잭션이 서로 다른 순서로 같은 행들을 잠글 때 생기는
+  데드락을 없앤다. **구현자는 이 순서를 바꾸지 말 것.**
+- 원장 행 생성 시 `limit_calls`를 그 자리에서 박기 때문에(8.3.2절), 하루 도중에 환경변수를 바꿔도
+  **진행 중인 날의 판정 기준은 흔들리지 않는다.** 새 값은 다음 날 첫 예약부터 적용된다.
+- 예약은 초당 수 건 수준이고 원장 행은 하루 3개뿐이라, 행 경합은 실측상 문제가 되지 않는다.
+  (문제가 된다면 그건 무료 티어로 감당할 트래픽이 아니라는 뜻이다.)
+
+---
+
+#### 8.3.6 평가·코치 몫은 **면접 시작 시점에 함께 잡는다** — 이것이 예약 모델의 존재 이유다
+
+> **범위 재확인(D28).** 이 절의 예약·소비·반납은 전부 **체험 세션(`trial_shared`)** 이야기다.
+> BYOK 세션은 잡는 것이 없으므로 "평가 몫을 미리 잡는다"는 문제 자체가 없다 —
+> 사용자 키의 여력은 사용자 계정의 사정이고, 부족하면 8.3.9절이 아니라 4.6절이 담당한다.
+>
+> **정원 공식의 의미도 이에 맞춰 읽는다.** 8.3.1절의 `floor(pro 유효한도 / 3)`은
+> **하루에 시작할 수 있는 체험 세션 수**이지 서비스 전체의 세션 수가 아니다.
+> BYOK 세션은 이 계산에 들어가지도, 이 정원을 소비하지도 않는다.
+
+**막으려는 최악의 시나리오:** 사용자가 30분 면접을 정상 완주했는데, 그 사이 다른 체험 세션들이 `pro`를 다 써서
+**리포트를 만들지 못한다.** 이건 면접 도중에 끊기는 것보다 나쁘다 — 사용자가 시간을 다 쓴 뒤에 손해가 확정되기 때문이다.
+
+따라서 **평가(`pro` 3) 와 코치(`flash` 4 중 2) 는 면접관 몫과 같은 트랜잭션에서 잡힌다.**
+이것이 8.3.5절의 all-or-nothing과 8.3.4절의 "완주 시 `flash_lite`만 반납"이 존재하는 이유다.
+평가가 시작될 때 새로 여력을 구하는 일은 **정상 경로에 없다.**
+
+| 시점 | `pro` | `flash` | `flash_lite` |
+|---|---|---|---|
+| #6 `prepare` 성공 | **3 예약** | **4 예약** | **26 예약** |
+| 면접 진행 중 | 손대지 않음 | 플래너 1 소비 | 턴마다 1씩 소비 |
+| `→ completed` | 유지 | 유지 | **잔여 반납** |
+| `evaluating` | 1~3 소비 | 유지 | — |
+| 코치 단계 | — | 1~2 소비 | — |
+| `→ evaluated` | **잔여 반납** | **잔여 반납** | — |
+
+**정상 경로 밖의 두 재시도는 그때 예약한다.**
+
+| 라우트 | 필요량 | 여력 없을 때 |
+|---|---|---|
+| #16 `POST .../evaluate` (`failed` 세션의 사용자 재시도) | `pro` 3 | **503 `capacity_unavailable`.** 전이하지 않는다. 세션은 `failed`에 남고 재시도 버튼은 그대로 있다 |
+| #18 `POST .../coach/retry` | `flash` 2 | 503. `evaluated` 유지. 점수·인용은 이미 있으므로 **리포트 자체는 계속 열람 가능**하다 |
+
+이 둘은 이미 `released`된 세션에 다시 예약하는 경로다. `status='released'` 행이 있으면
+`reserved_calls`를 올리고 `status='held'`로 되돌린다(같은 unique 키 재사용).
+
+---
+
+#### 8.3.7 안전 여유 — 한도의 100%를 쓰지 않는다
+
+```
+limit_calls(그날 원장에 박히는 값) = floor( AI_RPD_LIMIT_<BUCKET> × (1 − AI_QUOTA_SAFETY_MARGIN_PCT / 100) )
+기본 마진 15%
+```
+
+마진이 흡수해야 하는 것:
+
+1. **예약 밖 호출.** 시드 질문 검증(12.4절 재생성), 운영자 수동 테스트, 프리뷰 배포가 운영 키를 공유하는 사고
+   (`05_deploy.md` 표는 프리뷰에 별도 키를 권장하지만 강제는 아니다).
+2. **RPD가 시도를 센다는 점.** 폴백 사다리 3단계의 백오프 재시도는 예약량에 완전히 반영되지 않는다
+   (면접관은 60초 예산 안에서 시도 횟수가 고정되지 않는다). `flash_lite` 예약 26이 정상 23보다 3 많은 것이
+   1차 흡수분이고, 마진이 2차다.
+3. **날짜 경계.** 리셋 시각이 우리 계산과 어긋날 경우의 완충(8.3.8절 `[확인 필요]`).
+
+**재시도는 예약에 포함된다.** 평가 ≤3회·코치 ≤2회(11.4절)를 예약량에 **그대로 넣었다**(`pro` 3, `flash` 4).
+"재시도는 드무니 빼자"는 유혹이 있지만, 재시도가 필요한 순간은 정확히 여력이 빠듯한 순간
+(429·타임아웃이 몰리는 때)이고, 그때 예약분이 없으면 **완주한 면접이 리포트 없이 끝난다**(8.3.6절).
+가장 희소한 `pro`에서 이 여유를 빼는 것이 하루 체험 정원을 3분의 1로 줄이는 대가를 치르지만,
+**그 대가는 "가끔 시작을 못 하는 것"이고 빼는 쪽의 대가는 "완주하고도 결과를 못 받는 것"이다.** 전자를 택한다.
+체험 정원이 실측에서 너무 작으면 첫 조정 레버는 4.2절이 정한 대로 **Evaluator를 `flash`로 내리는 것**이며,
+이 경우 `pro` 버킷은 비고 `flash` 예약량이 4 → 7로 오른다.
+
+---
+
+#### 8.3.8 실제 한도를 모르는 상태에서의 설계 — **수치는 전부 환경변수**
+
+`[확인 필요]` 무료 티어의 실제 RPM/RPD/TPM은 아직 측정되지 않았다(4.2절, 14절).
+**이 문서는 어떤 한도 수치도 확정값으로 적지 않는다.** 대신 측정값을 주입할 자리를 만든다.
+
+| 환경변수 | 기본값 | 의미 |
+|---|---|---|
+| `AI_QUOTA_GATE_ENABLED` | `true` | 게이트 전체 on/off. 사고 시 배포 없이 끄기 위한 스위치 |
+| `AI_RPD_LIMIT_FLASH_LITE` | **없음** | 측정한 `gemini-2.5-flash-lite`의 RPD 원값 |
+| `AI_RPD_LIMIT_FLASH` | **없음** | 〃 `gemini-2.5-flash` |
+| `AI_RPD_LIMIT_PRO` | **없음** | 〃 `gemini-2.5-pro` |
+| `AI_QUOTA_SAFETY_MARGIN_PCT` | `15` | 안전 여유(8.3.7절) |
+| `AI_QUOTA_RESET_TIMEZONE` | `America/Los_Angeles` `[확인 필요]` | `quota_date`를 계산하는 타임존. **UTC가 아닐 가능성이 높다** — 프로바이더 리셋 시각을 측정해 확정한다 |
+| `AI_RESERVE_FLASH_LITE_PER_SESSION` | `26` | 세션당 예약량(8.3.1절) |
+| `AI_RESERVE_FLASH_PER_SESSION` | `4` | 〃 |
+| `AI_RESERVE_PRO_PER_SESSION` | `3` | 〃 |
+
+**한도 3종이 하나라도 설정되지 않았으면 게이트는 열린 채로 동작한다(fail-open).**
+
+> 판단 근거를 남긴다. fail-closed(수치가 없으면 전면 차단)는 **환경변수 오타 하나로 서비스가 죽는다.**
+> fail-open의 대가는 "D27 이전 상태로 되돌아가는 것"인데, 그때도 폴백 사다리 1~4단계가 남아 있으므로
+> **최악이 이전 설계와 같다.** 설계의 실패 모드가 이전 설계보다 나빠지지 않는 쪽을 택한다.
+> 대신 침묵하지 않는다 — 부팅 시 경고 로그, `05_deploy.md`의 배포 전 체크리스트 항목,
+> 그리고 게이트 미동작 상태에서 `pause_reason='rate_limited'`가 뜨면 8.3.9절의 관측이 잡는다.
+
+**측정 절차(Phase 3 착수 시):**
+1. 프로바이더 문서에서 모델별 RPD 공표값을 읽어 `05_deploy.md`에 기록한다.
+2. 공표값이 없거나 모호하면 스테이징 키로 단일 모델을 반복 호출해 429가 뜨는 지점을 측정한다.
+3. 리셋이 일어나는 시각을 관측해 `AI_QUOTA_RESET_TIMEZONE`을 확정한다.
+4. 세 값을 운영 환경변수에 넣는다. **그 전까지 게이트는 열려 있고 D27은 실질적으로 미적용이다.**
+   이 사실을 배포 체크리스트에 명시한다.
+
+---
+
+#### 8.3.9 `pause_reason = 'rate_limited'`의 강등 — 정상 경로에서 나오면 안 되는 값
+
+D27에 따라 폴백 사다리 4단계는 **삭제되지 않되 예외 경로로 강등된다.**
+
+- 예약이 올바르면 면접 도중에 RPD가 소진되는 일은 **구조적으로 일어나지 않는다.**
+  일어날 수 있는 것은 RPM 순간 초과이고, 그건 3단계 백오프가 60초 안에 흡수한다.
+- 따라서 `pause_reason = 'rate_limited'`가 기록되면 그것은 사용자 문제가 아니라 **설계 결함의 신호**다.
+  둘 중 하나가 참이다 — (a) 예약량이 실사용보다 작다, (b) 예약 밖 호출이 한도를 먹고 있다.
+- **D28 이후 `rate_limited`는 체험 세션에서만 나올 수 있다.** BYOK 세션이 한도에 부딪히는 것은
+  우리 원장과 무관하므로 `byok_quota_exhausted`이며(4.6절), 이 값이 `funding_source = 'byok'` 행에
+  기록되었다면 **분류기가 틀렸거나 공용 키가 섞여 들어갔다는 뜻**이다. 후자라면 4.4.3절의
+  폴백 금지가 깨진 것이므로 **보안 사고로 다룬다** — D29 동의 없는 데이터가 공용 경로로 나갔다.
+
+**관측 3종 — `session_events.event_name`에 값을 추가한다.**
+
+| `event_name` | 언제 | `detail` |
+|---|---|---|
+| `quota_reserved` | #6 예약 성공 | `{ buckets: {pro,flash,flash_lite}, quotaDate }` |
+| `quota_released` | 반납 시 | `{ buckets: {...}, reason: 'completed'\|'settled'\|'canceled'\|'abandoned'\|'failed'\|'expired' }` |
+| `quota_overflow` | `consumed > reserved`가 된 버킷이 생겼을 때 | `{ bucket, reserved, consumed }` ← **예약량이 작다는 직접 증거** |
+
+문 앞 조회(#3)의 거절은 세션 행이 아직 없어 `session_events`에 남길 수 없다.
+애플리케이션 로그와 `ai_quota_ledger.denied_count`로만 관측한다.
+
+**판정 기준(주간 점검):**
+
+| 관측 | 해석 | 조치 |
+|---|---|---|
+| `pause_reason='rate_limited'` 발생 > 0 | 예약 모델이 틀렸다 | `quota_overflow`로 어느 버킷인지 특정 → 해당 `AI_RESERVE_*` 상향 |
+| `quota_overflow` 다발 | 8.1절 호출 추정이 틀렸다 | 8.1절 표를 실측으로 갱신하고 예약량을 재유도 |
+| `denied_count` 다발 + `held_calls`가 종일 만석 | 체험 정원이 실수요보다 작다 | 4.2절 조정 레버(Evaluator → `flash`) 발동 |
+| `denied_count` 다발 + `held_calls`에 여유 | **반납이 새고 있다** | 반납 호출 지점 누락 또는 트리거 미동작 점검 |
+
+---
+
+#### 8.3.10 이 설계가 실패하는 방식 (알고 받아들이는 대가)
+
+1. **체험 정원이 하루 몇 세션 수준으로 작을 수 있다.** `pro` RPD가 작으면 `floor(유효한도/3)`이 곧 체험 정원이다.
+   **D28 이후 이것은 서비스 정원이 아니다** — 막힌 사용자에게는 키 연결이라는 출구가 있다(8.3.0절).
+   즉 이 대가의 크기가 D27 시점보다 작아졌다.
+   MVP 사용자 20~30명 규모에서 이것이 부족하면 4.2절 레버를 당긴다. 사용자를 나눠 상한을 두는 방식은
+   D27이 명시적으로 배제했다.
+2. **문 앞 조회(#3)는 원자적이지 않다.** 동시 요청이 함께 통과한 뒤 #6에서 한쪽이 거절될 수 있다.
+   손실은 설정 입력 시간이며, 이를 없애려면 #3에서 홀드해야 하는데 그건 이탈한 세션이 여력을 무는
+   더 큰 낭비를 부른다.
+3. **완주하지 않는 세션이 많으면 여력이 과잉 예약된다.** 3턴에서 그만두는 세션도 26을 잡고 시작한다.
+   반납이 이를 되돌리지만 **면접이 진행되는 동안에는 묶여 있다.** 즉 동시 진행 세션 수가 실제 소비보다
+   많은 여력을 점유한다. 이것이 사전 예약의 본질적 비용이고, 사후 대응이 이 비용만은 치르지 않았다.
+4. **날짜 경계 오차.** `AI_QUOTA_RESET_TIMEZONE`이 실제와 어긋나면 리셋 직전/직후 한 구간에서
+   예약과 실제 한도가 어긋난다. 안전 마진 15%의 3번째 용도가 이것이다.
 
 ---
 
@@ -617,7 +1256,9 @@ DB에 넣으면 RLS·마이그레이션·어드민 UI가 따라붙는데 그중 
 - 8.2절 표가 런타임/타임아웃 선택의 근거다. **평가·코치는 HTTP 라우트 금지, 큐 기반 워커.**
 - 면접관 라우트는 SSE 스트리밍. 청크 이벤트 규약은 6.2절.
 - 프로바이더 추상화(4.4절)와 역할별 모델 환경변수 오버라이드 필요.
-- AI 키는 서버 전용. `NEXT_PUBLIC_` 금지(고정 제약).
+  **D28 이후 `complete()`/`stream()`은 세션별 키를 `LlmCallContext`로 받습니다(4.4.1절, 13.7.1절).**
+- AI 키는 서버 전용. `NEXT_PUBLIC_` 금지(고정 제약). 사용자 키는 `credentials.ts`에서만 복호화하고
+  로그·오류·트레이스 어디에도 평문을 남기지 않습니다(4.4.2절).
 - 429 정규화 및 폴백 사다리 연동(8.3절, `01_state_machine.md` 4절).
 
 ### 13.3 `voice-pipeline-engineer` (스트림 청크)
@@ -639,15 +1280,394 @@ DB에 넣으면 RLS·마이그레이션·어드민 UI가 따라붙는데 그중 
 
 ---
 
+### 13.6 예약 게이트 (D27) — 소유자별 전달 사항
+
+8.3절의 예약 모델을 **그대로 구현할 수 있는 수준**으로 옮겨 적는다.
+스키마·라우트·문구 어느 하나가 빠지면 게이트에 구멍이 난다.
+
+> **D28 이후 이 절 전체의 적용 대상은 `funding_source = 'trial_shared'` 세션이다**(8.3.0절).
+> 이 절은 취소되지 않았고 그대로 구현하되, 재원 분기와 BYOK 관련 추가 요구는 **13.7절**에 있다.
+> 두 절을 함께 읽어야 한다.
+
+---
+
+#### 13.6.1 `supabase-engineer` — 테이블 2개 · 함수 3개 · 트리거 1개
+
+**새 마이그레이션 파일 `#12 20260910000100_ai_quota.sql`** (기존 11개 파일 중 어느 것도 수정하지 않는다.
+10절의 "첫 적용 전에는 CREATE TABLE에 흡수" 규칙은 **기존 테이블의 컬럼 추가**에 대한 것이고,
+이건 새 테이블이므로 새 파일이 맞다).
+
+**테이블 1 — `ai_quota_ledger`** (그날·그 버킷의 원자적 카운터. 하루 3행)
+
+| 컬럼 | 타입 | 제약 |
+|---|---|---|
+| `quota_date` | `date` | not null, **PK 1** |
+| `model_bucket` | `text` | not null, **PK 2**, CHECK `in ('flash_lite','flash','pro')` |
+| `limit_calls` | `integer` | not null, CHECK `>= 0` — 행 생성 시 계산해 박는 **그날의 유효한도 스냅샷** |
+| `held_calls` | `integer` | not null default 0, CHECK `>= 0` |
+| `granted_total` | `integer` | not null default 0, CHECK `>= 0` |
+| `denied_count` | `integer` | not null default 0, CHECK `>= 0` |
+| `created_at` / `updated_at` | `timestamptz` | not null default `now()` — `set_updated_at()` 트리거 |
+
+- PK가 곧 조회 인덱스다. **추가 인덱스 없음.**
+
+**테이블 2 — `ai_quota_reservations`** (세션별 보유분)
+
+| 컬럼 | 타입 | 제약 |
+|---|---|---|
+| `id` | `uuid` | PK default `gen_random_uuid()` |
+| `session_id` | `uuid` | not null, → `interview_sessions(id) on delete cascade` |
+| `model_bucket` | `text` | not null, CHECK `in ('flash_lite','flash','pro')` |
+| `quota_date` | `date` | not null |
+| `reserved_calls` | `integer` | not null default 0, CHECK `>= 0` |
+| `consumed_calls` | `integer` | not null default 0, CHECK `>= 0` — **상한 CHECK 금지**(초과가 관측 신호다) |
+| `released_calls` | `integer` | not null default 0, CHECK `>= 0` |
+| `status` | `text` | not null default `'held'`, CHECK `in ('held','released','overflow')` |
+| `created_at` / `updated_at` | `timestamptz` | not null default `now()` |
+
+- **unique `(session_id, model_bucket)`** — 필수. 멱등 재예약의 근거다.
+- 인덱스 `idx_quota_res_held (quota_date) where status = 'held'` — 크론 만료 스윕용.
+
+**RLS — 두 테이블 모두 `enable row level security` + 정책 0개.**
+`storage_cleanup_queue`(3.12절)와 **완전히 같은 패턴**이며 `service_role`만 접근한다.
+5.4절의 "RLS 켜졌는데 정책 0개" 점검 쿼리 예외 목록에 두 테이블을 추가해 주세요
+(현재 `storage_cleanup_queue`만 제외하고 있습니다).
+
+**함수 3개 — 전부 `security definer`, `set search_path = public`**
+
+| 함수 | 시그니처 | 하는 일 |
+|---|---|---|
+| `reserve_session_quota` | `(p_session_id uuid, p_quota_date date, p_request jsonb, p_limits jsonb) returns table(model_bucket text, granted int, held_after int, limit_calls int)` | 8.3.5절. 진입부에 **① 재원 가드(D28 — `byok`이면 `quota_not_applicable:<funding_source>`)** → **② 동시 예약 가드(D30 — 사용자당 동시 `held` 세션 1개, `pg_advisory_xact_lock`, 위반 시 `trial_reservation_exists:<session_id>`)** 를 두고 그다음 **버킷 처리 순서 `pro → flash → flash_lite` 고정**(데드락 회피). 버킷별로 원장 행 `on conflict do nothing` 생성 → 조건부 UPDATE(`held_calls + n <= limit_calls`) → 0행이면 `raise exception 'quota_exhausted:<bucket>'`으로 **전체 롤백**. 예약 행은 unique 충돌 시 목표치와의 차이만 top-up(멱등) |
+| `release_session_quota` | `(p_session_id uuid, p_buckets text[] default null, p_reason text default 'settled') returns table(model_bucket text, released int)` | `status='held'` 행마다 `released := greatest(reserved - consumed, 0)`, 원장 `held_calls`를 `greatest(held_calls - released, 0)`으로 차감, 행을 `released`로. `p_buckets`가 null이면 전체 |
+| `consume_session_quota` | `(p_session_id uuid, p_bucket text, p_n int default 1) returns int` | 예약 행의 `consumed_calls += n`. **행이 없으면** `reserved_calls=0, consumed_calls=n, status='overflow'`로 삽입하고 원장 `held_calls`를 **조건 없이** `+n`(한도 초과 허용 — 그래야 다음 예약이 정확히 막힌다) |
+
+`limit_calls` 계산식(원장 행 생성 시): `floor(AI_RPD_LIMIT_<BUCKET> × (1 - AI_QUOTA_SAFETY_MARGIN_PCT/100))`.
+**DB는 환경변수를 읽을 수 없으므로 계산은 애플리케이션이 하고, 그 값을 `p_request`와 함께 `p_limits jsonb`로
+넘깁니다.** 그래서 `reserve_session_quota`는 **4인자**입니다(2026-09-10 정정 — 이 표의 초안이 3인자였습니다).
+확정본은 `04_data_layer.md` 3.14.1절이고 `05_api_contract.md`의 호출도 4인자입니다.
+
+**동시 예약 가드(D30) 요약** — 상세는 `04_data_layer.md` 3.14.1절, 근거는 8.3.3절입니다.
+
+- 체험 사용자는 **동시에 `held` 예약을 하나만** 가집니다. 두 번째 `prepare`는 거절합니다.
+- 강제는 **DB 함수 진입부**입니다 — `pg_advisory_xact_lock(사용자 id 해시)` 뒤에 `held` 조회.
+  라우트에 사전 조회를 두면 동시 요청에서 둘 다 통과합니다.
+- 같은 세션의 재예약(top-up)은 `r.session_id <> p_session_id` 조건으로 통과시켜 **멱등성을 깨지 않습니다**.
+- 예외는 `trial_reservation_exists:<existing_session_id>` → 라우트가 **409**로 매핑합니다.
+- **BYOK에는 해당 없습니다** — 예약 자체를 하지 않습니다(8.3.0절).
+
+**트리거 1개 — 삭제 누수 방지 (필수)**
+
+```
+create trigger trg_quota_release_on_delete
+  before delete on public.ai_quota_reservations
+  for each row execute function public.release_quota_before_delete();
+```
+
+`old.status = 'held'`이면 원장에서 `greatest(reserved - consumed, 0)`을 차감한 뒤 삭제를 진행한다.
+**이게 없으면 세션 삭제(#23)·계정 삭제(#31)가 여력을 영구히 먹는다.** 라우트가 반납을 잊어도 DB가 보증한다.
+
+**`session_events.event_name`에 값 3개 추가**: `quota_reserved`, `quota_released`, `quota_overflow`
+(`event_name`에 CHECK가 있다면 확장해 주세요. `detail` 구조는 8.3.9절 표).
+
+---
+
+#### 13.6.2 `vercel-platform-engineer` — 게이트 지점 · 응답 shape · 환경변수
+
+**게이트가 걸리는 라우트 2곳 (신규 차단)**
+
+| 라우트 | 성격 | 동작 |
+|---|---|---|
+| #3 `POST /api/sessions` | **문 앞 조회(비원자적, 홀드 없음)** | 원장 3행을 읽어 세션 1개분(`pro 3 / flash 4 / flash_lite 26`)이 들어가지 않으면 **세션 행을 만들지 않고 503**. 통과하면 평소대로 `created` 생성 |
+| #6 `POST /api/sessions/[sessionId]/prepare` | **확정 예약(원자적, 권위)** | `reserve_session_quota()` 호출 → 실패 시 **503, 전이하지 않음**(세션은 `configuring`에 남아 설정이 보존된다). 성공 시 `quota_reserved` 이벤트 → I1 플래너 체이닝 → 202 |
+
+**재시도 경로 2곳 (그때 예약)**
+
+| 라우트 | 필요량 | 실패 시 |
+|---|---|---|
+| #16 `POST .../evaluate` (`failed` 재시도 전용) | `pro` 3 | 503. `failed` 유지, 재시도 버튼 유지 |
+| #18 `POST .../coach/retry` | `flash` 2 | 503. `evaluated` 유지(점수·인용은 이미 있으므로 리포트는 계속 열람 가능) |
+
+**반납 호출 지점 — 빠뜨리면 여력이 샌다**
+
+| 지점 | 호출 |
+|---|---|
+| `→ completed` (#15, #9 종료조건, C1 7일 자동 종료) | `release_session_quota(id, ARRAY['flash_lite'], 'completed')` — **`pro`·`flash`는 절대 반납하지 말 것** |
+| I3 코치 완료 → `evaluated` | `release_session_quota(id, null, 'settled')` |
+| #33 `cancel` (7개 전이 전부) | `release_session_quota(id, null, 'canceled')` |
+| C1 `→ abandoned` | `release_session_quota(id, null, 'abandoned')` |
+| I2 재시도 소진 → `failed`, I1 플래너 실패, #35 `abandon-preparation` | `release_session_quota(id, null, 'failed')` |
+| C1 만료 스윕(신규 워치독 5종째) | `quota_date < today AND status='held'` 행을 `expired`로 정리 |
+
+**소비 기록 — 프로바이더 추상화 계층에서**
+`lib/ai/provider.ts`의 `complete()`/`stream()` 진입부, **호출을 보내기 전에**
+`consume_session_quota(sessionId, ROLE_BUCKET[role], 1)`. 성공 후가 아닙니다 —
+RPD는 429로 끝난 호출도 세기 때문에 사후 증가는 반납을 과다하게 만듭니다(8.3.4절).
+`roles.ts`에 `ROLE_BUCKET: Record<AgentRole, 'flash_lite'|'flash'|'pro'>`를 추가하세요.
+
+**신규 오류 코드 — 13절 표에 추가**
+
+| HTTP | `code` | 언제 |
+|---|---|---|
+| **503** | **`capacity_unavailable`** | 오늘 여력이 없어 새 세션을 시작·준비할 수 없음. `Retry-After` 헤더 동반 |
+
+```jsonc
+{ "error": { "code": "capacity_unavailable",
+             "message": "지금은 새 면접을 시작할 수 없습니다.",
+             "details": { "availableAtIso": "2026-09-11T07:00:00.000Z", "retryAfterSec": 33120 } } }
+```
+
+- **429 `rate_limited`와 구분해 주세요.** 429는 프로바이더 한도에 *부딪힌* 사후 신호,
+  503은 우리가 *부딪히기 전에 막은* 사전 신호입니다. 프론트 처리가 다릅니다(13.6.3).
+- `availableAtIso`는 `AI_QUOTA_RESET_TIMEZONE` 기준 다음 자정.
+
+**신규 엔드포인트 1개 — 버튼을 미리 잠그기 위해 필요**
+
+| # | 메서드 | 경로 | 인증 | 응답 | 지연 | 훅 |
+|---|---|---|---|---|---|---|
+| 36 | GET | `/api/capacity` | auth | `{ canStartSession: boolean, availableAtIso: string \| null }` | ~120ms | `useCapacity` |
+
+원장 3행 읽기만 합니다. **버킷별 잔여량이나 한도 수치를 응답에 담지 마세요** — 클라이언트에 서비스 전체
+여력을 노출할 이유가 없고, 내부 용어가 새는 경로가 됩니다. 불리언과 시각 하나면 충분합니다.
+
+**환경변수 — `05_deploy.md` 2절 표에 추가**
+
+| 변수 | 기본값 | 노출 위험 |
+|---|---|---|
+| `AI_QUOTA_GATE_ENABLED` | `true` | 없음. 서버 전용 |
+| `AI_RPD_LIMIT_FLASH_LITE` | **없음** | 없음 |
+| `AI_RPD_LIMIT_FLASH` | **없음** | 없음 |
+| `AI_RPD_LIMIT_PRO` | **없음** | 없음 |
+| `AI_QUOTA_SAFETY_MARGIN_PCT` | `15` | 없음 |
+| `AI_QUOTA_RESET_TIMEZONE` | `America/Los_Angeles` `[확인 필요]` | 없음 |
+| `AI_RESERVE_FLASH_LITE_PER_SESSION` | `26` | 없음 |
+| `AI_RESERVE_FLASH_PER_SESSION` | `4` | 없음 |
+| `AI_RESERVE_PRO_PER_SESSION` | `3` | 없음 |
+
+**전부 `NEXT_PUBLIC_` 금지.** 한도 수치는 비밀은 아니지만 체험 정원이 그대로 드러나므로 서버 전용입니다.
+
+**한도 3종이 미설정이면 게이트는 fail-open**(8.3.8절). 부팅 시 경고 로그를 남기고,
+`05_deploy.md`의 배포 전 체크리스트에 **"RPD 3종 측정·주입 완료 여부"** 를 항목으로 넣어 주세요.
+주입 전까지 D27은 실질적으로 미적용 상태입니다.
+
+---
+
+#### 13.6.3 `shadcn-ui-engineer` — 여력 부족 화면 (**내부 용어 노출 금지**)
+
+> **2026-09-10 갱신 (D28·D29·D30).** 아래 ①②③ 문안은 D27 시점에 쓰여 **BYOK 이전의 것**입니다.
+> **확정 문안은 `06_ui_plan.md` 4.14절**이며, 충돌하면 그쪽이 이깁니다. 이 절은 원칙만 남깁니다.
+>
+> 갱신된 사실 세 가지 — ① **여력 부족 화면의 1순위 버튼은 "키 연결하기"** 입니다. 사용자에게
+> "내일 오세요"가 아니라 **지금 할 수 있는 일**을 먼저 주는 것이 D28의 유일한 이득입니다.
+> ② `availableAtIso`는 **`null`일 수 있습니다.** 그때는 시각 줄 자체를 렌더하지 않습니다.
+> ③ 사용자 키 실패(`byok_key_invalid` / `byok_quota_exhausted`)는 여력 부족과 **다른 화면**입니다.
+> 원인이 다르면 사용자가 할 일도 다릅니다.
+
+**절대 쓰지 않을 단어: "무료 티어", "쿼터", "quota", "레이트 리밋", "RPD", "예약분", "토큰", "티어".**
+사용자에게 이건 요금제 문제가 아니라 **오늘의 가용성** 문제로 보여야 합니다.
+
+**두 가지 예외 (2026-09-10 확정):**
+- **"API 키"는 허용**합니다. D28로 사용자가 실제로 다루는 대상이 되었으므로 감출 이유가 없고,
+  감추면 무엇을 연결하라는 것인지 전달되지 않습니다. 금칙어 "API"는 이로써 철회합니다.
+- **"한도"는 사용자 본인 키의 사용량을 말할 때만** 허용합니다(`01_state_machine.md` 4.5절,
+  `01_product_spec.md` 6.5.6절의 확정 문안). 그것은 우리 내부 사정이 아니라
+  **사용자 자신의 Google 계정에서 확인 가능한 사실**이기 때문입니다.
+  우리 공용 여력을 가리킬 때는 여전히 금칙어입니다.
+
+**① `/api/capacity`가 `canStartSession: false`일 때 — 대시보드·세션 목록**
+
+"새 면접 시작" 버튼을 `disabled`로 두고 옆에 `Badge` 하나:
+
+> **오늘 예약 마감**
+
+버튼 위 `Tooltip` 또는 하단 `Alert`(`variant="default"`):
+
+> **지금은 새 면접을 시작할 수 없어요**
+> 오늘 진행할 수 있는 면접이 모두 찼습니다. {availableAtIso를 "내일 오전 0시" 형태로} 이후에 다시 시작할 수 있어요.
+> 이미 진행 중인 면접과 지난 리포트는 그대로 보실 수 있습니다.
+
+마지막 줄이 중요합니다 — **서비스가 죽은 게 아니라 새로 여는 것만 막혔다**는 걸 즉시 알려야 합니다.
+
+**② #3 또는 #6이 503 `capacity_unavailable`을 반환했을 때**
+
+`AlertDialog`로 전면 안내(토스트로 흘려보내지 마세요 — 사용자가 방금 무언가를 시도했고 실패했습니다):
+
+> **오늘은 여기까지예요**
+> 지금은 새 면접을 준비할 수 없습니다. {availableAtIso 이후} 다시 열립니다.
+> 지금까지 입력하신 설정은 그대로 저장돼 있어요. 다시 오시면 이어서 준비하실 수 있습니다.
+>
+> `[확인]`  `[지난 리포트 보기]`
+
+- **#6에서 거절된 경우 두 번째 줄이 사실입니다** — 세션은 `configuring`에 남아 설정이 보존됩니다(8.3.3절).
+  #3에서 거절된 경우엔 세션 자체가 없으므로 그 줄을 빼세요.
+- **재시도 버튼을 두지 마세요.** 지금 다시 눌러도 같은 결과이고, 사용자가 헛되이 두드리게 됩니다.
+
+**③ #16 평가 재시도 / #18 코치 재시도가 503일 때**
+
+리포트 화면 안의 `Alert`(`variant="default"`)로:
+
+> 지금은 리포트를 다시 만들 수 없어요. 잠시 뒤 다시 시도해 주세요.
+
+`evaluated` 상태에서 코치 재시도가 막힌 경우, **점수와 근거 인용은 이미 화면에 있습니다.**
+리포트 전체를 오류 화면으로 덮지 마세요 — 개선 피드백 영역에만 이 안내를 두세요.
+
+**④ 이미 있는 `pause_reason='rate_limited'` 문구는 그대로 둡니다**
+(`01_state_machine.md` 4절 4단계). 이 경로는 D27 이후 정상적으로는 나오지 않아야 하는 예외 경로입니다.
+
+---
+
+#### 13.6.4 `product-architect` (리더 대행) — `01_state_machine.md` 변경 요청
+
+| 절 | 변경 |
+|---|---|
+| 2절 전이 표 `configuring → ready` | **가드에 추가**: "…및 **일당 여력 예약 성공**(`02_ai_architecture.md` 8.3.3절). 실패 시 전이하지 않고 503 `capacity_unavailable`" |
+| 2절 전이 표 (없음) → `created` | **가드에 추가**: "여력 사전 조회 통과(비원자적). 실패 시 행을 만들지 않고 503" |
+| 2절 전이 표 `in_progress → completed`, `paused → completed` | **부작용에 추가**: "`flash_lite` 버킷 예약 반납(`pro`·`flash`는 평가·코치용으로 계속 보유)" |
+| 2절 전이 표 `evaluating → evaluated` | **부작용에 추가**: "잔여 예약 전량 정산 반납" |
+| 2절 전이 표 `→ canceled`(7행), `→ abandoned`, `→ failed`(전 경로) | **부작용에 추가**: "예약 전량 반납" |
+| 4절 폴백 사다리 4단계 | **주석 추가**: "**D27 이후 이 단계는 예외 경로다.** 일당 한도는 세션 시작 전 예약이 막으므로(8.3절) 정상 경로에서 도달하면 안 되고, 도달하면 예약 모델의 결함 신호로 관측한다. 1~3단계(RPM 대응)는 그대로 유효하다" |
+| 4절 도입부 | 한 줄 추가: "이 사다리는 **분당 한도(RPM)** 를 다룬다. **일당 한도(RPD)** 는 사전 예약이 담당한다" |
+| 7절/크론 | 워치독에 5종째 추가: "만료 예약 스윕 — `quota_date < today AND status='held'`" |
+
+`03_voice_pipeline.md`는 영향 없습니다 — 예약은 LLM 버킷만 다루고, STT/TTS 한도는
+폴백 사다리 1~2단계가 계속 담당합니다.
+
+---
+
+### 13.7 BYOK (D28·D29) — 소유자별 전달 사항
+
+13.6절(D27)을 **취소하지 않는다.** 전부 그대로 구현하되 **적용 대상이 `funding_source = 'trial_shared'`
+세션으로 좁혀진다.** 아래는 그 위에 얹히는 차분(delta)이다.
+
+---
+
+#### 13.7.1 `vercel-platform-engineer` — 프로바이더 계층이 이번 변경의 중심이다
+
+**① 시그니처 변경 (4.4.1절)**
+
+```ts
+complete(req: CompletionRequest, ctx: LlmCallContext): Promise<CompletionResult>
+stream  (req: CompletionRequest, ctx: LlmCallContext): AsyncIterable<StreamChunk>
+
+interface LlmCallContext {
+  sessionId: string; role: AgentRole;
+  fundingSource: 'trial_shared' | 'byok';
+  apiKey: string;          // byok일 때 서버에서 복호화된 평문. 로깅 금지
+  keyFingerprint: string;  // 끝 4자리. 로깅 가능한 유일한 키 관련 값
+}
+```
+
+- **`ctx`는 필수 인자다.** 기본값·선택 인자로 두지 마세요 — "깜빡하면 공용 키"가 되는 순간
+  D29 동의 없는 데이터가 공용 경로로 나갑니다.
+- 프로바이더 클라이언트를 **키가 박힌 싱글턴으로 만들지 마세요.** 호출마다 `ctx.apiKey`로 구성합니다.
+- 복호화 지점은 `lib/ai/credentials.ts` 하나로 모으세요. 다른 모듈은 Vault를 열지 않습니다.
+
+**② 게이트·원장 함수 4곳에 `funding_source` 분기 (8.3.0절)**
+
+| 지점 | `trial_shared` | `byok` |
+|---|---|---|
+| #3 문 앞 조회 | 기존대로 | **건너뜀. 무조건 통과** |
+| #6 `reserve_session_quota()` | 기존대로 | **호출하지 않음** |
+| `consume_session_quota()` | 호출 전 증가 | **호출하지 않음** |
+| `release_session_quota()` (반납 6지점 전부) | 기존대로 | 해당 없음 |
+
+**분기는 라우트마다 흩지 말고 이 네 함수의 진입부 한 곳에 두세요.** 한 군데를 빠뜨리면
+BYOK 세션이 공용 원장을 갉아 체험 정원이 조용히 줄고, 증상이 "체험 정원이 왜인지 부족하다"로만
+보여 원인을 찾기 어렵습니다.
+
+**③ 공용 키 폴백 금지 — 구조로 막으세요 (4.4.3절)**
+
+재시도(11.4절)와 백오프는 **`ctx`를 루프 밖에서 한 번 만들어 고정한 뒤 같은 `ctx`로만** 재호출합니다.
+재시도 경로가 `ctx`를 새로 만드는 형태면 그곳이 폴백 구멍이 됩니다.
+**체험 잔여 여부는 이 판단에 들어오지 않습니다.**
+
+**④ 오류 정규화 (4.6절 — 이 문서가 원본)**
+
+`lib/ai/errors.ts`의 `normalizeProviderError(raw, ctx)`가 `transient` / `key_invalid` /
+`key_quota_exhausted` 셋 중 하나를 돌려주고, **상위 계층은 원시 오류를 보지 않습니다.**
+판정 순서(백오프 먼저 → `key_invalid`는 재시도 1회 후 → 애매하면 `key_quota_exhausted`)를
+그대로 지켜 주세요. API 오류 코드는 **우리 여력(`capacity_unavailable`)과 분리**해 최소 2종을 새로 두고,
+프로바이더 메시지 원문을 응답에 싣지 마세요.
+
+**⑤ `/api/capacity`(#36) 응답 확장** — `01_product_spec.md` 10절 요청대로
+`canStartSession` 외에 `keyStatus`·`trialStatus`를 함께 주세요. **버킷별 잔여량·한도 수치는 여전히 금지**입니다.
+`funding_source = 'byok'`로 시작할 수 있는 사용자에게는 `canStartSession`이 **여력과 무관하게 항상 true**입니다.
+
+**⑥ 로깅** — `ctx`를 통째로 직렬화하지 마세요. `{ sessionId, role, bucket, fundingSource, keyFingerprint }`
+화이트리스트만 남깁니다. 트레이스 스팬 속성과 예외 페이로드도 같은 규칙입니다.
+
+---
+
+#### 13.7.2 `supabase-engineer`
+
+- **`ai_quota_reservations`에 `funding_source = 'byok'` 세션의 행이 생기면 안 됩니다.**
+  가능하면 함수 레벨 가드에 더해 제약으로도 막아 주세요(예: `reserve_session_quota()` 진입부에서
+  세션의 `funding_source`를 조회해 `byok`이면 no-op 반환). 라우트를 믿지 않는 쪽이 안전합니다.
+- `session_events`의 `quota_*` 3종(8.3.9절)은 **체험 세션에서만** 기록됩니다.
+- **키는 로그에 남지 않습니다.** 감사 로그에 키 원문도 해시도 넣지 마세요 — 연결·교체·해제 사실과
+  시각, 그리고 마스킹 끝 4자리까지입니다(`01_product_spec.md` 6.5.7절 6).
+- **권고(필수 아님, 5.4절 판단):** 문서 추출 단계에서 이력서의 **연락처 식별자**(전화번호·이메일·주소·생년월일)를
+  마스킹하는 것을 검토해 주세요. 면접 질문의 재료가 아니면서 가장 민감한 항목이고, 제거해도 질문
+  품질이 나빠지지 않습니다. **이름·회사명·프로젝트명은 마스킹하면 안 됩니다** — 질문이 성립하지 않습니다.
+  체험 전용 분기가 아니라 전 세션 공통으로 두는 편이 낫습니다.
+
+---
+
+#### 13.7.3 `shadcn-ui-engineer`
+
+- **13.6.3절 여력 부족 화면 ①②의 1순위 버튼을 "키 연결하기"로 바꿔 주세요.** "확인"이 1순위이면
+  D28로 얻은 유일한 이득이 사라집니다(`01_product_spec.md` 6.5.5절).
+- **사용자 키 오류 문구는 4.6절의 `kind`로 조회하는 고정 문안**입니다. 프로바이더 메시지를
+  화면에 그대로 띄우지 마세요. 세 상황(공용 여력 소진 / 키 무효 / 사용자 키 한도 소진)의 문구를
+  서로 다르게 쓰고, **사용자 키 실패에는 "내일 다시 오세요"를 쓰지 마세요** — 우리는 그 시각을 모릅니다.
+- 13.6.3절 금칙어 목록은 유지하되 **"API 키"는 허용**입니다(사용자가 Google에서 발급받을 것의 이름).
+- 체험 잔여 카운터("1/1", "남은 횟수")를 노출하지 마세요(6.5.3절).
+
+---
+
+#### 13.7.4 `product-architect` (리더 대행) — 이미 반영된 항목 확인
+
+`01_state_machine.md` 1·2·4.5절과 `01_product_spec.md` 6.5절에 D28·D29가 이미 반영되어 있어
+**추가 요청은 없습니다.** 이 문서와의 정합만 확인해 주세요.
+
+| 항목 | 이 문서의 원본 위치 |
+|---|---|
+| 사용자 키 오류 3분류와 `pause_reason` 매핑 | **4.6절** (`01_state_machine.md` 4.5절이 참조) |
+| 예약 게이트의 체험 한정 | **8.3.0절** |
+| 세션별 키 전달과 폴백 금지의 구현 규칙 | **4.4.1~4.4.3절** |
+| 체험 세션 컨텍스트 전략 판단(D29) | **5.4절** — 결론은 "줄이지 않는다" |
+
+`03_voice_pipeline.md`는 이번에도 영향 없습니다 — STT/TTS는 사용자 키와 무관한 경로이므로
+BYOK 세션에서도 폴백 사다리 1~2단계가 그대로 동작합니다(`01_state_machine.md` 4.5절 규칙 4).
+
+---
+
 ## 14. 결정 완료
 
 ```
 [결정 완료 D11] 무료 티어 프로바이더는 Google 단독. 추상화 계층(4.4절)은 유지해 전환 가능하게 둔다
 [결정 완료 D13] 시드 원형 60개 문안은 Phase 3 착수 시 ai-interview-architect 작성 + product-architect 리뷰
+[결정 완료 D27] 레이트 리밋 방어를 사후 대응에서 사전 예약으로 전환. 모델 선택(4.2절)은 변경 없음.
+                일당 한도(RPD)는 세션 시작 전 모델별 버킷 예약으로 막고, 분당 한도(RPM)는
+                폴백 사다리 1~3단계가 계속 사후 대응한다. pause_reason='rate_limited'는
+                예외 경로로 강등되며 발생 자체가 관측 대상이다 (8.3절, 13.6절)
+[결정 완료 D28] BYOK 도입. 예약 게이트(8.3절)의 적용 범위가 체험 세션(funding_source='trial_shared')으로
+                좁혀진다. BYOK 세션은 예약 원장에 행을 만들지 않고 공용 여력과 무관하다 (8.3.0절).
+                프로바이더 계층의 complete()/stream()은 세션별 키를 LlmCallContext로 받는다 (4.4.1절).
+                사용자 키 실패는 transient / key_invalid / key_quota_exhausted 3분류로 정규화되고
+                뒤 둘이 pause_reason byok_key_invalid / byok_quota_exhausted에 대응한다 (4.6절).
+                **사용자 키 실패 시 공용 키 폴백은 존재하지 않는 경로다** — 동의 없는 데이터가
+                공용 경로로 나가므로 금지이며, 구조로 막는다 (4.4.3절)
+[결정 완료 D29] 체험 세션의 컨텍스트 전략은 줄이지 않는다. 이력서 원문이 외부로 나가는 것은 세션당
+                플래너 1회뿐이라 노출 면적이 이미 최소이고, 여기서 더 깎으면 제품의 가치를 보여줄
+                유일한 기회인 체험의 질이 떨어진다. 연락처 식별자 마스킹만 권고로 남긴다 (5.4절)
 [확인 필요]     선택 모델들의 실제 무료 티어 RPM/RPD/TPM 수치 — 판단이 아니라 측정이 필요한 항목이라
                 열어 둔다. Phase 3 착수 시 확인해 05_deploy.md에 기록 (4.2, 8.3절)
                 8절 호출 예산 전체가 이 값에 매달려 있다. 예산 초과 시 첫 조정 레버는
                 Evaluator를 flash로 내리는 것 (Coach보다 먼저 내리지 않는다 — 인용 정확도 우선)
+                **D27 이후 이 값은 AI_RPD_LIMIT_* 환경변수로 주입된다.** 미설정이면 예약 게이트는
+                fail-open이며 D27은 실질 미적용 상태다 (8.3.8절)
+[확인 필요]     프로바이더의 일당 한도 리셋 타임존 — AI_QUOTA_RESET_TIMEZONE. UTC가 아닐 가능성이
+                높다. 측정해 확정하기 전까지 안전 마진 15%가 경계 오차를 흡수한다 (8.3.8절)
 ```
 
 > 전체 결정 기록: [`00_input/decisions.md`](00_input/decisions.md)

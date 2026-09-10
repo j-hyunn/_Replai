@@ -13,6 +13,12 @@
   - **F7**: 3.5절 `utterance_done` 페이로드에 **`sessionStatus`** 추가(`05_api_contract.md`·`06_ui_plan.md`가
     이미 전제하고 있던 필드). SSE 이벤트 4종의 페이로드를 하위 문서와 전수 재대조하고 3.5절에 스트림 수명 규약을 명문화.
   - 11절(SSE 이벤트 4종 재대조 결과)·12절(다른 문서에 요청하는 변경)을 신설.
+- 2026-09-10 QA 2차 대응(`07_qa_report.md` G1) — D27~D30 반영.
+  - **G1**: 3.5절 `stream_error.code`에 **`byok_key_invalid`·`byok_quota_exhausted`** 2종 추가(D28).
+    코드 5종의 `retryable`·세션 결과 표를 신설하고, `utterance_done.sessionStatus`가 `paused`를 싣지 않는
+    근거 서술을 BYOK 2종까지 포함하도록 넓힘(가능값은 `in_progress`/`completed` 2개로 변동 없음).
+  - SSE 이벤트 4종을 D28 기준으로 다시 전수 대조하고 결과를 **11.1절**로 신설. `utterance_chunk`·
+    `utterance_done`·`session_notice`는 변경 없음(`session_notice.kind`에 `byok_*`를 넣지 않기로 확정).
 
 ---
 
@@ -486,7 +492,28 @@ else:  // neutral_transition / comfort / wrap_up
 | `utterance_chunk` | `{"seq": int, "text": string}` | 문장 단위. 10~80자. `<<<META>>>` 이후 텍스트는 **절대 포함되지 않는다** |
 | `utterance_done` | `{"turnId": uuid, "questionId": uuid \| null, "parentQuestionId": uuid \| null, "depth": int, "questionKind": "main"\|"follow_up"\|null, "action": "follow_up"\|"next_main"\|"neutral_transition"\|"comfort"\|"wrap_up", "targetAxis": axis \| null, "sessionStatus": "in_progress"\|"completed"}` | 전부 **서버 확정값**(3.4절 후처리 결과). 모델 원본 META가 아니다. `sessionStatus`는 이 스트림을 처리한 뒤의 세션 상태다 |
 | `session_notice` | `{"kind": "distress_guard"\|"pressure_capped"\|"rate_limit_fallback", "level": int \| null, "messageKo": string}` | G4 발동 시 UI가 3지 선택 다이얼로그를 띄우는 신호(10.2절, 13.5절) |
-| `stream_error` | `{"code": "llm_timeout"\|"llm_rate_limited"\|"llm_failed", "retryable": boolean, "messageKo": string}` | 폴백 사다리(`01_state_machine.md` 4절) 연동. HTTP 상태는 이미 200이므로 오류는 이 이벤트로만 전달된다 |
+| `stream_error` | `{"code": "llm_timeout"\|"llm_rate_limited"\|"llm_failed"\|"byok_key_invalid"\|"byok_quota_exhausted", "retryable": boolean, "messageKo": string}` | 폴백 사다리(`01_state_machine.md` 4절) 연동. HTTP 상태는 이미 200이므로 오류는 이 이벤트로만 전달된다. **`byok_*` 2종은 2026-09-10 추가(D28)** — 아래 표 참조 |
+
+**`stream_error.code` 5종** (2026-09-10 추가 — D28 / QA 2차 G1)
+
+`byok_key_invalid`·`byok_quota_exhausted` 2종은 **`funding_source = 'byok'` 세션에서만** 나갑니다
+(`05_api_contract.md` 10.2절의 사용자 키 오류 3분류 중 뒤 2분류). 이 2종이 원본에 없으면 사용자 키로 멈춘 세션에
+아무 코드도 나가지 않아 UI가 해당 화면(`06_ui_plan.md` 4.14.2·4.14.3)을 분기할 수 없습니다.
+
+| `code` | 언제 | `retryable` | 세션 결과 |
+|---|---|---|---|
+| `llm_timeout` | 응답 지연으로 예산 초과 | `true` | 유지 |
+| `llm_rate_limited` | 429. 폴백 사다리 1~3단계로 회복 시도 | `true` | 유지 |
+| `llm_failed` | 그 외 호출 실패, 또는 폴백 사다리 4단계 | 4단계는 `false` | 4단계에서 `paused(rate_limited)` |
+| **`byok_key_invalid`** | 사용자 키가 인증 거절(재시도 1회 후 동일 판정) | **항상 `false`** | `paused(byok_key_invalid)` |
+| **`byok_quota_exhausted`** | 사용자 키의 계정·일당 한도 소진. 백오프로 회복되지 않음 | **항상 `false`** | `paused(byok_quota_exhausted)` |
+
+- **`messageKo`에 프로바이더 원문을 넣지 않습니다.** 코드별 고정 한국어 문안을 UI가 소유합니다
+  (`06_ui_plan.md` 4.14절). 서버는 코드만 정확히 실어 보냅니다.
+- **`byok_quota_exhausted`에는 재개 가능 시각이 없습니다.** 사용자 키의 리셋 시각은 우리가 모르므로
+  `Session.resumableAfter`도 `null`입니다. 기존 규약(시각은 SSE에 싣지 않고 세션 재조회)과 충돌하지 않습니다.
+- `byok` 세션에서도 **폴백 사다리 1·2단계(TTS 텍스트화 → STT 텍스트 전환)는 그대로 동작**합니다. 음성 경로는
+  사용자 키를 쓰지 않기 때문입니다(`03_voice_pipeline.md` 3.5절).
 
 **`utterance_done.sessionStatus`** (2026-09-09 추가 — F7)
 
@@ -501,7 +528,9 @@ else:  // neutral_transition / comfort / wrap_up
 **UI는 이 값으로 "면접이 끝났는가"를 판정합니다** — `completed`면 입력창을 닫고 리포트 대기 화면으로 보냅니다
 (`06_ui_plan.md` 3.3절 `useInterviewStream`). 이 필드가 없으면 UI는 종료를 감지할 수단이 없습니다.
 
-`paused`(레이트 리밋 4단계)는 `stream_error`로 끝나는 경로이므로 `utterance_done`이 나가지 않습니다. `evaluating`
+`paused`는 **어느 사유든** `stream_error`로 끝나는 경로이므로 `utterance_done`이 나가지 않습니다 — 레이트 리밋 4단계
+(`rate_limited`)뿐 아니라 **D28의 `byok_key_invalid`·`byok_quota_exhausted`도 같습니다.** 그래서 이 이벤트의
+`sessionStatus` 가능값은 D28 이후에도 여전히 **`in_progress` / `completed` 두 개뿐**입니다. `evaluating`
 이후의 상태도 이 스트림에서는 관측되지 않습니다(평가는 D18에 따라 `completed` 전이의 서버 부작용으로 별도 등록됩니다).
 
 **스트림 수명 규약** (`05_api_contract.md` 5.2절과 동일 — 원본은 이 절입니다)
@@ -1145,6 +1174,22 @@ DB에는 **언제나 정화 전 원본**을 저장합니다. 치환은 프롬프
 | `session_notice` | `kind`, `level`, `messageKo` | 동일 | 없음 (일치) |
 | `stream_error` | `code`, `retryable`, `messageKo` | 동일 | 없음 (일치) |
 | `stream_error` | UI가 4단계에서 **재개 가능 시각**을 표시(`06_ui_plan.md` 4절·6.2절, `03_voice_pipeline.md` 14절 F16) | 페이로드에 없음 | **필드를 추가하지 않고 출처를 명문화함** — `Session.resumableAfter` 재조회. 값의 출처를 하나로 유지 |
+
+### 11.1 재대조 2회차 (2026-09-10, D27~D30 반영 — QA 2차 G1)
+
+D27~D30이 이 문서에 전혀 반영되지 않은 상태였으므로 SSE 이벤트 4종을 다시 전수 대조했습니다.
+**결함은 `stream_error` 1건뿐이었고 고쳤습니다.** 나머지 3종은 D28로 달라지는 것이 없습니다.
+
+| event | D28 이후 하위 문서 | 3.5절(직전) | 조치 |
+|---|---|---|---|
+| `utterance_chunk` | `seq`, `text` | 동일 | 없음. BYOK는 발화 내용에 영향을 주지 않는다 |
+| `utterance_done` | `sessionStatus`가 `in_progress` \| `completed` | 동일 | **없음.** `byok_*` 실패는 `stream_error`로 끝나므로 `paused`가 이 이벤트로 관측되는 일은 여전히 없다. 다만 근거 문장이 "레이트 리밋 4단계"만 들고 있어 **BYOK 2종을 포함하도록 서술을 넓힘** |
+| `session_notice` | `kind` 3종(`distress_guard`·`pressure_capped`·`rate_limit_fallback`) | 동일 | **없음.** BYOK 실패는 회복 불가라 폴백 고지가 아니라 중단이다. `kind`에 `byok_*`를 넣지 않는다 — 넣으면 "안내 후 계속"과 "중단"이 한 이벤트에 섞인다 |
+| `stream_error` | `code` **5종** (`05_api_contract.md` 5.2절·13절, `06_ui_plan.md` 3.3절·4.14절) | **3종 — `byok_key_invalid`·`byok_quota_exhausted` 누락** | **G1 — 추가함.** 코드별 `retryable`·세션 결과 표를 함께 명문화 |
+
+**재개 가능 시각의 출처 규약은 D28에서도 그대로입니다.** `byok_quota_exhausted`는 아예 시각이 존재하지 않고
+(`Session.resumableAfter = null`), `rate_limited`는 종전대로 세션 재조회로 읽습니다. SSE 페이로드에 시각을 싣지
+않는다는 결정은 뒤집지 않았습니다.
 
 **페이로드가 아닌 스트림 수명 규약**도 하위 문서에만 있고 원본에 없어 3.5절에 옮겨 적었습니다:
 `utterance_done`은 스트림당 정확히 1회이자 마지막 이벤트 / `stream_error`가 나가면 `utterance_done`은 나가지 않음 /
