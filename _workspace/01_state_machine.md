@@ -6,6 +6,10 @@
 
 ## 변경 로그
 - 2026-09-09 최초 작성. 브리프 9절 #7(페르소나별 질문 수·종료 조건), #8(레이트 리밋) 반영.
+- 2026-09-10 **D27·D28·D29 대응.** 1절에 `funding_source` enum 신설, `pause_reason` 2개 추가.
+  2절 전이 표에 재원 분기 가드 2건·예약 반납 부작용 5건·BYOK 실패 전이 2건 반영.
+  4절에 RPM/RPD 구분 도입부와 4단계 강등 주석, 4.5절(사용자 키 실패) 신설, 7.5절(크론 워치독) 신설.
+  **상태 값 11개는 변경하지 않았습니다.**
 
 ---
 
@@ -35,7 +39,15 @@ canceled
 user_requested
 rate_limited
 connection_lost
+byok_key_invalid
+byok_quota_exhausted
 ```
+
+> **`byok_key_invalid` · `byok_quota_exhausted`는 2026-09-10 신규 값입니다(D28).**
+> `04_data_layer.md`의 `pause_reason` CHECK 제약과 `05_api_contract.md`의 오류 코드 표에
+> **전파가 필요합니다.** 기존 3개 값의 의미는 바뀌지 않았습니다(순수 추가).
+> 두 값은 **우리 여력이 아니라 사용자 계정의 사정**을 가리킵니다. `rate_limited`와 뭉치지 마세요 —
+> 원인 주체가 다르고, 따라서 안내 문구와 복구 경로가 다릅니다(4.5절).
 
 `interview_sessions.modality` / `current_modality`
 
@@ -61,6 +73,24 @@ ai
 engineer
 ```
 
+`interview_sessions.funding_source` — **2026-09-10 신규(D28).** 세션이 어느 키로 도는지.
+세션 생성 시 확정되고 **세션이 끝날 때까지 바뀌지 않습니다.**
+
+```
+trial_shared
+byok
+```
+
+| 값 | 의미 | 예약 게이트(D27) | 동의(D29) |
+|---|---|---|---|
+| `trial_shared` | 체험 세션. 서비스 공용 키로 진행 | **적용됨** | **필요함** |
+| `byok` | 사용자가 연결한 본인 키로 진행 | 적용되지 않음 | 불필요 |
+
+> `04_data_layer.md`에 **신규 컬럼 + CHECK 제약 추가가 필요합니다.**
+> 이 값이 세션 시작 경로의 분기를 결정하므로(2절), 계약상 상태 값 다음으로 중요한 enum입니다.
+> **세션 도중 변경 금지** — 사용자 키가 실패했다고 공용 키로 넘어가면 D29 동의 없이 데이터가
+> 공용 경로로 나갑니다(4.5절).
+
 ### 상태별 한국어 설명과 사용자에게 보이는 화면
 
 | 상태 | 설명 | 최종 상태 | 사용자가 보는 화면 |
@@ -85,41 +115,56 @@ engineer
 
 ## 2. 전이 표
 
+> **읽는 법 — 재원 분기(D28).** 세션 시작 경로의 두 전이(`(없음) → created`, `configuring → ready`)에만
+> `funding_source` 분기가 있습니다. 그 이후의 전이는 재원과 무관하게 동일합니다.
+> **예약 반납 부작용은 전부 `funding_source = 'trial_shared'` 세션에만 해당**하며,
+> `byok` 세션에는 예약 행 자체가 없으므로 no-op입니다(`02_ai_architecture.md` 8.3절).
+
 | 현재 상태 | 다음 상태 | 트리거 | 가드(전제 조건) | 부작용 |
 |---|---|---|---|---|
-| (없음) | `created` | 사용자가 "새 면접 시작" 클릭 | 인증됨 | `interview_sessions` 행 삽입, `session_events` 기록 |
+| (없음) | `created` | 사용자가 "새 면접 시작" 클릭 | 인증됨 **+ 재원 분기(D28)**: ① 유효한 사용자 키가 연결돼 있으면 `funding_source = 'byok'`로 **무조건 통과**(공용 여력과 무관). ② 아니면 체험 경로 — **체험 미소진** *이고* **여력 사전 조회 통과**(비원자적, `02_ai_architecture.md` 8.3.3절)여야 `funding_source = 'trial_shared'`. 둘 다 아니면 **행을 만들지 않고 503 `capacity_unavailable`** | `interview_sessions` 행 삽입, **`funding_source` 확정 기록(이후 변경 금지)**, `session_events` 기록 |
 | `created` | `configuring` | 설정 화면에서 첫 입력 저장 | — | 부분 설정 저장 |
-| `created` | `canceled` | 사용자가 설정을 떠나며 폐기 | — | `ended_at` 기록. **행은 유지**(삭제하지 않음) |
+| `created` | `canceled` | 사용자가 설정을 떠나며 폐기 | — | `ended_at` 기록. **행은 유지**(삭제하지 않음). **예약 전량 반납**(체험 세션만) |
 | `configuring` | `configuring` | 설정 항목 변경 | — | 부분 설정 갱신 |
-| `configuring` | `ready` | 사용자가 "면접 준비" 클릭 → 컨텍스트 준비 완료 | 직군·페르소나·모달리티·이력서·JD가 모두 있고 이력서/JD의 `extraction_status = 'succeeded'` | 이력서·JD 요약 컨텍스트 생성, 오프닝 주질문 1개 생성 후 `questions` 삽입, `question_budget` 확정 |
-| `configuring` | `failed` | 이력서 텍스트 추출 실패(스캔 PDF 등) 후 사용자가 재시도 포기 (진입점: `POST .../abandon-preparation`, `05_api_contract.md` #35) | — | `failure_reason = 'document_extraction_failed'` 기록. 사용자에게 텍스트 직접 입력 경로 안내 |
-| `configuring` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. 첨부 관계 유지. **행은 유지** |
+| `configuring` | `ready` | 사용자가 "면접 준비" 클릭 → 컨텍스트 준비 완료 | 직군·페르소나·모달리티·이력서·JD가 모두 있고 이력서/JD의 `extraction_status = 'succeeded'` **+ 재원별 가드(D28·D29·D27)**: `byok`면 **사용자 키 복호화·유효성 확인 성공**(실패 시 전이하지 않고 키 오류 응답, 세션은 `configuring` 유지). `trial_shared`면 **D29 동의 기록 존재**(없으면 409) *그리고* **일당 여력 예약 성공**(`02_ai_architecture.md` 8.3.3절 — 실패 시 전이하지 않고 503 `capacity_unavailable`, 세션은 `configuring`에 남아 설정 보존) | 이력서·JD 요약 컨텍스트 생성, 오프닝 주질문 1개 생성 후 `questions` 삽입, `question_budget` 확정. `trial_shared`면 `quota_reserved` 이벤트 기록 |
+| `configuring` | `failed` | 이력서 텍스트 추출 실패(스캔 PDF 등) 후 사용자가 재시도 포기 (진입점: `POST .../abandon-preparation`, `05_api_contract.md` #35) | — | `failure_reason = 'document_extraction_failed'` 기록. 사용자에게 텍스트 직접 입력 경로 안내. **예약 전량 반납**(체험 세션만 — 예약이 잡혀 있었다면) |
+| `configuring` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. 첨부 관계 유지. **행은 유지**. **예약 전량 반납**(체험 세션만) |
 | `ready` | `in_progress` | 사용자가 "면접 시작" 클릭 | 음성 모드면 마이크 권한 확인 완료 | `started_at` 기록, 오프닝 질문 발화 |
-| `ready` | `configuring` | 사용자가 "설정 변경" 클릭 | — | 생성된 `questions` 폐기(실제 삭제) |
-| `ready` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지** |
+| `ready` | `configuring` | 사용자가 "설정 변경" 클릭 | — | 생성된 `questions` 폐기(실제 삭제). **예약은 반납하지 않고 유지**(같은 세션이 다시 `ready`로 갈 때 재예약하면 여력을 이중으로 먹는다. 재예약은 `(session_id, model_bucket)` unique로 멱등 — `02_ai_architecture.md` 8.3.3절) |
+| `ready` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지**. **예약 전량 반납**(체험 세션만) |
 | `in_progress` | `in_progress` | 답변 제출 → 다음 질문 생성 | 종료 조건(3절) 미충족 | `turns` 삽입, 꼬리질문이면 `questions.parent_question_id` 설정, `depth` 증가 |
 | `in_progress` | `in_progress` | 모달리티 전환(음성↔텍스트) | — | `current_modality` 갱신, `session_events`에 `modality_switched` 기록. **상태는 바뀌지 않음** |
 | `in_progress` | `paused` | 사용자가 "일시정지" 클릭 | — | `pause_reason = 'user_requested'`, `paused_at` 기록, 오디오 버퍼 폐기 |
 | `in_progress` | `paused` | LLM 레이트 리밋 도달 + 백오프 대기 60초 초과 | 4절 폴백 사다리의 3단계 | `pause_reason = 'rate_limited'`, 재개 가능 시각 안내 |
+| `in_progress` | `paused` | **사용자 키가 유효하지 않음**(프로바이더가 인증 거절 — 키 삭제·권한 변경·오타). `funding_source = 'byok'`에서만 발생 | 재시도 1회 후에도 인증 거절 | `pause_reason = 'byok_key_invalid'`, `paused_at` 기록, 오디오 버퍼 폐기. 키 상태를 `invalid`로 표시. **공용 키로 폴백하지 않음**(D29 동의 없는 데이터가 공용 경로로 나감) |
+| `in_progress` | `paused` | **사용자 키의 한도 소진**(프로바이더가 사용자 계정 한도 초과를 반환). `funding_source = 'byok'`에서만 발생 | 4절 3단계 백오프로 회복되지 않음 | `pause_reason = 'byok_quota_exhausted'`, `paused_at` 기록, 오디오 버퍼 폐기. **재개 가능 시각을 안내하지 않음** — 사용자 계정의 사정이라 우리가 알 수 없다(4.5절) |
 | `in_progress` | `paused` | 네트워크 단절·탭 종료. **클라이언트가 감지하면 `sendBeacon`으로 즉시**(최선 노력), 감지하지 못하면 일 1회 워치독 또는 사용자가 다시 열었을 때의 지연 판정으로 회수 (D25) | — | `pause_reason = 'connection_lost'` |
-| `in_progress` | `completed` | 종료 조건 충족(3절) 또는 사용자가 "면접 종료" 클릭 | 답변한 주질문 ≥ 1 | `ended_at` 기록, 오디오 버퍼 폐기, 평가 작업 큐 등록 |
-| `in_progress` | `canceled` | 사용자가 "이 세션 버리기" 클릭 | — | `ended_at` 기록. 턴·질문 **유지**. 평가는 등록하지 않음 |
-| `in_progress` | `failed` | 복구 불가 오류(프로바이더 영구 오류, 컨텍스트 손상) | — | `failure_reason` 기록, 오디오 버퍼 폐기 |
-| `paused` | `in_progress` | 사용자가 "이어서 하기" 클릭 | 마지막 갱신 후 7일 이내, `rate_limited`면 재개 가능 시각 경과 | `pause_reason = NULL`, 직전 질문 재발화 |
-| `paused` | `completed` | 사용자가 "여기서 끝내기" 클릭 | 답변한 주질문 ≥ 1 | `ended_at` 기록, 평가 큐 등록 |
-| `paused` | `abandoned` | 7일 경과(스케줄러) | 답변한 주질문 = 0 이거나 사용자가 재개하지 않음 | `ended_at` 기록. 답변한 주질문 ≥ 1이면 `completed`로 보내 평가(아래 행 참조) |
-| `paused` | `completed` | 7일 경과(스케줄러) | 답변한 주질문 ≥ 1 | 자동 종료 후 평가 큐 등록. 리포트에 "중단된 세션" 배지 |
-| `paused` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지** |
+| `in_progress` | `completed` | 종료 조건 충족(3절) 또는 사용자가 "면접 종료" 클릭 | 답변한 주질문 ≥ 1 | `ended_at` 기록, 오디오 버퍼 폐기, 평가 작업 큐 등록, **`flash_lite` 버킷 예약 반납**(`pro`·`flash`는 평가·코치용으로 계속 보유 — 체험 세션만) |
+| `in_progress` | `canceled` | 사용자가 "이 세션 버리기" 클릭 | — | `ended_at` 기록. 턴·질문 **유지**. 평가는 등록하지 않음. **예약 전량 반납**(체험 세션만) |
+| `in_progress` | `failed` | 복구 불가 오류(프로바이더 영구 오류, 컨텍스트 손상) | — | `failure_reason` 기록, 오디오 버퍼 폐기. **예약 전량 반납**(체험 세션만) |
+| `paused` | `in_progress` | 사용자가 "이어서 하기" 클릭 | 마지막 갱신 후 7일 이내. `rate_limited`면 재개 가능 시각 경과. **`byok_key_invalid`면 유효한 키가 다시 연결돼 있어야 함**(재개 시점에 재검증 1회, 실패하면 전이하지 않고 키 화면으로 안내). **`byok_quota_exhausted`면 재검증 없이 시도를 허용**(사용자 계정이 회복되었는지는 호출해 봐야 알 수 있고, 아직이면 같은 사유로 다시 `paused`가 된다) | `pause_reason = NULL`, 직전 질문 재발화 |
+| `paused` | `completed` | 사용자가 "여기서 끝내기" 클릭 | 답변한 주질문 ≥ 1 | `ended_at` 기록, 평가 큐 등록, **`flash_lite` 버킷 예약 반납**(체험 세션만) |
+| `paused` | `abandoned` | 7일 경과(스케줄러) | 답변한 주질문 = 0 이거나 사용자가 재개하지 않음 | `ended_at` 기록. **예약 전량 반납**(체험 세션만). 답변한 주질문 ≥ 1이면 `completed`로 보내 평가(아래 행 참조) |
+| `paused` | `completed` | 7일 경과(스케줄러) | 답변한 주질문 ≥ 1 | 자동 종료 후 평가 큐 등록, **`flash_lite` 버킷 예약 반납**(체험 세션만). 리포트에 "중단된 세션" 배지 |
+| `paused` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지**. **예약 전량 반납**(체험 세션만) |
 | `completed` | `evaluating` | 평가 워커가 작업을 집음 | 평가 작업이 큐에 있음 | `evaluations` 행 삽입(`status = 'running'`), `evaluation_started_at` 기록 |
-| `completed` | `failed` | 평가 큐 등록 자체가 실패하고 재시도 3회 소진 | — | `failure_reason = 'evaluation_enqueue_failed'` |
-| `evaluating` | `evaluated` | 평가 결과 저장 완료 | 모든 축의 점수와 인용이 저장됨 | `evaluation_scores`·`evaluation_citations` 삽입, 리포트 열람 가능, 알림 표시 |
+| `completed` | `failed` | 평가 큐 등록 자체가 실패하고 재시도 3회 소진 | — | `failure_reason = 'evaluation_enqueue_failed'`. **예약 전량 반납**(체험 세션만) |
+| `evaluating` | `evaluated` | 평가 결과 저장 완료 | 모든 축의 점수와 인용이 저장됨 | `evaluation_scores`·`evaluation_citations` 삽입, 리포트 열람 가능, 알림 표시, **잔여 예약 전량 정산 반납**(체험 세션만). 체험 세션이면 리포트 화면에 **키 연결 CTA** 노출 조건 성립(`01_product_spec.md` 6.5.2절) |
 | `evaluating` | `completed` | 평가 실패 + 재시도 잔여(최대 3회) | 재시도 횟수 < 3 | 지수 백오프 후 큐 재등록 |
-| `evaluating` | `failed` | 평가 재시도 3회 소진 또는 10분 워치독 타임아웃 | — | `failure_reason = 'evaluation_failed'`, 리포트 화면에 재시도 버튼 노출 |
+| `evaluating` | `failed` | 평가 재시도 3회 소진 또는 10분 워치독 타임아웃 | — | `failure_reason = 'evaluation_failed'`, 리포트 화면에 재시도 버튼 노출. **예약 전량 반납**(체험 세션만) |
 | `evaluated` | `evaluating` | 사용자가 "평가 다시 실행" 클릭 | MVP 범위 밖 — `[later]` | 기존 평가는 보존하고 새 `evaluations` 행 생성 |
 | `failed` | `evaluating` | 사용자가 리포트 화면에서 "평가 재시도" 클릭 | `failure_reason`이 평가 계열이고 `turns`가 남아 있음 | 재시도 카운터 초기화 후 평가 큐 재등록 |
-| `failed` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지** |
-| `abandoned` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지** |
+| `failed` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지**. 예약은 `→ failed` 시점에 이미 반납됨(중복 반납 금지) |
+| `abandoned` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지**. 예약은 `→ abandoned` 시점에 이미 반납됨(중복 반납 금지) |
 | 모든 상태 | (행 삭제) | 사용자가 세션 삭제 / 계정 삭제 | — | DB 행과 Storage 객체 **실제 삭제**(소프트 삭제 아님) |
+
+### 예약 반납은 단 한 번만 — 이중 반납이 여력을 부풀린다
+
+종료 상태로 가는 경로가 여럿이므로(`failed → canceled`, `abandoned → canceled`), **반납은 세션이
+처음 종료 계열에 도달할 때 한 번만** 일어나야 합니다. 반납 함수는 `ai_quota_reservations.status`가
+`'held'`인 행만 대상으로 하는 **멱등 연산**이어야 합니다(`02_ai_architecture.md` 8.3.4절).
+이중 반납은 실제로는 쓰지 않은 여력을 원장에 되돌려 놓아, **오늘 정원을 실제보다 크게 만듭니다** —
+그러면 벽이 다시 면접 도중으로 돌아오고, D27이 막으려던 바로 그 실패가 재발합니다.
 
 ### 전이 표에 없는 조합은 금지
 
@@ -162,6 +207,13 @@ API 라우트는 전이 시도 시 위 표를 검사해 허용되지 않으면 `
 
 ## 4. 레이트 리밋 도달 시 동작 (브리프 9절 #8 결정)
 
+> **이 사다리는 분당 한도(RPM)를 다룹니다. 일당 한도(RPD)는 사전 예약이 담당합니다**
+> (D27, `02_ai_architecture.md` 8.3절). RPM은 순간적·자기회복적이라 사후 대응이 정답이고,
+> RPD는 누적적·비가역이라 세션 시작 전에 막는 것이 정답입니다. 둘을 한 메커니즘으로 뭉치면
+> 몇 초 뒤 풀릴 것을 미리 예약해 막게 되어 가용성만 깎입니다.
+>
+> **4.5절은 다른 문제입니다** — 사용자 본인 키의 실패는 우리 한도가 아니므로 이 사다리를 타지 않습니다.
+
 **결정: 세션을 끊지 않는다. "폴백 사다리"를 순서대로 내려가고, 마지막에만 `paused`로 보존한다.
 별도의 `rate_limited` 상태를 만들지 않고 `paused` + `pause_reason = 'rate_limited'`로 표현한다.**
 
@@ -177,9 +229,43 @@ LLM이 막히면 면접 자체가 진행 불가입니다. 이 둘을 한 상태�
 | 3 | LLM (일시적, 백오프 60초 이내) | 지수 백오프 재시도. 이 동안 "면접관이 생각 중" 표시를 유지하되 3초 초과 시 지연 안내로 전환 | 없음 | "면접관이 답변을 정리하고 있습니다 (잠시만요)" |
 | 4 | LLM (60초 초과 또는 일일 한도 소진) | 세션 보존 후 일시정지 | `in_progress → paused`, `pause_reason = 'rate_limited'` | "지금은 이어갈 수 없습니다. {재개 가능 시각} 이후 '이어서 하기'를 누르면 마지막 질문부터 계속됩니다" |
 
+> **4단계는 D27 이후 예외 경로입니다.** 일당 한도는 세션 시작 전 예약이 막으므로
+> (`02_ai_architecture.md` 8.3절) **정상 경로에서 도달하면 안 되고, 도달하면 예약 모델의 결함
+> 신호로 관측합니다.** 1~3단계(RPM 대응)는 그대로 유효합니다.
+> `pause_reason = 'rate_limited'` 값과 문구는 없애지 않습니다 — 예외가 실제로 일어났을 때
+> 사용자가 세션을 잃지 않아야 하고, 값이 없으면 그 사건을 셀 수도 없기 때문입니다.
+
 - 3단계에서 사용자는 언제든 직접 "일시정지"를 눌러 4단계로 갈 수 있습니다.
 - 4단계에서 7일 안에 재개하지 않으면 3절의 자동 종료 규칙을 따릅니다(답변 ≥ 1이면 `completed`, 아니면 `abandoned`).
 - 1·2단계는 상태를 바꾸지 않으므로 **완주율 지표를 왜곡하지 않습니다.** 이것도 이 설계를 택한 이유입니다.
+
+### 4.5 사용자 키가 실패할 때 (D28 — 우리 한도가 아니다)
+
+`funding_source = 'byok'` 세션에서 프로바이더가 거절하면 원인 주체가 우리가 아니라 **사용자 계정**입니다.
+같은 "막힘"이지만 복구 주체가 다르므로 **문구도 경로도 4절과 분리**합니다.
+
+| 사건 | `pause_reason` | 사용자에게 보이는 것 | 복구 경로 |
+|---|---|---|---|
+| 인증 거절 (키 삭제·권한 변경·오타) | `byok_key_invalid` | "연결하신 키로 접속할 수 없었어요. 키가 삭제되었거나 권한이 바뀌었을 수 있습니다" | `/settings/api-key`에서 키 교체 → "이어서 하기" |
+| 사용자 계정 한도 초과 | `byok_quota_exhausted` | "연결하신 키의 사용량이 오늘 한도에 도달했어요. Google AI Studio에서 확인하실 수 있습니다" | 다음 날 또는 결제 활성화 → "이어서 하기" |
+
+**규칙**
+
+1. **세션을 잃지 않습니다.** 둘 다 `paused`이고 대화 로그는 그대로이며, 7일 재개 창(D7)이 동일하게 적용됩니다.
+2. **재개 가능 시각을 제시하지 않습니다.** 4절 4단계와 결정적으로 다른 점입니다 — 우리 원장에는
+   사용자 계정의 리셋 시각이 없습니다. 없는 정보를 지어내면 그 시각에 다시 온 사용자가 또 막힙니다.
+   대신 **확인할 곳**(Google AI Studio)을 알려줍니다.
+3. **공용 키로 자동 폴백하지 않습니다.** 폴백하면 D29 동의를 받지 않은 이력서·답변이 공용 경로로
+   나가고, 사용자는 그 사실을 모릅니다. 체험이 남아 있더라도 마찬가지입니다.
+4. **1·2단계(TTS·STT 텍스트화)는 그대로 탑니다.** STT/TTS는 사용자 키와 무관한 경로이므로
+   음성이 막혀도 텍스트로 면접은 계속됩니다.
+5. **3단계 백오프를 먼저 시도합니다.** 사용자 계정의 분당 한도일 수도 있으므로, 60초 백오프로
+   회복되면 `byok_quota_exhausted`로 내리지 않습니다. 회복되지 않을 때만 `paused`입니다.
+6. `byok_key_invalid`는 **재시도 1회 후** 판정합니다. 일시적 네트워크 오류를 키 문제로 오인해
+   사용자에게 "키를 확인하세요"라고 말하면, 멀쩡한 키를 지우고 다시 만들게 됩니다.
+
+**이 두 사유는 완주율(지표 1)에서 분리해 집계해야 합니다.** 사용자 계정 사정으로 끊긴 세션을
+"압박을 못 견디고 이탈"로 세면 제품 지표가 틀립니다. `rate_limited`도 같은 이유로 분리 대상입니다.
 
 ---
 
@@ -219,6 +305,25 @@ LLM이 막히면 면접 자체가 진행 불가입니다. 이 둘을 한 상태�
 
 ---
 
+## 7.5 크론 워치독이 지켜야 할 규칙
+
+구현과 배치 방식은 `05_api_contract.md` 7.4절(C1 `GET /api/cron/daily`)이 원본이고,
+여기서는 **상태 머신이 요구하는 규칙**만 못 박습니다.
+
+| # | 규칙 | 근거 |
+|---|---|---|
+| 1 | `paused` 7일 경과 → `completed`(답변 ≥ 1) 또는 `abandoned` | 2절, D7 |
+| 2 | `evaluating` 10분 초과 → 재체이닝 또는 `failed` | 1절 말미, D18 |
+| 3 | `in_progress`인데 갱신이 끊긴 지 오래 → `paused(connection_lost)` | 2절, D25 |
+| 4 | 삭제 대기 Storage 객체 정리 | 브리프 7절 실제 삭제 |
+| **5** | **만료 예약 스윕 — `quota_date < today AND status = 'held'` 행을 정리한다** | **D27 신규.** 이게 없으면 어제 잡힌 예약이 원장에 남아 오늘 정원을 갉아먹고, 며칠이면 서비스가 스스로 문을 닫습니다 |
+
+5번은 **체험 세션 예약에만** 해당합니다(BYOK 세션은 예약 행이 없습니다).
+반납 호출이 하나라도 빠지면 여력이 새고, 크론 5번이 그 마지막 안전망입니다 —
+**안전망이지 정상 경로가 아니므로, 여기서 정리되는 행이 꾸준히 나오면 반납 지점이 빠졌다는 신호입니다.**
+
+---
+
 ## 8. 결정 완료
 
 남은 미결 없음. (2026-09-09)
@@ -243,5 +348,63 @@ LLM이 막히면 면접 자체가 진행 불가입니다. 이 둘을 한 상태�
 사용자 이탈로 기록하게 됩니다 — 완주율(지표 1)이 압박 강도가 아니라 무료 티어 한도를 재게 됩니다.
 부수적으로 브리프 3절의 "D-7 집중 연습" 창과 7일이 정확히 겹칩니다.
 스케줄러는 일 1회 그대로입니다.
+
+**D27·D28·D29 — 세션 시작 경로에 재원 분기가 생겼습니다.** 예약 게이트는 이제 **체험 세션만**
+배급하고, BYOK 세션은 공용 여력과 무관합니다. 분기가 걸리는 전이는 **두 개뿐**입니다 —
+`(없음) → created`(사전 조회)와 `configuring → ready`(확정 예약·동의·키 검증). 그 이후의 전이는
+재원과 무관하게 동일하며, 예약 반납 부작용은 전부 체험 세션에서만 실효가 있습니다.
+
+**사용자 키 실패는 새 상태가 아니라 새 `pause_reason`으로 표현합니다**(4.5절).
+4절이 `rate_limited`를 새 상태로 만들지 않은 것과 같은 이유입니다 — "재개 대기 중"이라는 `paused`의
+의미와 중복되고, 상태를 늘리면 CHECK·RLS·화면 분기가 모두 늘어납니다. 사유 컬럼으로 나누면
+화면은 정확한 안내를, 상태 머신은 최소 크기를 유지합니다.
+
+---
+
+## 9. 상태 값 11개 유지 확인과 신규 상태 제안
+
+**상태 값 11개는 문자 하나 바뀌지 않았습니다.** `04_data_layer.md`의 `status` CHECK 제약과
+1절 코드 블록은 계속 문자 단위로 일치합니다. D27·D28·D29를 반영하며 새 상태를 추가하지 않았습니다.
+
+**검토했으나 추가하지 않은 후보 — 리더 판단용 기록**
+
+| 후보 상태 | 왜 필요해 보였나 | 왜 추가하지 않았나 |
+|---|---|---|
+| `awaiting_key` | 사용자 키 문제로 멈춘 세션이 "일시정지"와 다르게 보였으면 함 | `paused` + `pause_reason = 'byok_key_invalid'`로 완전히 표현됩니다. 재개 가능하다는 성질이 `paused`와 동일하고, 7일 재개 창·자동 종료 규칙도 똑같이 적용되어야 합니다. 상태를 늘리면 그 규칙 전부를 두 곳에 써야 합니다 |
+| `awaiting_consent` | 동의 대기 중임을 상태로 표현하고 싶었음 | 동의는 `configuring → ready`의 **가드**이지 체류 상태가 아닙니다. 동의를 안 한 세션은 그냥 `configuring`에 머무릅니다 — 설정이 덜 끝난 세션과 동일한 취급이 맞고, 실제로 사용자가 하는 일도 같습니다(설정 화면으로 돌아감) |
+| `capacity_blocked` | 여력 부족으로 막힌 세션을 관측하고 싶었음 | **막힌 세션은 존재하지 않습니다.** D27은 여력이 없으면 세션 행 자체를 만들지 않습니다. 거절 횟수는 `ai_quota_ledger.denied_count`가 셉니다(`02_ai_architecture.md` 8.3.2절) |
+
+**추가를 제안하는 상태: 없습니다.**
+
+**다만 전파가 필요한 enum 변경 2건이 있습니다**(상태 값이 아니라 부속 enum, 1절 참조).
+리더가 전파 여부를 판단해 주세요.
+
+| 대상 | 변경 | 성격 | 영향 문서 |
+|---|---|---|---|
+| `interview_sessions.pause_reason` | `byok_key_invalid`, `byok_quota_exhausted` **추가** | 순수 추가. 기존 3개 값의 의미 불변 | `04_data_layer.md`(CHECK), `05_api_contract.md`(오류·응답), `06_ui_plan.md`(재개 패널 문구) |
+| `interview_sessions.funding_source` | **신규 컬럼 + CHECK** `in ('trial_shared','byok')` | 신규. not null, 세션 생성 시 확정, 이후 변경 금지 | `04_data_layer.md`, `05_api_contract.md`, `06_ui_plan.md`, `01_domain_model.md` |
+
+---
+
+## 10. 팀 전달 사항 (D27·D28·D29)
+
+`01_product_spec.md` 10절에 전체 목록이 있습니다. 이 문서에서 비롯되는 것만 다시 적습니다.
+
+- **`supabase-engineer`** — 9절 표의 enum 변경 2건. `pause_reason` CHECK에 값 2개 추가,
+  `funding_source` 컬럼 신설. **상태 값 11개는 그대로이므로 `status` CHECK는 건드리지 마세요.**
+- **`vercel-platform-engineer`** — 2절 전이 표의 가드 2건이 라우트 검사에 그대로 들어갑니다.
+  #3은 **사전 조회**(비원자적, 홀드 없음), #6은 **확정 예약**(원자적)이며, 둘 다 `byok` 세션은 통과입니다.
+  반납 호출 지점은 2절 부작용 열에 전부 있고, **멱등이어야 합니다**(2절 "예약 반납은 단 한 번만").
+  크론 워치독 5종째는 7.5절.
+- **`ai-interview-architect`** — `02_ai_architecture.md` 8.3절의 적용 범위가 **체험 세션으로 한정**됨을
+  8.3.0절에 명시해 주세요. 8.3.6절의 "가능 세션 수"는 이제 체험 세션 정원입니다.
+  4.5절의 사용자 키 오류 3분류(인증 거절 / 사용자 한도 / 일시적)를 프로바이더 추상화 계층에서
+  정규화하는 규칙이 필요합니다 — 프로바이더 원문 오류를 그대로 흘리면 UI가 판정할 수 없습니다.
+- **`shadcn-ui-engineer`** — 재개 패널이 `pause_reason` **5종**을 분기해야 합니다(기존 3 + 신규 2).
+  `byok_quota_exhausted`에는 **재개 가능 시각을 표시하지 마세요**(4.5절 규칙 2).
+- **`qa-inspector`** — 1절 코드 블록의 상태 11개와 `04_data_layer.md`의 `status` CHECK가 여전히
+  문자 단위로 일치하는지, 그리고 `pause_reason` CHECK가 5개로 갱신되었는지 함께 봐 주세요.
+
+---
 
 > 전체 결정 기록: [`00_input/decisions.md`](00_input/decisions.md)

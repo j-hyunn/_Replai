@@ -95,8 +95,9 @@ evaluation_scores  1 ─ N score_disputes
 | `max_follow_up_depth` | int | 페르소나 기본값 4 / 2 |
 | `max_turns` | int | 20 / 18 |
 | `max_duration_min` | int | 30 |
-| `pause_reason` | text NULL | `user_requested` \| `rate_limited` \| `connection_lost` |
-| `resumable_after` | timestamptz NULL | `pause_reason = 'rate_limited'`일 때 재개 가능 시각 |
+| `pause_reason` | text NULL | `user_requested` \| `rate_limited` \| `connection_lost` \| `byok_key_invalid` \| `byok_quota_exhausted` (5종, D28) |
+| `funding_source` | text | `trial_shared` \| `byok` — 이 세션이 누구의 토큰을 쓰는가 (D28) |
+| `resumable_after` | timestamptz NULL | `pause_reason = 'rate_limited'`일 때 재개 가능 시각. **`byok_quota_exhausted`에는 채우지 않는다** — 사용자 키의 재개 시각은 우리가 모르는 정보다 |
 | `failure_reason` | text NULL | `failed`일 때만 |
 | `context_summary` | text NULL | 이력서·JD를 압축한 면접관 컨텍스트 |
 | `started_at` / `ended_at` / `paused_at` | timestamptz NULL | 지표 1·3 계산에 사용 |
@@ -215,6 +216,27 @@ evaluation_scores  1 ─ N score_disputes
 
 지표 5는 "축 점수 카드 노출 대비 이의 클릭 비율"이므로, 노출 이벤트는 `session_events`에
 `event_name = 'score_card_viewed'`로 남깁니다.
+
+---
+
+### 3.12 BYOK·체험 배급 계열 (D27·D28·D29·D30)
+
+개념만 적습니다. **확정 스키마는 `04_data_layer.md` 3.13~3.17절이며 그쪽이 원본입니다.**
+
+| 엔티티 | 무엇 | 핵심 성질 |
+|---|---|---|
+| `user_api_keys` | 사용자가 연결한 Gemini API 키 | 원문은 `public` 스키마에 **존재하지 않는다**(Vault 암호문). 노출되는 것은 끝 4자리뿐 |
+| `trial_consents` | 체험 세션 데이터 처리 동의 | 사용자·시각·**동의한 문구의 버전**. 문구가 바뀌면 무엇에 동의했는지 알 수 있어야 한다 |
+| `ai_quota_ledger` | 하루치 공용 여력 원장 | 날짜 × 모델 버킷. **체험 세션만** 여기서 배급받는다 |
+| `ai_quota_reservations` | 세션이 잡아 둔 예약 | 세션 × 버킷. 체험 사용자는 **동시 1건**(D30) |
+| `account_events` | 키 연결·교체·해제 감사 | `session_events`를 오염시키지 않기 위해 분리 |
+
+**모델링상 중요한 성질 두 가지**
+
+1. **`funding_source`가 세션의 성격을 가른다.** `byok` 세션은 예약 원장에 행을 만들지 않는다 —
+   자기 토큰을 쓰므로 공용 여력과 무관하다. 이 불변식은 DB 함수가 강제한다.
+2. **키는 사용자에 붙고 예약은 세션에 붙는다.** 사용자당 키는 하나(교체는 전체 대체),
+   세션당 예약은 버킷별로 하나다.
 
 ---
 
