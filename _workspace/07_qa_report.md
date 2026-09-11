@@ -18,6 +18,11 @@
 
 ## 요약
 
+> **⚠️ 2026-09-12 — 8절(상태 머신 + 세션 API 라우트 통합 정합성 검증)이 최신입니다.**
+> critical 1건(R1 — 평가가 되돌아온 뒤 재등록 주체가 없어 세션이 `completed`에 영구 정지)과
+> high 2건(R2 — #8 `start`가 `paused` 세션의 재개 가드를 우회 / R3 — 전이 표 14·20행 미구현)이
+> **열려 있습니다.** 아래 1~7절은 그 이전 라운드의 기록입니다.
+
 > **2026-09-11 최종 — 2차 QA의 미결 11건(high 4 · medium 3 · low 4) 전부 종결.**
 > high는 G1~G4, medium은 G5~G7, low는 G8~G11 — 아래 종결 현황 표와 4·7절에 소유자별 근거가 있습니다.
 > 전부 문서 정합성 항목이었고 런타임 위험이 있는 항목은 아니었습니다(런타임 검증은 여전히 6절 "미검증").
@@ -392,3 +397,65 @@
 | `product-architect` | ~~**G5**(`01_domain_model.md`에 D27~D30 반영 또는 원본 위임 명시)~~ ✅, ~~**G7**(`01_rubric.md` 3절 자릿수 명시)~~ ✅ |
 
 > 전체 결정 기록: [`00_input/decisions.md`](00_input/decisions.md) (확정 30건)
+
+---
+
+## 8. 통합 정합성 검증 — 상태 머신 + 세션 API 라우트 라운드 (2026-09-12, `qa-inspector`)
+
+> 대상: `src/lib/session/{transitions,lifecycle,store,persona,status,route-for-status}.ts`,
+> `src/lib/quota/{gate,limits}.ts`, `src/lib/ai/{credentials,provider,errors,roles,planner,interviewer,meta-stream,providers/google}.ts`,
+> `src/lib/api/{route,respond,errors,serialize}.ts`, `src/app/api/sessions/**`, `src/app/api/internal/jobs/**`,
+> `src/app/api/trial-consent/route.ts`, `src/app/api/cron/daily/route.ts` ↔ `_workspace/01_state_machine.md`·`02_ai_contracts.md`·`05_api_contract.md`·`supabase/migrations/**`.
+> **7.4절의 "34/34 일치" 주장을 전달하지 않고 QA가 전이 표를 직접 다시 읽어 재대조했습니다.**
+> 이 라운드는 **코드를 수정하지 않았습니다** — 아래 항목은 전부 소유자 조치 대상입니다.
+
+### 8.1 발견 항목
+
+| # | 심각도 | 경계 | 위치 (file:line) | 현재 | 기대 | 소유자 |
+|---|---|---|---|---|---|---|
+| **R1** | **critical** | 상태 머신 ↔ 평가 워커 ↔ 크론 | `src/app/api/internal/jobs/evaluate/route.ts:174-177`·`127-152` + `src/app/api/cron/daily/route.ts:20-26` | 면접을 마친 세션이 `completed → evaluating`까지 간 뒤 `runEvaluatorPasses()`가 항상 던져 `evaluating → completed`로 되돌아오고, **되돌린 뒤 아무도 다시 등록하지 않습니다**(주석대로 `enqueueEvaluation`을 부르지 않음). 이어받아야 할 C1 크론은 **501 스텁**입니다. 결과: 세션이 `completed`에 영구 정지 → 리포트가 영원히 오지 않고 `evaluations.status='running'` 행과 잔여 보유분 6이 남습니다 | 재시도 구동자가 존재해야 합니다. (a) C1 워치독 구현(`evaluating` 10분·`completed` 고아 재등록), 또는 (b) `handleEvaluatorFailure`의 되돌림 경로에 백오프 재호출을 두되 `attempt_count`를 리셋하지 않는 형태. **평가 프롬프트가 붙어도 1회 실패하면 같은 자리에 갇히므로 구조 결함입니다** | `vercel-platform-engineer`(C1) + `ai-interview-architect`(1·2단계 연결) |
+| **R2** | **high** | 전이 표 21행 ↔ #8 `start` | `src/app/api/sessions/[sessionId]/start/route.ts:42-83` | `from`을 읽기만 하고 **`ready` 가드가 없습니다.** 전이 표 21행이 `paused → in_progress`를 허용하므로 `assertTransition`도 통과합니다 → `paused` 세션에 `POST .../start {micReady:true}`를 보내면 **#14 `resume`의 가드 3종(7일 재개 시한 · `byok_key_invalid` 키 재검증 · `rate_limited` 재개 시각)이 전부 우회**되고, `applyTransition`이 `pause_reason`까지 `null`로 지웁니다. 게다가 `started_at`을 덮어써 시간 상한 종료 조건이 리셋되고, `order_index` 최솟값 질문을 다시 `asked_at` 찍어 **면접이 1번 질문부터 다시 시작**됩니다 | 계약 4.6절 8행·#8 행이 정한 대로 `from !== "ready"`면 409 `invalid_transition`(`details:{from,to:"in_progress"}`). `paused`의 진입점은 #14뿐입니다 | `vercel-platform-engineer` |
+| **R3** | **high** | 전이 표 14·20행 ↔ #9 `stream_error` | `src/app/api/sessions/[sessionId]/turns/route.ts:570-616` | `pauseReason === null`인 정규화 오류(= `transient` 전부: 타임아웃·5xx·네트워크·분류 불명)를 **무조건 `llm_rate_limited`/`retryable:true`** 로 접습니다. 그 결과 ① 계약 5.2절 `stream_error.code` 5종 중 `llm_timeout`·`llm_failed`가 **절대 나오지 않고**, ② 전이 표 **14행(`in_progress → paused`, `pause_reason='rate_limited'`, 백오프 60초 초과)** 과 **20행(`in_progress → failed`, `provider_permanent_error`/`context_corrupted`)** 이 **코드에 존재하지 않습니다**(`grep`: `'rate_limited'`·`'provider_permanent_error'`를 쓰는 코드 0건). 프로바이더가 계속 죽어 있으면 사용자는 "면접관이 답변을 정리하고 있습니다"만 반복해서 보고 세션은 `in_progress`에 남습니다 | 4.6절이 두 행의 담당을 **#9**로 지정했습니다. 백오프 소진(60초 초과) → `paused(rate_limited)` + `resumable_after = now()+Retry-After`(10.1절), 영구 오류 → `failSession(session,'provider_permanent_error',...)`. `stream_error.code`도 원인별로 `llm_timeout`/`llm_failed`를 구분해 내보내야 합니다 | `vercel-platform-engineer` (+ `shadcn-ui-engineer`: 코드별 문안) |
+| **R4** | medium | 계약 10.2절 판정 순서 ↔ 스트림 경로 | `src/lib/ai/provider.ts:134` | `runStream`은 **재시도하지 않는데** `normalizeProviderError(raw, ctx, MAX_ATTEMPTS)`(=4)로 부릅니다 → `errors.ts:125`의 "`attempt <= 1`이면 `transient`" 완충이 무력화되고, **면접 중 단 한 번의 401/403(또는 auth 마커가 섞인 일시 오류)** 으로 BYOK 세션이 즉시 `paused(byok_key_invalid)`가 됩니다 | 10.2절 규칙 2 — `key_invalid`는 **재시도 1회 후** 확정. 스트림 경로도 최소 1회 재시도하거나(첫 토큰 전이면 안전), 첫 실패는 `attempt = 1`로 넘겨 `transient`로 접고 `stream_error{retryable:true}`로 끝내야 합니다 | `vercel-platform-engineer` |
+| **R5** | medium | 계약 5.2절 SSE 4종 ↔ 구현 | `src/app/api/sessions/[sessionId]/turns/route.ts` 전역 | **`session_notice` 이벤트가 한 번도 전송되지 않습니다**(`grep -rn "session_notice" src/` → 0건). G4는 서버에서 `action='comfort'`로 덮어쓰기까지만 하고(`interviewer.ts:167`), UI가 3지 선택 다이얼로그를 띄울 신호가 없습니다. `rate_limit_fallback`·`pressure_capped`도 같습니다 | 계약 5.2절 표 3행 — `{kind, level, messageKo}`를 `utterance_done` 이전에 전송 | `vercel-platform-engineer` + `shadcn-ui-engineer` |
+| **R6** | medium | 4.7.3절 반납 관측 ↔ 코드 | `src/lib/session/lifecycle.ts:90·203·234·259·298` | 반납 5지점 어디에도 **`session_events(event_name='quota_released')` 기록이 없습니다**. 마이그레이션이 명시적으로 "함수는 `p_reason`을 저장하지 않고 **라우트가** `detail.reason`으로 남긴다"고 적어 둔 자리입니다(`20260911000300_release_session_quota_keep.sql:31`). 예약(`quota_reserved`)만 기록되므로 **원장이 어긋났을 때 반납 누락/이중 반납을 로그로 추적할 수 없습니다** | 각 반납 직후 `recordObservationEvent(sessionId, status, 'quota_released', trigger, { reason, released })` | `vercel-platform-engineer` |
+| **R7** | medium | 계약 5.4절 3e ↔ abort 경로 | `src/app/api/sessions/[sessionId]/turns/route.ts:377-387` | `interviewer_stream_aborted` 이벤트가 **META 파싱 실패(`missing === true`)일 때만** 기록됩니다. META가 정상 도착한 뒤 사용자가 끊으면 abort 기록이 남지 않습니다 | 5.4절 3e는 조건 없이 기록합니다 — `missing` 여부와 `aborted` 여부를 **분리**해 두 이벤트를 각각 남겨야 합니다 | `vercel-platform-engineer` |
+| **R8** | low | 계약 #2 ↔ 구현 | `src/app/api/sessions/route.ts:182-186` | `GET /api/sessions`가 `not_found`(404)를 돌려줍니다 | 이번 라운드 범위 밖이라 의도된 스텁이지만, 계약에 있는 경로가 404를 돌려주면 훅 라운드에서 "경로 오타"와 구분되지 않습니다. `501`(미구현)이 더 정확합니다 | `vercel-platform-engineer` |
+
+> **R1·R2·R3이 이번 라운드의 조치 대상입니다.** R2·R3은 전이 표가 코드의 유일한 사본이라는 성질의
+> **반대쪽 비용**입니다 — 표에 있는 조합이라는 이유로 `assertTransition`이 통과시키므로,
+> **"어느 라우트가 그 행의 담당인가"(4.6절)를 라우트가 스스로 한 번 더 확인해야 합니다.**
+
+### 8.2 통과 항목 (이번 라운드에 직접 대조한 것만)
+
+| 검증 | 방법 | 결과 |
+|---|---|---|
+| 전이 표 ↔ `transitions.ts` **독립 재대조** | `01_state_machine.md` 2절 표 35행을 위에서 아래로 읽어 `(from, to, 트리거, 담당)` 4열을 코드 배열과 1행씩 대조 | **34/34 일치 + 35행(행 삭제) 제외 처리 일치.** 7.4절의 주장을 QA가 재확인 — 행 순서·`row` 번호·`mvp:false`(31행 `[later]`)까지 같습니다. `CANCELABLE_FROM`이 파생하는 출발 상태도 **7개**(3·7·10·19·25·33·34행)로 4.2절과 일치 |
+| DB CHECK ↔ 코드 문자열 | `20260909000400`·`20260909000600` ↔ `status.ts`·`transitions.ts` | `status` 11값·`pause_reason` 5값·`funding_source` 2값·`session_events.trigger` 5값 **문자 단위 일치**. 한국어로 번역된 식별자 **0건** |
+| 반납 6지점 (과제 3) | 호출 그래프 추적 | `completeSession()` → `['flash_lite'] + 'completed'`(게이트가 `p_keep=6`), `settleEvaluatedSession()` → `null + 'settled'`(`p_keep=0`), `cancelSession`·`abandonSession`·`failSession` → 전량. **`DELETE /api/sessions/[sessionId]`에는 반납 호출이 없습니다**(`route.ts:43-47` 주석 포함) — `before delete` 트리거와의 이중 반납 없음 ✅ |
+| `p_keep` 계약 ↔ DB 함수 | `20260911000300_release_session_quota_keep.sql` ↔ `gate.ts:241-272` ↔ `database.types.ts:913-924` | 인자명·기본값·반환 형태 일치. `p_keep>0`이면 행을 `held`로 남기므로 정산 반납이 잔여 6을 가져갈 수 있습니다 ✅ |
+| BYOK NO_OP (과제 5) | 네 함수 진입부 | `peekCapacity`·`reserveSessionQuota`·`consumeSessionQuota`·`releaseSessionQuota` 전부 첫 문장이 `if (fundingSource !== "trial_shared") return NO_OP_*`. 라우트에 재원 `if`가 흩어진 곳 **0건** ✅ |
+| R9 동의 **현재 버전** 가드 (과제 5) | `prepare/route.ts:69-89` | `trial_consents`를 `consent_version = CURRENT_TRIAL_CONSENT_VERSION`으로 **대조**합니다 — 옛 버전 동의만 가진 사용자는 409 `trial_consent_required` + `details.requiredConsentVersion`. #41도 `consent_version_stale`로 옛 번들을 막습니다 ✅ |
+| 원문 키 유출 경로 (과제 4) | `apiKey`·`get_user_api_key`·`decrypted_secret`·`console.*` 전수 grep | 키가 닿는 지점은 `credentials.ts`(열거 불가 속성으로 심음)와 `providers/google.ts`(`x-goog-api-key` **헤더**, URL 쿼리 아님) 둘뿐. 프로바이더 예외는 `GoogleApiError{status,code,message}`로만 던지고 `normalizeProviderError`가 `{kind,retryable,pauseReason,context}`로 접습니다. **응답 바디(`ApiError.toBody()`)는 `code`·`message`·`details`만 직렬화하므로 `cause`가 나가지 않습니다.** `NEXT_PUBLIC_`는 3개(Supabase URL·anon·siteUrl)뿐 ✅ |
+| camelCase 변환 1회 (과제 1) | 매퍼 위치·DTO 필드 | 변환은 `serialize.ts`의 명시적 매퍼 4종(`toSessionDto`·`toQuestionDto`·`toTurnDto`·`toTrialConsentDto`)에서만. 범용 deep camelize 없음, DTO에 snake_case 필드 0건, 값(`status`·`persona`…)은 영어 원문 유지 ✅ |
+| 응답 봉투·상태 코드 (과제 1) | #3·#4·#5·#6·#7·#8·#13·#14·#15·#23·#33·#35·#41 ↔ 4절 표 | 전부 일치 — 단건 `{session:Session}`, 복합 `{session, openingQuestion}`/`{session, currentQuestion, lastInterviewerTurn}`, 삭제 `{ok:true}`, #3은 201, #6은 **202 + `{sessionId, status:'configuring', preparation}`**(최종 결과와 다른 타입), #41은 신규 201·재동의 200 ✅ |
+| 오류 형식 | `errors.ts` ↔ 계약 13절 | `code` 19종·기본 HTTP 상태 일치, `{error:{code,message,details?}}` 단일 형태, 성공 바디와 섞이지 않음, `Retry-After`는 `retryAfterSec`이 있을 때만 ✅ |
+| `StreamSessionStatus` (과제 6) | `turns/route.ts:79` ↔ 계약 5.2절·G8 | `Extract<SessionStatus,"in_progress"|"completed">`로 **좁혀서** 선언, `utterance_done` 페이로드 8필드가 계약 표와 필드명·타입 모두 일치(전부 camelCase), `utterance_chunk`는 `{seq,text}` ✅ |
+| SSE 헤더·수명 | `turns/route.ts:350-358` | `text/event-stream; charset=utf-8`·`no-cache, no-transform`·`x-accel-buffering: no`·15초 하트비트·`id:` 미전송(재개 미지원) ✅ |
+| 오디오 미저장 서버 장치 | `turns/route.ts:131-134` | `multipart/form-data`·`audio/*` → 415 ✅ |
+| RLS 경계 (과제 7) | 라우트별 클라이언트 선택 | **소유권 검사는 전부 사용자 문맥(`loadOwnedSession`)**, 쓰기만 `admin`. `sourceSessionId` 상속(#3)과 문서 소유 확인(#5·#6·#35)도 사용자 문맥 — 남의 문서·세션을 붙이는 경로 없음. 내부 워커는 `requireJobSecret`(timing-safe) ✅ |
+| 프롬프트 인젝션 방어 | `interviewer.ts:88-97·136-140`·`planner.ts:29-30·78-80` | 사용자 입력을 `<untrusted_*>`로 감싸고 `<`를 전각으로 치환해 태그 경계를 닫지 못하게 함 + 시스템 프롬프트에 신뢰 경계 문장 ✅ |
+| 언어 정책 | 프롬프트·오류 문구·식별자 | 런타임 프롬프트 2종 한국어, 사용자 노출 `message`/`messageKo` 전부 한국어, **코드 식별자(상태값·컬럼·필드·라우트·훅 이름) 한국어 번역 0건** ✅ |
+| 라우팅 | `route-for-status.ts` ↔ `src/app/**/page.tsx` | 11상태가 가리키는 5경로가 전부 실제 페이지 파일과 대응(라우트 그룹 `(app)`은 URL에서 제거) ✅ |
+| UI 제약 | `package.json` | shadcn 계열(`radix-ui`·`lucide-react`·`sonner`·`cva`) 외 UI 라이브러리 **0건** ✅ |
+
+### 8.3 이번 라운드에서도 **미검증**인 항목 (통과가 아닙니다)
+
+- [ ] **API ↔ 훅 경계 전체** — `src/hooks/`가 아직 없습니다. 봉투 언랩·202/최종 결과 혼동·스트림을 `res.json()`으로 읽는 사고는 **훅이 생긴 뒤에야** 검증할 수 있습니다. 계약 4절 "대응 훅" 열 41개 전부 열려 있습니다.
+- [ ] **SSE 실제 동작** — 청크 경계·`<<<META>>>` 보류(M8)·abort 확정분 저장을 **실행**으로 확인하지 못했습니다(정적 대조만). 프로바이더 키 없이 스트림을 돌릴 수 없습니다.
+- [ ] **C1 크론 5종** — 501 스텁이라 `paused→abandoned`(23행)·`paused→completed`(24행)·만료 예약 스윕(반납 6지점 #6)·`evaluating` 10분 워치독 전부 미구현·미검증.
+- [ ] **#16 `evaluate` 재시도(32행)·#18 `coach/retry` 재예약** — 라우트 자체가 없습니다(이번 라운드 범위 밖). `reserveRetryQuota`는 **호출자가 0명**입니다.
+- [ ] **#10~#12·#22·#24~#32·#34·#36~#40** — 범위 밖. 특히 **#12 `modality`(전이 표 12행)** 가 없어 음성↔텍스트 전환이 런타임에 존재하지 않습니다.
+- [ ] **RLS 라이브 재검증** — 이번 라운드는 라이브 SQL을 돌리지 않았습니다. 6절의 2026-09-11 결과를 **그대로 인용**한 것이지 재확인이 아닙니다.
+- [ ] **부분 반납 34 → 6 → 0의 런타임 실측** — R1 때문에 `settled` 반납에 도달하는 경로가 실제로 돌지 않습니다(코드 경로는 실재).
+- [ ] `evaluations`·`evaluation_scores`·`evaluation_citations` 저장 계약(9.1절 가중치·9.2절 UTF-16 오프셋) — 저장 코드가 아직 없습니다. `[확인 필요]`
