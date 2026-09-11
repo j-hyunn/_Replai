@@ -1,0 +1,62 @@
+# Supabase 로컬 스택 설정 (Supabase CLI)
+#
+# 사용: `supabase start` → `supabase db reset` (Docker 필요)
+# Docker를 쓸 수 없는 환경에서는 `supabase/dev/apply-local.sh`가 같은 마이그레이션을
+# 맨몸 PostgreSQL에 적용합니다. 두 경로 모두 `supabase/migrations/`의 파일이 원본입니다.
+
+project_id = "replai"
+
+[api]
+enabled = true
+port = 54321
+# vault 스키마는 **노출하지 않습니다** (04_data_layer.md 3.15절 5중 강제의 4번).
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[db.migrations]
+enabled = true
+
+[studio]
+enabled = true
+port = 54323
+
+[inbucket]
+# 이 서비스에는 이메일 발송 경로가 하나도 없습니다(D2·D8).
+enabled = false
+
+[storage]
+enabled = true
+# documents 버킷의 상한은 마이그레이션 #9가 버킷 단위로 10 MiB를 겁니다(7.1절).
+file_size_limit = "10MiB"
+
+[auth]
+enabled = true
+site_url = "http://localhost:3000"
+additional_redirect_urls = ["http://localhost:3000"]
+jwt_expiry = 3600
+enable_refresh_token_rotation = true
+refresh_token_reuse_interval = 10
+enable_signup = true
+# 익명 로그인은 쓰지 않습니다 — 모든 데이터가 user_id 소유권으로 갈립니다.
+enable_anonymous_sign_ins = false
+
+[auth.email]
+enable_signup = true
+# ★ D8 — 이메일 확인 끔. 무료 티어 SMTP 한도와 충돌하고, 이 서비스에는 발송 경로가 없습니다.
+#   원격 프로젝트에도 같은 설정이 필요합니다(배포 체크리스트, 04_data_layer.md 6.1절).
+enable_confirmations = false
+secure_password_change = false
+
+# 소셜 로그인은 [later] (01_product_spec.md 4.1)
+
+[realtime]
+enabled = true
+
+[analytics]
+enabled = false

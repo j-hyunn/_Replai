@@ -30,3 +30,7 @@ yarn-error.log*
 # NOTE: docs/ and _workspace/ are intentionally NOT ignored.
 # The spec, API contract, and rubric under _workspace/ are the source of truth
 # that qa-inspector cross-checks against, so they are versioned with the code.
+
+# supabase local stack (CLI가 만드는 런타임 디렉터리)
+supabase/.branches
+supabase/.temp
