@@ -51,6 +51,15 @@
   예외 메시지에 **기존 세션 id를 담아** UI가 "이어서 하기" 링크를 만들 수 있게 합니다.
   존재 확인과 삽입 사이의 경쟁은 **사용자 단위 `pg_advisory_xact_lock`**으로 닫습니다(부분 unique 인덱스는 기각 — 근거는 3.14.1절).
   **테이블·컬럼·인덱스·마이그레이션 파일 수는 변경 없습니다**(17개 / 22개 / 14개). BYOK 세션은 예약 자체를 하지 않으므로 해당 없습니다.
+- 2026-09-11 **D34 반영 — 무료 티어 실측으로 예약량이 단일 버킷으로 수렴.** `02_ai_architecture.md` 8.3.1절 재유도분을
+  이 문서의 예시·설명에 반영합니다. 세션당 예약량이 `{pro:3, flash:4, flash_lite:26}` → **`{pro:0, flash:0, flash_lite:34}`**,
+  하루 체험 정원의 결정자가 `pro` → **`flash_lite`**(유효한도 425 ÷ 34 = **12세션**)로 바뀝니다.
+  **스키마는 한 글자도 바뀌지 않습니다** — `model_bucket` CHECK 값 3종, 복합 PK, 함수 시그니처,
+  `pro → flash → flash_lite` 처리 순서 **전부 그대로**이고, `flash`·`pro`는 **예약량 0인 휴면 버킷**이 될 뿐입니다.
+  따라서 **새 마이그레이션 없음**(17개 / 22개 / 14개 유지). 바뀌는 것은 환경변수 주입값뿐입니다.
+  **구현 불변식 1건**: 예약 루프는 요청량 0인 버킷을 `continue`로 건너뛰어야 합니다 — 건너뛰지 않으면
+  `limit_calls = 0`인 원장 행이 생겨 모든 예약이 `quota_exhausted:pro`로 죽습니다.
+  적용된 마이그레이션 `20260910000100_ai_quota.sql`은 **이미 `continue when v_target <= 0;`으로 지키고 있습니다**(확인 완료).
 
 ---
 
@@ -174,6 +183,7 @@ storage_cleanup_queue.status  : pending | done | failed
 
 ```
 ai_quota_ledger.model_bucket        : flash_lite | flash | pro        (원본: 02_ai_architecture.md 8.3.1절)
+                                      ↑ 2026-09-11 D34: 값 3종은 그대로. flash·pro는 예약량 0인 휴면 버킷
 ai_quota_reservations.model_bucket  : flash_lite | flash | pro        (〃)
 ai_quota_reservations.status        : held | released | overflow      (〃 8.3.2절)
 user_api_keys.provider              : google
@@ -672,9 +682,9 @@ nullable 완화는 하지 않습니다 — 지표 1·2 쿼리에 `is not null` �
 
 | `event_name` | 언제 | `detail` |
 |---|---|---|
-| `quota_reserved` | #6 `prepare`의 예약 성공 | `{ "buckets": {"pro":3,"flash":4,"flash_lite":26}, "quotaDate": "2026-09-10" }` |
+| `quota_reserved` | #6 `prepare`의 예약 성공 | `{ "buckets": {"pro":0,"flash":0,"flash_lite":34}, "quotaDate": "2026-09-11" }` |
 | `quota_released` | 반납 시(완주·정산·취소·포기·실패·만료) | `{ "buckets": {...}, "reason": "completed\|settled\|canceled\|abandoned\|failed\|expired" }` |
-| `quota_overflow` | `consumed_calls > reserved_calls` 발생 | `{ "bucket": "flash_lite", "reserved": 26, "consumed": 27 }` |
+| `quota_overflow` | `consumed_calls > reserved_calls` 발생 | `{ "bucket": "flash_lite", "reserved": 34, "consumed": 35 }` |
 
 - **스키마 변경이 없습니다.** `event_name`에는 값 CHECK가 없고 길이 CHECK(1–64자)만 있습니다.
   값 목록을 CHECK로 고정하지 않는 이유는 `failure_reason`과 같습니다(6.4절) — 관측 이벤트가 늘 때마다
@@ -728,9 +738,17 @@ nullable 완화는 하지 않습니다 — 지표 1·2 쿼리에 `is not null` �
   기본값을 리터럴로 박지 않는 이유: DB 기본값과 계약 문서가 어긋나면 **틀린 버전이 조용히 기록**되고,
   버전을 올릴 때마다 마이그레이션이 필요해집니다. 값의 원본은 애플리케이션 상수 한 곳이어야 합니다.
   `rubric_version`(별도 컬럼)과 **다른 축**입니다 — 채점 기준이 그대로여도 입출력 스키마는 바뀔 수 있습니다.
-- **`provider`** — 프로바이더 식별자(`anthropic` / `openai` 등)를 담고, 구체 모델 ID는 기존 `model_name`에 그대로 둡니다.
+- **`provider`** — 그 평가를 **실제로 수행한** 프로바이더 식별자를 담고, 구체 모델 ID는 기존 `model_name`에 그대로 둡니다.
+  **D11(무료 티어 Google 단독, `02_ai_architecture.md` 4.2절)에 따라 현재 기록되는 값은 `google` 하나뿐입니다.**
   둘을 한 컬럼에 합치지 않는 이유: 폴백 사다리(`01_state_machine.md` 4절)가 프로바이더를 갈아탈 수 있고,
   "어느 프로바이더에서 재시도율이 높은가"는 문자열 파싱 없이 집계할 수 있어야 합니다.
+  - **이 컬럼에는 허용값 CHECK를 걸지 않습니다**(길이 40자 제한뿐). 관측용 사후 기록이지 입력 검증 지점이 아니고,
+    `02_ai_architecture.md` 4.4절의 추상화 계층이 프로바이더를 갈아타는 순간(`providers/anthropic.ts` 껍데기)
+    **마이그레이션 없이** 새 값이 기록될 수 있어야 합니다. 허용값을 좁히는 것은 서버 상수(`roles.ts`)의 일입니다.
+  - **`user_api_keys.provider`(3.15절)와 혼동하지 마십시오 — 다른 컬럼이고 다른 규칙입니다.** 그쪽은 사용자가
+    연결하는 키의 프로바이더이고 `check (provider in ('google'))`로 **좁게 막혀 있습니다.** BYOK가 Gemini 키
+    전용인 것은 설계상 의도입니다: 역할별 모델 매핑(`roles.ts`)이 전부 Gemini 모델이라 다른 프로바이더의 키를
+    받아도 부를 모델이 없습니다. 반면 이 `evaluations.provider`는 **서버가 고른 결과를 적는 칸**입니다.
 - **인덱스를 두지 않는 이유.** 세 컬럼 모두 **읽기 대상이지 검색 대상이 아닙니다.** `coach_payload`는 리포트가
   `evaluation_id`로 찾은 뒤 통째로 읽고, 나머지 둘은 회귀 분석용 배치 집계입니다. jsonb GIN 인덱스는
   본문 크기에 비례해 커지므로 무료 티어에서 특히 비쌉니다. 조회 경로가 생기기 전에는 만들지 않습니다.
@@ -931,7 +949,10 @@ create trigger trg_documents_cleanup
 | `denied_count` | int | not null default 0, `check (denied_count >= 0)` — 그날 거절 횟수. **0이 아니면 정원 < 실수요 신호** |
 | `created_at` / `updated_at` | timestamptz | not null default now() (`set_updated_at()` 트리거) |
 
-- **하루 3행**입니다(버킷 3개). PK가 곧 조회 인덱스이므로 **추가 인덱스 없음.**
+- **하루 최대 3행**입니다(버킷 3개). **2026-09-11 D34 이후 실제로는 하루 1행(`flash_lite`)만 생깁니다** —
+  `flash`·`pro`는 예약량 0인 휴면 버킷이고, **요청량 0인 버킷은 원장 행을 만들지 않고 건너뛰기 때문입니다**
+  (`02_ai_architecture.md` 8.3.1·8.3.5절, 3.14.1절 함수 표). 값 3종·복합 PK·CHECK는 **구조상 그대로**입니다.
+  PK가 곧 조회 인덱스이므로 **추가 인덱스 없음.**
 - **`limit_calls`를 행 생성 시점에 박는 것이 핵심입니다.** DB는 환경변수를 읽을 수 없으므로
   애플리케이션이 `floor(AI_RPD_LIMIT_<BUCKET> × (1 − AI_QUOTA_SAFETY_MARGIN_PCT/100))`을 계산해
   예약 함수의 `p_limits jsonb` 인자로 넘깁니다. 하루 도중 환경변수를 바꿔도 **그날의 판정은 흔들리지 않습니다.**
@@ -966,7 +987,9 @@ create index idx_quota_res_held on public.ai_quota_reservations (quota_date) whe
   **세션의 재원을 확인해 `byok`이면 예외를 던집니다**(아래).
 - **한 사용자는 동시에 `held` 예약을 한 세션만 가집니다**(D30). `trial_consumed_at`은 첫 주질문 응답 시 기록되는데
   예약은 `prepare`에서 잡히므로, 그 틈에 세션을 여러 개 만들고 `prepare`만 반복하면 **실제 체험은 0회인데
-  `pro` 3 × N개를 동시에 점유**할 수 있습니다. `pro` 버킷이 체험 정원을 결정하므로 **한 사용자가 그날 전체 정원을 잠급니다.**
+  `flash_lite` 34 × N개를 동시에 점유**할 수 있습니다. **2026-09-11 D34 이후 `flash_lite`가 혼자 체험 정원을
+  결정하므로**(유효한도 425 ÷ 34 = 하루 12세션), 탭 12개면 **한 사용자가 그날 전체 정원을 잠급니다.**
+  (D34 이전 초안은 이 자리에 `pro` 3을 적었습니다 — `pro`는 무료 RPD가 0이라 이제 예약 자체를 하지 않습니다.)
   악의가 없어도 탭을 몇 개 열어두면 발생합니다. 강제 지점은 `reserve_session_quota()`입니다(아래).
 - **RLS 켜고 정책 0개.** 3.13절과 같은 이유입니다.
 
@@ -977,7 +1000,7 @@ create index idx_quota_res_held on public.ai_quota_reservations (quota_date) whe
 
 | 함수 | 시그니처 | 하는 일 |
 |---|---|---|
-| `reserve_session_quota` | `(p_session_id uuid, p_quota_date date, p_request jsonb, p_limits jsonb) returns table(model_bucket text, granted int, held_after int, limit_calls int)` | 진입부에서 **① 재원 가드**(BYOK 거절) → **② 동시 예약 가드**(D30, 사용자당 `held` 세션 1개) → 그다음 **버킷 처리 순서 `pro → flash → flash_lite` 고정**(희소한 것 먼저 + 데드락 회피). 버킷마다 ① 원장 행을 `p_limits`의 값으로 `on conflict do nothing` 생성 → ② 기존 예약이 있으면 목표치와의 **차이만** 산출(멱등) → ③ 조건부 UPDATE(`held_calls + n <= limit_calls`) → 0행이면 `raise exception 'quota_exhausted:<bucket>'`으로 **전체 롤백** → ④ 예약 행 upsert(unique 충돌 시 top-up, `status='released'`였으면 `held`로 되돌림) |
+| `reserve_session_quota` | `(p_session_id uuid, p_quota_date date, p_request jsonb, p_limits jsonb) returns table(model_bucket text, granted int, held_after int, limit_calls int)` | 진입부에서 **① 재원 가드**(BYOK 거절) → **② 동시 예약 가드**(D30, 사용자당 `held` 세션 1개) → 그다음 **버킷 처리 순서 `pro → flash → flash_lite` 고정**(희소한 것 먼저 + 데드락 회피). **버킷마다 맨 먼저 요청량을 보고 `<= 0`이면 `continue`로 건너뜁니다**(D34 — 8.3.1·8.3.5절. 건너뛰지 않으면 휴면 버킷에 `limit_calls = 0` 원장 행이 생겨 매번 `quota_exhausted:pro`로 전체 롤백됩니다). 요청량이 있는 버킷마다 ① 원장 행을 `p_limits`의 값으로 `on conflict do nothing` 생성 → ② 기존 예약이 있으면 목표치와의 **차이만** 산출(멱등) → ③ 조건부 UPDATE(`held_calls + n <= limit_calls`) → 0행이면 `raise exception 'quota_exhausted:<bucket>'`으로 **전체 롤백** → ④ 예약 행 upsert(unique 충돌 시 top-up, `status='released'`였으면 `held`로 되돌림) |
 | `release_session_quota` | `(p_session_id uuid, p_buckets text[] default null, p_reason text default 'settled') returns table(model_bucket text, released int)` | `status='held'` 행마다 `released := greatest(reserved_calls - consumed_calls, 0)`, 원장 `held_calls := greatest(held_calls - released, 0)`, 행을 `released`로. `p_buckets`가 null이면 전체 |
 | `consume_session_quota` | `(p_session_id uuid, p_bucket text, p_n int default 1) returns int` | 예약 행의 `consumed_calls += n`. **행이 없으면** `reserved_calls=0, consumed_calls=n, status='overflow'`로 삽입하고 원장 `held_calls`를 **조건 없이** `+n`(한도 초과를 허용해야 다음 예약이 정확히 막힙니다) |
 
@@ -2215,7 +2238,7 @@ indexOf ≥ 0  →  quote_start = idx, quote_end = idx + len(quote_text)
 | R8 | 13.6.1절 함수 시그니처 vs 3.14.1절 | `reserve_session_quota`에 **`p_limits jsonb` 인자를 추가**했습니다. 원본 표에는 없지만 같은 절 마지막 문단이 "계산은 애플리케이션이 해서 넘기라"고 지시했고, **DB는 환경변수를 읽을 수 없어** 원장 행을 만들 때 `limit_calls`를 어디선가 받아야 합니다 | 원본의 지시를 시그니처로 옮긴 것. `ai-interview-architect`에게 전달(12.2절) |
 | R9 | 6.5.4절 "문구 버전" vs 3.16절 트리거 | 트리거는 **동의 행의 존재**만 검사합니다. "**현재** 버전에 동의했는가"는 현재 버전이 애플리케이션 상수라 DB가 알 수 없습니다. 문구를 올린 뒤 옛 버전 동의만 가진 사용자가 DB 층은 통과합니다 | **서버 가드 책임**(409). DB는 마지막 방어선이지 유일한 방어선이 아님 |
 | R10 | 3.15절 `status='connected'` vs 실제 유효성 | 키가 유효한지는 **프로바이더만 압니다.** 사용자가 Google 콘솔에서 키를 지워도 우리 행은 `connected`인 채로 남고, 다음 호출에서야 알게 됩니다(→ `pause_reason='byok_key_invalid'`) | 구조적 한계. `last_verified_at`이 "언제 기준의 사실인가"를 남기는 것이 이 컬럼의 존재 이유 |
-| R11 | 8.3.1절 예약량 vs `limit_calls` 실측값 | 예약량(26/4/3)과 한도 3종이 **전부 환경변수**이고 아직 측정 전입니다(8.3.8절). 한도가 없으면 게이트는 **fail-open**입니다 — 그동안 원장 행이 만들어지지 않아 이 테이블들은 **비어 있는 채로 존재**합니다 | 스키마는 영향 없음. `05_deploy.md` 배포 전 체크리스트 항목 |
+| R11 | 8.3.1절 예약량 vs `limit_calls` 실측값 | **2026-09-11 D34로 해소.** AI Studio 레이트 리밋 대시보드 **실측**(무료 키)으로 확정됐습니다 — 추정값이 아닙니다. 예약량은 `26/4/3`(flash_lite/flash/pro)에서 **`flash_lite` 34 단일 버킷**으로 바뀌었고 `flash`·`pro`는 **휴면(예약 0)** 입니다. 한도는 `AI_RPD_LIMIT_FLASH_LITE = 500`(실측 RPD), 안전 여유 15% → 유효한도 425, 하루 체험 정원 `floor(425/34) = 12`세션. `pro` 계열은 **무료 RPD 0**이라 예약 자체가 불가능합니다 | 스키마는 영향 없음(값 3종·PK·CHECK 그대로). 남은 것은 환경변수 주입뿐 — `05_deploy.md` 배포 전 체크리스트. **구현 주의: 요청량 0인 버킷은 루프에서 `continue`로 건너뛰어야 합니다**(3.14.1절) |
 
 **3차 조정에서 발견한 계약 위반은 없습니다.** D27·D28·D29는 평가자·코치 입출력 계약(`02_ai_contracts.md`)을
 전혀 건드리지 않습니다 — 바뀐 것은 **호출을 시작할 수 있는가**와 **누구의 키로 호출하는가**이지
