@@ -23,11 +23,19 @@ type GoogleErrorPayload = { error?: { code?: number; status?: string; message?: 
 class GoogleApiError extends Error {
   readonly status: number;
   readonly code?: string;
-  constructor(status: number, code: string | undefined, message: string) {
+  /** `Retry-After` 헤더(초). 계약 10.1절이 `resumable_after` 계산에 쓰는 값입니다. */
+  readonly retryAfterSec: number | null;
+  constructor(
+    status: number,
+    code: string | undefined,
+    message: string,
+    retryAfterSec: number | null = null,
+  ) {
     super(message);
     this.name = "GoogleApiError";
     this.status = status;
     this.code = code;
+    this.retryAfterSec = retryAfterSec;
   }
 }
 
@@ -71,7 +79,21 @@ async function readError(response: Response): Promise<GoogleApiError> {
     response.status,
     payload.error?.status,
     payload.error?.message ?? `google api error ${response.status}`,
+    retryAfterSecOf(response),
   );
+}
+
+/** `Retry-After`는 초 또는 HTTP-date입니다. 둘 다 읽고, 해석되지 않으면 `null`입니다. */
+function retryAfterSecOf(response: Response): number | null {
+  const raw = response.headers.get("retry-after");
+  if (!raw) return null;
+
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds);
+
+  const at = Date.parse(raw);
+  if (Number.isNaN(at)) return null;
+  return Math.max(0, Math.ceil((at - Date.now()) / 1000));
 }
 
 type GenerateContentResponse = {
