@@ -546,8 +546,11 @@ else:  // neutral_transition / comfort / wrap_up
 
 **`utterance_done.sessionStatus`** (2026-09-09 추가 — F7)
 
-값은 `01_state_machine.md` 1절의 상태 값을 **문자 단위로 그대로** 씁니다(한국어 번역 금지). 타입은 API 계약의
-`SessionStatus` 유니온과 같지만, 이 이벤트에 **실제로 실려 나갈 수 있는 값은 두 개뿐**입니다.
+값은 `01_state_machine.md` 1절의 상태 값을 **문자 단위로 그대로** 씁니다(한국어 번역 금지). 이 필드는
+`SessionStatus`(11값)와 **같은 문자열 공간의 2값 부분집합이며, 좁힌 것은 의도입니다 — 누락이나 drift가 아닙니다**
+(QA G8). `05_api_contract.md` 12절에 `StreamSessionStatus = Extract<SessionStatus, 'in_progress' | 'completed'>`
+로 이름이 붙어 있고, 같은 문서 5.2절이 이 필드에 그 타입을 씁니다. **세션 객체의 `status`는 계속 11값입니다** —
+폭을 맞추려고 이 이벤트를 넓히지 마세요.
 
 | 값 | 언제 |
 |---|---|
@@ -561,6 +564,12 @@ else:  // neutral_transition / comfort / wrap_up
 (`rate_limited`)뿐 아니라 **D28의 `byok_key_invalid`·`byok_quota_exhausted`도 같습니다.** 그래서 이 이벤트의
 `sessionStatus` 가능값은 D28 이후에도 여전히 **`in_progress` / `completed` 두 개뿐**입니다. `evaluating`
 이후의 상태도 이 스트림에서는 관측되지 않습니다(평가는 D18에 따라 `completed` 전이의 서버 부작용으로 별도 등록됩니다).
+
+나머지 상태도 같은 이유로 이 필드에 실릴 수 없습니다. **스트림은 `in_progress`에서만 시작하므로**
+(`01_state_machine.md` 2절 — `ready → in_progress`는 면접 시작, 이후 발화는 전부 `in_progress` 자기 전이)
+`created`·`configuring`·`ready`는 스트림 이전 상태이고, `failed`는 `stream_error`(`llm_failed`)로 끝나는
+경로이며, `canceled`·`abandoned`는 스트림 밖의 별도 요청·워치독으로 일어나 이 이벤트를 방출하지 않습니다.
+**즉 2값은 상태 머신이 강제하는 결과이지 좁게 적어 둔 편의가 아닙니다.**
 
 **스트림 수명 규약** (`05_api_contract.md` 5.2절과 동일 — 원본은 이 절입니다)
 

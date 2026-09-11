@@ -346,7 +346,7 @@ type InterviewStreamState = {
   done: {                                // utterance_done 페이로드 (스트림당 정확히 1회)
     turnId: string; questionId: string | null; parentQuestionId: string | null;
     depth: number; questionKind: QuestionKind | null;
-    action: InterviewerAction; targetAxis: Axis | null; sessionStatus: SessionStatus;
+    action: InterviewerAction; targetAxis: Axis | null; sessionStatus: StreamSessionStatus;
   } | null;
   notice: { kind: 'distress_guard' | 'pressure_capped' | 'rate_limit_fallback';
             level: number | null; messageKo: string } | null;
@@ -383,8 +383,11 @@ function useInterviewStream(sessionId: string): {
 말하게 됐습니다. 최종 페이로드는 `turnId` `questionId` `parentQuestionId` `depth` `questionKind`
 `action` `targetAxis` **`sessionStatus`** 8개입니다.
 
-- 타입은 `SessionStatus`지만 **실 가능값은 `in_progress` | `completed` 둘뿐**입니다. UI는 이 둘만 분기하고,
-  나머지 값이 오면 `in_progress`로 취급합니다(모르는 값 때문에 화면이 멈추면 안 됩니다).
+- 타입은 **`StreamSessionStatus` = `'in_progress' | 'completed'`** 입니다(`05_api_contract.md` 12절).
+  세션 객체의 `status`(`SessionStatus`, 11값)보다 좁은 것은 **의도된 부분집합**이며, 스트림이
+  `in_progress`에서만 시작한다는 상태 머신의 결과입니다(QA G8 종결 — `02_ai_contracts.md` 3.5절이 원본).
+  UI는 이 둘만 분기하고, **런타임 방어로** 그 외 문자열이 오면 `in_progress`로 취급합니다
+  (타입상 불가능하지만 모르는 값 때문에 화면이 멈추면 안 됩니다).
 - **`sessionStatus === 'completed'`** → 입력창(`AnswerInputVoice`/`AnswerInputText`)을 닫고,
   마지막 발화의 TTS 재생이 끝난 뒤 `/sessions/{id}/report`로 이동합니다.
   **`useCompleteSession`을 부르지 않습니다** — 서버가 이미 옮겼습니다(#9의 종료 조건 경로).

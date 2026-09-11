@@ -6,6 +6,7 @@
 
 ## 변경 로그
 - 2026-09-09 최초 작성. 지표 6(꼬리질문 깊이)용 `questions.parent_question_id`, 지표 4·5용 피드백·이의 엔티티, 전사 정정용 `transcript_raw` 포함.
+- 2026-09-11 **QA 2차 G5 대응.** `pause_reason` 5개 값(D27 재원 분류·D28 BYOK 오류 2종 포함), `funding_source`, D27~D30 신설 5개 테이블(`ai_quota_ledger`·`ai_quota_reservations`·`trial_consents`·`user_api_keys`·`account_events`)을 개념 모델에 반영. 내용은 이미 갱신돼 있었고 이 로그 갱신만 누락돼 있었음.
 
 ---
 

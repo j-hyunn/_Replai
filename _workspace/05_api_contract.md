@@ -706,12 +706,20 @@ X-Accel-Buffering: no
 | event | data | 비고 |
 |---|---|---|
 | `utterance_chunk` | `{ "seq": number, "text": string }` | 문장 단위 10~80자. **`<<<META>>>` 이후 텍스트는 절대 포함되지 않는다** |
-| `utterance_done` | `{ "turnId": string, "questionId": string \| null, "parentQuestionId": string \| null, "depth": number, "questionKind": "main"\|"follow_up"\|null, "action": InterviewerAction, "targetAxis": Axis \| null, "sessionStatus": SessionStatus }` | 전부 **서버 확정값**(3.4절 후처리 결과). 모델 원본 META가 아니다. `sessionStatus`로 종료 조건 충족(`completed`)을 함께 알린다 |
+| `utterance_done` | `{ "turnId": string, "questionId": string \| null, "parentQuestionId": string \| null, "depth": number, "questionKind": "main"\|"follow_up"\|null, "action": InterviewerAction, "targetAxis": Axis \| null, "sessionStatus": StreamSessionStatus }` | 전부 **서버 확정값**(3.4절 후처리 결과). 모델 원본 META가 아니다. `sessionStatus`로 종료 조건 충족(`completed`)을 함께 알린다. **타입은 `SessionStatus`(11값)가 아니라 그 2값 부분집합 `StreamSessionStatus`입니다** — 아래 주석 참조 |
 | `session_notice` | `{ "kind": "distress_guard"\|"pressure_capped"\|"rate_limit_fallback", "level": number \| null, "messageKo": string }` | G4 발동 시 UI가 3지 선택 다이얼로그를 띄우는 신호 |
 | `stream_error` | `{ "code": "llm_timeout"\|"llm_rate_limited"\|"llm_failed"\|"byok_key_invalid"\|"byok_quota_exhausted", "retryable": boolean, "messageKo": string }` | 폴백 사다리(`01_state_machine.md` 4절) 연동. **HTTP 상태는 이미 200이므로 오류는 이 이벤트로만 전달된다**. **`byok_*` 2종은 2026-09-10 신규(D28)** — `funding_source='byok'`에서만 나오고 `retryable:false`이며, 세션은 대응하는 `pause_reason`으로 `paused`가 된다(10.2절). **`messageKo`에 프로바이더 원문을 넣지 않는다** |
 
 - **`utterance_done`은 스트림당 정확히 1회**이며 마지막 이벤트입니다. `stream_error`가 나간 경우에는
   `utterance_done`을 보내지 않고 스트림을 닫습니다.
+- **`utterance_done.sessionStatus`의 타입은 `StreamSessionStatus` = `'in_progress' | 'completed'`** 입니다
+  (12절에 정의). 세션 객체의 `status`(`SessionStatus`, 11값)와 **같은 문자열 공간이지만 폭이 다릅니다** —
+  좁힌 것이지 누락이 아닙니다. 스트림은 `in_progress`에서만 시작하고(`01_state_machine.md` 2절),
+  그 스트림이 끝난 뒤의 상태는 계속(`in_progress`) 아니면 종료 조건 충족(`completed`) 둘뿐입니다.
+  `paused`(`rate_limited`·`byok_key_invalid`·`byok_quota_exhausted`)와 `failed`는 전부 `stream_error`로
+  끝나 `utterance_done` 자체가 나가지 않고, `canceled`는 스트림 밖의 별도 요청이며, `evaluating` 이후는
+  `completed` 전이의 서버 부작용이라 이 스트림에서 관측되지 않습니다.
+  **원본은 `02_ai_contracts.md` 3.5절**(`utterance_done.sessionStatus` 항)입니다.
 - 15초마다 SSE 주석 하트비트(`: ping\n\n`)를 보내 중간 프록시의 유휴 종료를 막습니다.
 - **프론트는 이 응답에 `res.json()`을 호출하면 안 됩니다.** 표의 "스트리밍" 열이 이 사고를 막기 위한 열입니다.
 
@@ -1347,6 +1355,12 @@ export const dynamic = 'force-dynamic';   // 인증 응답이 캐시되면 남�
 type SessionStatus =
   | 'created' | 'configuring' | 'ready' | 'in_progress' | 'paused'
   | 'completed' | 'evaluating' | 'evaluated' | 'failed' | 'abandoned' | 'canceled';
+// SSE `utterance_done.sessionStatus` 전용 부분집합. 의도적으로 2값입니다(QA G8).
+// 스트림은 in_progress에서만 시작하고, 끝난 뒤 관측 가능한 상태는 계속/종료 둘뿐입니다.
+// paused·failed는 stream_error로 끝나 utterance_done이 나가지 않고, canceled는 스트림 밖 요청,
+// evaluating 이후는 completed 전이의 서버 부작용입니다. 근거: 01_state_machine.md 2절·3절,
+// 원본 정의: 02_ai_contracts.md 3.5절.
+type StreamSessionStatus = Extract<SessionStatus, 'in_progress' | 'completed'>;
 // PauseReason은 2026-09-10 D28로 3개 → 5개가 됐습니다. 재개 패널이 5종을 전부 분기해야 합니다.
 type PauseReason  = 'user_requested' | 'rate_limited' | 'connection_lost'
                   | 'byok_key_invalid' | 'byok_quota_exhausted';   // ★ 신규 2종 — funding_source='byok'에서만

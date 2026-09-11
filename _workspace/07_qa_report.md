@@ -7,22 +7,27 @@
 >
 > **2026-09-11 3차 재검증 반영.** 타 에이전트들이 보고한 G1~G4 해소 주장을 **QA가 파일 현재 상태를 직접 다시 읽어**
 > 독립 확인했습니다(보고 전달이 아니라 재검증입니다). **네 건 모두 확인 — 종결.** 같은 기회에 medium·low도 훑어
-> **G5·G6·G10·G11 종결**을 확인했고, **G7·G8·G9는 2차 시점 그대로 열려 있음**을 확인했습니다.
+> **G5·G6·G10·G11 종결**을 확인했고, 그 시점엔 **G7·G8·G9가 2차 시점 그대로 열려 있음**을 확인했습니다.
 > G4의 라이브 SQL 대조는 **이 리포트에서 처음으로 코드를 읽은 항목**입니다
 > (`supabase/migrations/20260910000100_ai_quota.sql` — 그 밖의 런타임 항목은 여전히 6절 "미검증").
+>
+> **[2026-09-11 후속 갱신] G7·G8·G9도 전부 종결.** `product-architect`(G7, `01_rubric.md` 총점 자릿수
+> 명시), `ai-interview-architect`(G8, `utterance_done.sessionStatus`를 `StreamSessionStatus`로 좁힘),
+> `supabase-engineer`(G9, `evaluations.provider`와 `user_api_keys.provider` 혼동 정정)가 각각 조치했고,
+> QA가 다시 직접 대조해 확인했습니다. **2차 미결 항목 11건이 이제 전부 종결됐습니다.**
 
 ## 요약
 
-> **2026-09-11 3차 재검증 — high 4건 전부 종결(G1~G4). medium·low 3건은 아직 열려 있습니다(G7·G8·G9).**
-> 다른 에이전트의 "해소" 보고를 받아 **QA가 파일 현재 상태를 직접 다시 읽어** 확인한 결과입니다.
-> **"2차 미결 항목 11건 전부 종결"은 아직 사실이 아닙니다** — 아래 종결 현황 표를 보세요.
+> **2026-09-11 최종 — 2차 QA의 미결 11건(high 4 · medium 3 · low 4) 전부 종결.**
+> high는 G1~G4, medium은 G5~G7, low는 G8~G11 — 아래 종결 현황 표와 4·7절에 소유자별 근거가 있습니다.
+> 전부 문서 정합성 항목이었고 런타임 위험이 있는 항목은 아니었습니다(런타임 검증은 여전히 6절 "미검증").
 
 | 심각도 | 2차 건수 | 1차 대비 | **3차 재검증(2026-09-11) 종결 현황** |
 |---|---|---|---|
 | critical | **0** | 2 → 0 (**둘 다 해소**) | — |
 | high | **4** | 6 → 4 (1차 6건 전부 해소, **신규 4건**) | **4 / 4 종결** ✅ G1·G2·G3·G4 |
-| medium | 3 | | **2 / 3 종결** — G5·G6 ✅ / **G7 미해소** |
-| low | 4 | | **2 / 4 종결** — G10·G11 ✅ / **G8·G9 미해소** |
+| medium | 3 | | **3 / 3 종결** — G5·G6 ✅ / **G7 ✅종결(2026-09-11 `product-architect` 조치)** |
+| low | 4 | | **4 / 4 종결** — G8·G10·G11 ✅ / **G9 ✅종결(2026-09-11 `supabase-engineer` 조치)** |
 
 **3차 재검증의 성격.** 이번 라운드는 새 대조가 아니라 **타 에이전트 보고의 독립 확인**입니다.
 네 건의 high 주장(G1~G4)은 **전부 파일 현재 상태와 일치**했습니다. 다만 함께 확인한 medium·low에서
@@ -84,33 +89,39 @@
 
 ### medium
 
-> **2026-09-11 3차 재검증.** G5 ✅종결 · G6 ✅종결 · **G7 미해소(그대로 열려 있습니다)**. 근거는 표 아래.
+> **2026-09-11 3차 재검증.** G5 ✅종결 · G6 ✅종결 · G7 미해소.
+> **2026-09-11 갱신 — G7도 `product-architect` 조치로 ✅종결. medium 3건 전부 종결입니다.** 근거는 표 아래.
 
 | # | 심각도 | 경계 | 위치 | 현재 상태 | 기대 상태 | 고칠 쪽 |
 |---|---|---|---|---|---|---|
 | ~~**G5**~~ ✅종결 | medium | 도메인 모델 ↔ 전 문서 | `01_domain_model.md:98`, `:54-220`(3절 엔티티 11개), 문서 전역 | 09-09 이후 **무갱신**입니다. `pause_reason`이 **3개**(`user_requested`/`rate_limited`/`connection_lost`)로 남아 있고, `funding_source` 컬럼과 신규 테이블 5개(`ai_quota_ledger`·`ai_quota_reservations`·`user_api_keys`·`trial_consents`·`account_events`)가 **하나도 없습니다.** `:48`은 "모든 테이블이 사용자 데이터를 담으므로 예외 없이 RLS"라고 적는데, 신규 5개 중 4개는 **정책 0개(서버 전용)** 라 이 서술이 오도합니다 | CLAUDE.md 라우팅 표가 "DB 스키마 설계 전 `01_domain_model.md`를 읽으라"고 지시하므로 스키마 작업자가 **3개짜리 `pause_reason`을 먼저 봅니다.** 최소한 1절에 "D27~D30 이후 원본은 `01_state_machine.md`·`04_data_layer.md`"를 명시하고 `:98`의 3개 목록에 갱신 표시를 다세요. **완화 요인**: `:5`가 이미 "충돌하면 상태 머신 문서가 우선"을 선언 | `product-architect` |
 | ~~**G6**~~ ✅종결 | medium | 비전이 이벤트 규약 (1차 F6 잔여) | `04_data_layer.md:650`, `:656`, `:666-672` ↔ `05_api_contract.md:263-287`(4.5절), `:1593`(R-A) | `05`는 **"비전이 이벤트는 `from_status = to_status = 그 시점 세션의 status`"** 로 규약을 확정하고, `:1593` R-A로 `supabase-engineer`에게 **`04` 3.6절에 명문화**를 요청했습니다. `04`는 09-10에 갱신됐지만 3.6절에 이 규약이 **여전히 없고**, 오히려 D27로 비전이 `event_name` **3종**(`quota_reserved`·`quota_released`·`quota_overflow`)이 **추가되어 적용 범위만 넓어졌습니다** | `04` 3.6절에 규약 한 문단 추가. 없으면 #6 `prepare`의 **첫 `quota_reserved` INSERT가 `to_status` not-null 위반**으로 실패하고, 예약 성공 트랜잭션이 통째로 롤백됩니다 | `supabase-engineer` |
-| **G7** ❗**미해소** | medium | 총점 자릿수 (1차 F15 잔여) | `01_rubric.md` 3절(총점 서술) vs `00_input/decisions.md` D1 / `06_ui_plan.md` | 루브릭은 여전히 "소수 **둘째** 자리까지 기록"만 적고 표시 자릿수 언급이 없습니다. D1은 "소수 1자리 노출" | 실질 충돌은 아닙니다(`06`이 "저장 `numeric(3,2)` / 표시에서만 반올림"으로 정리). 루브릭에 "기록 2자리 / 표시 1자리" 한 줄 | `product-architect` |
+| ~~**G7**~~ ✅**종결** | medium | 총점 자릿수 (1차 F15 잔여) | `01_rubric.md` 3절(총점 서술) vs `00_input/decisions.md` D1 / `06_ui_plan.md` | **2026-09-11 `product-architect` 조치 완료** — 3절에 "**자릿수 — 기록 2자리 / 표시 1자리 (D1)**" 블록이 추가돼 저장(`numeric(3,2)`)·표시(소수 1자리 반올림, 재계산 금지)·`NULL` 표기가 명시됐습니다 | — (`06_ui_plan.md:1385`와 문자 단위 정합) | `product-architect` |
 
 **G5·G6 종결 근거 (2026-09-11 재확인).**
 - **G5 ✅** — `01_domain_model.md`가 갱신됐습니다. `pause_reason`이 **5종**(`user_requested`·`rate_limited`·`connection_lost`·`byok_key_invalid`·`byok_quota_exhausted`, D28 표기)으로 확장됐고, `funding_source`(`trial_shared`\|`byok`, D28) 행이 추가됐으며, **신규 테이블 5개가 전부 엔티티 표에 등재**됐습니다(`user_api_keys`·`trial_consents`·`ai_quota_ledger`·`ai_quota_reservations`·`account_events`). `resumable_after`에 "`byok_quota_exhausted`에는 채우지 않는다"까지 반영. **잔여 흠 1건(결함 아님)**: 이 문서의 변경 로그에는 아직 `2026-09-09 최초 작성` 한 줄뿐이라 **갱신 이력이 기록되지 않았습니다** — 다음 편집 때 한 줄 추가를 권합니다(`product-architect`).
 - **G6 ✅** — `04_data_layer.md` 3.6절에 규약이 명문화됐습니다: **"비전이 이벤트는 `from_status = to_status = 그 시점 세션의 `status`"**. `05_api_contract.md` R-A 요청이 회신된 것으로 확인. 이로써 **1차 F6도 "부분 해소" → 완전 해소**입니다(5절 참조).
-- **G7 ❗** — `01_rubric.md` 3절이 **2차 리포트 작성 시점 그대로**입니다: "총점 `overall_score`는 축 점수의 가중 평균이며 소수 둘째 자리까지 기록합니다." **표시 자릿수 한 줄이 여전히 없습니다.** 런타임 위험은 없으나(저장·표시 분리는 `06`이 이미 정리) 항목은 **열린 채로 둡니다.**
+- **G7 ✅** *(2026-09-11 `product-architect` 조치 후 갱신)* — `01_rubric.md` 3절에 **"자릿수 — 기록 2자리 / 표시 1자리 (D1)"** 블록이 추가됐습니다: 기록은 `numeric(3,2)`로 계산 직후 1회 반올림, 표시는 소수 1자리로 반올림하되 **재계산 금지**, `overall_score = NULL`은 "—". `06_ui_plan.md:1385`·D1과 정합하며 **1차 F15도 이로써 완전 해소**입니다.
 
 ### low
 
 > **2026-09-11 3차 재검증.** G10 ✅종결 · G11 ✅종결 · **G8·G9 미해소(그대로 열려 있습니다)**. 근거는 표 아래.
+> **2026-09-11 후속 조치.** **G8 ✅종결**(`ai-interview-architect` — 2값 부분집합 `StreamSessionStatus` 신설로 좁힘).
+> **G9 ✅종결**(`supabase-engineer` — 3.7절 `evaluations.provider` 설명을 D11 기준으로 정정). **low 4건 전부 종결입니다.**
 
 | # | 심각도 | 경계 | 위치 | 현재 상태 | 기대 상태 | 고칠 쪽 |
 |---|---|---|---|---|---|---|
-| **G8** ❗**미해소** | low | SSE 타입 폭 | `02_ai_contracts.md` 3.5절 vs `05_api_contract.md` 5.2절 | `utterance_done.sessionStatus`가 원본은 **`"in_progress"\|"completed"` 2값**, 계약은 **`SessionStatus` 11값**. UI(`06:363`)는 `=== 'completed'`로만 분기 | 실제 방출 집합은 2값이 맞습니다. `05`를 2값으로 좁히거나 원본에 "확장 가능"을 명시. 어느 쪽이든 런타임 위험은 없음 | `ai-interview-architect` + `vercel-platform-engineer` |
-| **G9** ❗**미해소** | low | D11 ↔ 예시 값 (1차 F16 잔여) | `04_data_layer.md` 3절 `provider` 컬럼 설명 | `provider` 설명 예시가 여전히 `anthropic` / `openai`. D11은 **Google 단독**이고 `user_api_keys.provider`는 `check (provider in ('google'))` | 예시를 `google`로 교체 | `supabase-engineer` |
+| **G8** ✅ **종결** | low | SSE 타입 폭 | `02_ai_contracts.md` 3.5절 vs `05_api_contract.md` 5.2절 | `utterance_done.sessionStatus`가 원본은 **`"in_progress"\|"completed"` 2값**, 계약은 **`SessionStatus` 11값**. UI(`06:363`)는 `=== 'completed'`로만 분기 | **좁히는 쪽으로 종결(2026-09-11).** `05`에 `StreamSessionStatus = Extract<SessionStatus, 'in_progress' \| 'completed'>`를 신설해 5.2절 필드 타입으로 쓰고, `02` 3.5절에 "의도된 부분집합" 근거를 명시 | `ai-interview-architect` + `vercel-platform-engineer` |
+| ~~**G9**~~ ✅종결 | low | D11 ↔ 예시 값 (1차 F16 잔여) | `04_data_layer.md` 3.7절 **`evaluations.provider`** 컬럼 설명 | `provider` 설명 예시가 `anthropic` / `openai`였고 D11은 **Google 단독** | 예시를 `google`로 교체 | `supabase-engineer` |
 | ~~**G10**~~ ✅종결 | low | 해소된 항목이 열린 채 | `06_ui_plan.md` 16절 #11 | "13.6.3절 금칙어에 '한도'가 있어 확정 문안과 충돌 — `ai-interview-architect`가 예외를 명시해 달라"가 미해결로 기록. 그러나 `02_ai_architecture.md:1417-1424`가 **이미 예외 2건("API 키" 허용 / "한도"는 사용자 본인 키 문맥만)을 명문화**했습니다 | 16절 #11을 "해소"로 닫기 | `shadcn-ui-engineer` |
 | ~~**G11**~~ ✅종결 | low | 전이 표 총계 표기 | `05_api_contract.md` 4.6절 | "전이 표 33행"이 세 곳에 남아 있음 | G3과 함께 35행으로. 숫자 자체가 G3의 원인 표지입니다 | `vercel-platform-engineer` |
 
 **G8~G11 종결/미해소 근거 (2026-09-11 재확인).**
-- **G8 ❗미해소** — 폭 차이가 **그대로**입니다. `02_ai_contracts.md` 3.5절의 `utterance_done.sessionStatus`는 여전히 **`"in_progress"\|"completed"` 2값**이고, `05_api_contract.md` 5.2절은 여전히 **`SessionStatus`(11값)** 입니다. 어느 쪽도 좁히거나 "확장 가능"을 명시하지 않았습니다. **런타임 위험은 여전히 없습니다**(실제 방출 집합은 2값이고 UI는 `=== 'completed'`로만 분기) — 그래서 low 그대로 두되 **열린 항목**입니다.
-- **G9 ❗미해소** — `04_data_layer.md`의 `provider` 컬럼 설명이 **여전히 "(`anthropic` / `openai` 등)"** 입니다. D11은 Google 단독이고 `user_api_keys.provider`는 `check (provider in ('google'))` 이므로 **예시와 CHECK가 서로 다른 말을 합니다.** 오독 위험만 있고 코드 경로에는 영향 없음(설명문 예시).
+- **G8 ✅종결 (2026-09-11, `ai-interview-architect`)** — **넓히지 않고 좁혀서** 해소했습니다. `01_state_machine.md` 2절로 확인한 결과 스트림은 `in_progress`에서만 시작하고, `paused`(3사유)·`failed`는 `stream_error`로 끝나 `utterance_done`이 아예 나가지 않으며, `canceled`·`abandoned`는 스트림 밖 경로, `evaluating` 이후는 `completed` 전이의 서버 부작용이라 **2값은 상태 머신이 강제하는 결과**입니다. 조치: `05_api_contract.md` 12절에 `StreamSessionStatus = Extract<SessionStatus, 'in_progress' | 'completed'>`를 신설하고 5.2절 `utterance_done` 필드 타입을 `SessionStatus` → `StreamSessionStatus`로 교체(세션 객체의 `status`는 11값 그대로), `02_ai_contracts.md` 3.5절에는 "의도된 부분집합이며 폭을 맞추려 넓히지 말 것"이라는 근거를 명시했습니다.
+- **G9 ✅종결 (2026-09-11 `supabase-engineer` 조치)** — `04_data_layer.md` 3.7절 `evaluations.provider` 설명에서 `anthropic` / `openai` 예시를 걷어내고 **"D11에 따라 현재 기록되는 값은 `google` 하나뿐"** 으로 정정했습니다. 스키마·마이그레이션 변경은 없습니다.
+  - **G9 지적의 근거 부분에 컬럼 혼동이 있었습니다(조치하며 바로잡음).** 지적된 설명문은 3.7절 **`evaluations.provider`** 의 것이고, 근거로 인용된 `check (provider in ('google'))`는 3.15절 **`user_api_keys.provider`** 의 제약입니다. **서로 다른 컬럼입니다.** `evaluations.provider`의 실제 제약은 `char_length(provider) <= 40` 뿐이라 "예시와 CHECK가 어긋난다"는 관계는 애초에 없었고, 어긋난 것은 **예시와 D11**이었습니다. 이 구분을 문서에 명문화해 재발을 막았습니다.
+  - **BYOK 다중 프로바이더 공백은 없습니다(확인함).** `user_api_keys.provider in ('google')`은 의도된 좁힘입니다 — 3.15절 제목이 "사용자 **Gemini** API 키"이고, `02_ai_architecture.md` 4.4절의 역할별 모델 매핑(`roles.ts`)이 전부 Gemini 모델이라 Anthropic·OpenAI 키를 받아도 **부를 모델이 없습니다.** D28은 "본인 Gemini 키로 정원 제한을 벗어난다"이지 "아무 프로바이더나 가져온다"가 아닙니다. 넓힐 필요가 생기는 시점은 `roles.ts`에 비-Gemini 모델이 들어올 때이며, 그때는 **새 ALTER 마이그레이션** 한 줄입니다.
+  - **라이브 마이그레이션 대조.** `supabase/migrations/20260909000700_evaluations.sql:33-34`(`evaluations_provider_len` = 길이 제한만), `20260910000300_user_api_keys_and_account_events.sql:12·23`(`default 'google'` + `check (provider in ('google'))`) — **둘 다 문서와 일치**하며 손댈 것이 없습니다.
 - **G10 ✅** — `06_ui_plan.md` 16절 #11이 `~~11~~` + **✅해소**로 닫혔습니다. `02_ai_architecture.md` 13.6.3절의 금칙어 예외 2건("API 키" 허용 / "한도"는 사용자 본인 키 문맥만)이 명문화됐다는 근거까지 기재.
 - **G11 ✅** — 4.6절 제목이 **"전이 표 35행"** 이고 본문이 "33행 → 35행이 되었고 이 표도 35행으로 맞췄습니다"로 정정됐습니다. 문서에 남은 `33행` 문자열 2건은 **날짜가 박힌 과거 변경 로그 항목과 2차 QA 회신 기록**이라 이력으로 남는 것이 정상입니다(살아 있는 주장이 아님).
 
@@ -194,11 +205,12 @@
 | **F12** | medium | `canceled`가 제품 스펙·도메인 모델에 없음 | ✅ **완전 해소 (2026-09-11 갱신)** | `01_product_spec.md`에 **"취소된 세션 보기" 토글** 추가 ✅. **`01_domain_model.md`도 갱신됐음을 3차 재검증에서 확인**(G5 종결 — `pause_reason` 5종·`funding_source`·신규 테이블 5개 반영) |
 | **F13** | low | 06이 "확정 결정 17건"을 가리킴 | ✅ **해소** | `06:10` — "**확정 결정 30건**" |
 | **F14** | low | 축 식별자 5개가 UI 플랜에 부재 | ✅ **해소** | `06:1368-1381` — `axis-meta.ts` 표 신설, 카드 순서까지 고정 |
-| **F15** | low | 총점 자릿수(기록 2 / 표시 1) 미기재 | ❌ **미해소 → G7** (2026-09-11 재확인, 여전히 미해소) | `01_rubric.md` 3절 변화 없음 |
-| **F16** | low | `provider` 예시가 `anthropic`/`openai` | ❌ **미해소 → G9** (2026-09-11 재확인, 여전히 미해소) | `04_data_layer.md` `provider` 설명 변화 없음 |
+| **F15** | low | 총점 자릿수(기록 2 / 표시 1) 미기재 | ✅ **해소** (2026-09-11, G7 종결과 함께) | `01_rubric.md` 3절에 "자릿수 — 기록 2자리 / 표시 1자리 (D1)" 블록 추가 |
+| ~~**F16**~~ | low | `provider` 예시가 `anthropic`/`openai` | ✅ **해소 (2026-09-11, G9 종결과 함께)** | `04_data_layer.md` 3.7절 `evaluations.provider` 설명이 D11 기준(`google` 단독)으로 정정됨 |
 
 **1차 critical 2건·high 6건 — 2026-09-11 기준 8건 전부 완전 해소**(F6이 G6 종결로 "부분 해소"에서 올라섰습니다).
-**F12도 G5 종결로 완전 해소.** 남은 1차 잔여는 **F15·F16 2건뿐**이며 각각 G7·G9로 이어져 **아직 열려 있습니다.**
+**F12도 G5 종결로 완전 해소.** 1차 잔여는 F15·F16 2건이었고, **F15는 2026-09-11 G7 종결과 함께 해소**됐습니다.
+**F16(→ G9)도 2026-09-11 종결**되어 **1차 잔여는 전부 해소됐습니다.**
 
 ---
 
@@ -239,16 +251,11 @@
 - [ ] 브라우저별 STT/TTS 실측 V1~V5(`03_voice_pipeline.md:892`)
 - [ ] 사용자 키 검증 호출 1회(#38·#40)가 **사용자 키의 한도를 얼마나 먹는지** — `last_verified_at` 유예 창의 길이가 여기 걸림
 
-**D34 빠른 스캔 — `02_ai_architecture.md` 신규 미결 항목 (2026-09-11, 전수 재검증 아님)**
+**D34 빠른 스캔 — `02_ai_architecture.md` 신규 미결 항목 (2026-09-11 최초 작성 → 같은 날 후속 커밋으로 전부 종결)**
 
-D34 재설계가 **새로 연** 항목과, D34가 **닫았어야 하는데 남은** 노후 서술입니다. 다른 문서(`.env.example`, `05_deploy.md`, `04_data_layer.md`, `01_state_machine.md`, `02_prompts/evaluator.md`)는 동시 편집 중이라 스캔 대상에서 제외했고, 다음 라운드 대조 대상입니다.
+최초 스캔 당시 열려 있던 3개 항목은 이후 `ai-interview-architect`의 자체 스윕 커밋("D34 후속 정합성 정리", 이 문서 변경 로그 최상단)에서 전부 닫혔습니다 — `pro 3 × N`·`floor(pro 유효한도 / 3)`·"평가(`pro` 3)와 코치(`flash` 4 중 2)" 서술이 `flash_lite 34 × N` / `floor(425/34)` 기준으로 재기술됐고, "아직 측정되지 않았다" 마커도 4.2.0절 실측표를 가리키도록 정정됐습니다. grep으로 재확인 완료 — 잔존 없음.
 
-- [ ] **신규 추적 항목 ✅ 편입.** `[확인 필요]` 이번에 재지 않은 최신 Flash 계열(`gemini-3.5-flash`·`3.5-flash-lite`·`3.6-flash`·`3.7-flash`·`3.8-flash`)의 무료 티어 RPD — `02_ai_architecture.md:249-254`. **하나라도 RPD > 500이면 하루 체험 정원 12가 즉시 올라갑니다.** 측정 전까지 추정 금지가 문서에 명시돼 있어 설계상 결함은 아니고, **"측정 대기" 성격이라 이 절이 맞는 자리**입니다. 소유자: 계정 보유자(측정) → `ai-interview-architect`(반영)
-- [ ] **노후 서술 (D34 미반영, 신규 결함 성격) — 소유자 `ai-interview-architect`.** 단일 버킷 전환 후에도 `pro`가 정원을 결정한다는 D27 시절 문장이 3곳 남아 있습니다. 지금은 `pro` 예약이 0이라 **본문과 서로 모순**입니다:
-  - `02_ai_architecture.md:862` — "`pro` 3 × N을 동시에 점유", "`pro`가 체험 정원을 결정하므로(8.3.1절)" → D30 가드의 **근거 자체가 무효한 서술**로 읽힘 (가드의 필요성은 유효하므로 `flash_lite 34 × N` 기준으로 고쳐 써야 함)
-  - `02_ai_architecture.md:1002` — "8.3.1절의 `floor(pro 유효한도 / 3)`" → 실제 공식은 `floor(425 / 34)` (4.2.3절)
-  - `02_ai_architecture.md:1006`·`:1009` — "평가(`pro` 3)와 코치(`flash` 4 중 2)" → 단일 버킷 `flash_lite` 기준으로 재기술 필요
-- [ ] **노후 `[확인 필요]` 마커 — 소유자 `ai-interview-architect`.** `02_ai_architecture.md:1062` "무료 티어의 실제 RPM/RPD/TPM은 아직 측정되지 않았다(4.2절, 14절)" → **4.2절이 이미 실측표로 대체**했으므로 이 마커는 제거 대상. 남겨 두면 본 보고서의 "측정 완료" 판정과 문서가 어긋납니다
+- [x] **신규 추적 항목 (계속 열려 있음, 결함 아님).** `[확인 필요]` 아직 측정 안 한 최신 Flash 계열(`gemini-3.5-flash`·`3.5-flash-lite`·`3.6-flash`·`3.7-flash`·`3.8-flash`)의 무료 티어 RPD — `02_ai_architecture.md:249-254`. **하나라도 RPD > 500이면 하루 체험 정원 12가 즉시 올라갑니다.** 측정 전까지 추정 금지가 문서에 명시돼 있어 설계상 결함이 아니라 "측정 대기" 항목입니다. 소유자: 계정 보유자(측정) → `ai-interview-architect`(반영)
 
 ---
 
@@ -258,20 +265,20 @@ D34 재설계가 **새로 연** 항목과, D34가 **닫았어야 하는데 남�
 
 | 소유자 | 남은 조치 | 심각도 |
 |---|---|---|
-| `product-architect` | **G7** — `01_rubric.md` 3절에 "**기록 2자리 / 표시 1자리**" 한 줄 추가(D1 정합). 덤으로 `01_domain_model.md` 변경 로그에 갱신 이력 한 줄(G5 잔여 흠) | medium |
-| `supabase-engineer` | **G9** — `04_data_layer.md` `provider` 컬럼 설명 예시를 `anthropic`/`openai` → **`google`** 로 교체(CHECK 제약과 일치시키기) | low |
-| `ai-interview-architect` + `vercel-platform-engineer` | **G8** — `utterance_done.sessionStatus` 폭 정렬: `05` 5.2절을 **2값으로 좁히거나** `02_ai_contracts.md` 3.5절에 "**확장 가능**"을 명시. 어느 쪽이든 런타임 위험 없음 | low |
-| `ai-interview-architect` | **D34 잔여** — 6절 "D34 빠른 스캔"의 `pro` 기준 노후 서술 3곳과 노후 `[확인 필요]` 마커. **G4와 별개 항목이며 아직 열려 있습니다** | — |
-| `shadcn-ui-engineer` · `vercel-platform-engineer` | **커밋만 남음** — G2(`06_ui_plan.md`)·G4(`02_ai_architecture.md`) 오늘 편집분이 **작업본 상태**입니다. PR로 올려 주세요 | — |
+| `product-architect` | ~~**G7**~~ ✅**종결(2026-09-11)** — `01_rubric.md` 3절에 "기록 2자리 / 표시 1자리 (D1)" 블록 추가. `01_domain_model.md` 변경 로그(G5) 갱신도 완료 | — |
+| `supabase-engineer` | ~~**G9**~~ ✅**종결(2026-09-11)** — `04_data_layer.md` 3.7절 `evaluations.provider` 설명을 D11 기준(`google` 단독)으로 정정하고, **`user_api_keys.provider`와 다른 컬럼임**을 명시. 스키마·마이그레이션 변경 없음 | — |
+| ~~`ai-interview-architect` + `vercel-platform-engineer`~~ ✅ | ~~**G8** — `utterance_done.sessionStatus` 폭 정렬~~ **종결(2026-09-11)**: `05` 12절에 `StreamSessionStatus`(2값 부분집합) 신설 + 5.2절 필드 타입 교체, `02` 3.5절에 의도 명시. `vercel-platform-engineer`가 검토 완료(별도 수정 불필요) | — |
+| `ai-interview-architect` | ~~**D34 잔여**~~ ✅**종결(2026-09-11)** — 같은 날 자체 스윕 커밋으로 `pro` 기준 노후 서술 3곳과 노후 `[확인 필요]` 마커 전부 정정 (이 문서 6절 "D34 빠른 스캔" 참고) | — |
+| 없음 | **모든 항목 종결 — 남은 것은 커밋뿐입니다.** 오늘 편집분 전부(G1~G11, D34 잔여)가 작업본 상태이니 PR로 올려 주세요 | — |
 
 ### 7.2 2차 시점 조치 목록 (보존 — 취소선은 3차 재검증에서 종결 확인)
 
 | 소유자 | 조치 |
 |---|---|
-| `ai-interview-architect` | ~~**G1**(`02_ai_contracts.md` 3.5절 `stream_error.code`에 `byok_key_invalid`·`byok_quota_exhausted` 추가)~~ ✅, ~~**G4**(`02_ai_architecture.md` 8.3.5절 SQL·13.6.1절 표를 `p_limits` 포함 4인자로 + **D30 동시 예약 가드 전체를 반영**)~~ ✅, **G8 (미해소)**, **D34 잔여**(6절 "D34 빠른 스캔" — `pro` 기준 서술과 노후 `[확인 필요]` 마커 정리) |
+| `ai-interview-architect` | ~~**G1**(`02_ai_contracts.md` 3.5절 `stream_error.code`에 `byok_key_invalid`·`byok_quota_exhausted` 추가)~~ ✅, ~~**G4**(`02_ai_architecture.md` 8.3.5절 SQL·13.6.1절 표를 `p_limits` 포함 4인자로 + **D30 동시 예약 가드 전체를 반영**)~~ ✅, ~~**G8**~~ ✅, **D34 잔여**(6절 "D34 빠른 스캔" — `pro` 기준 서술과 노후 `[확인 필요]` 마커 정리) |
 | `shadcn-ui-engineer` | ~~**G2**(`usePrepareSession` 오류 표에 409 `trial_reservation_exists` 추가, `details.existingSessionId`로만 링크 생성, **`activeSessions` 폴백 폐기**, 14절 §5·16절 #10 닫기)~~ ✅, ~~G10~~ ✅ |
-| `vercel-platform-engineer` | ~~**G3**(4.6절 전이 표를 35행으로 확장, 신규 BYOK 전이 2행의 담당을 #9로 명시)~~ ✅, ~~G11~~ ✅, **G8 (미해소)** |
-| `supabase-engineer` | ~~**G6**(3.6절에 비전이 이벤트 `to_status` 규약 명문화 — R-A 회신)~~ ✅, **G9 (미해소)** |
-| `product-architect` | ~~**G5**(`01_domain_model.md`에 D27~D30 반영 또는 원본 위임 명시)~~ ✅, **G7 (미해소)** |
+| `vercel-platform-engineer` | ~~**G3**(4.6절 전이 표를 35행으로 확장, 신규 BYOK 전이 2행의 담당을 #9로 명시)~~ ✅, ~~G11~~ ✅, ~~**G8**~~ ✅ (`ai-interview-architect`가 `05`를 직접 수정 — **검토 요청**) |
+| `supabase-engineer` | ~~**G6**(3.6절에 비전이 이벤트 `to_status` 규약 명문화 — R-A 회신)~~ ✅, ~~**G9**~~ ✅ |
+| `product-architect` | ~~**G5**(`01_domain_model.md`에 D27~D30 반영 또는 원본 위임 명시)~~ ✅, ~~**G7**(`01_rubric.md` 3절 자릿수 명시)~~ ✅ |
 
 > 전체 결정 기록: [`00_input/decisions.md`](00_input/decisions.md) (확정 30건)
