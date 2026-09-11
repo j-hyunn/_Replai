@@ -4,7 +4,7 @@
 > 입력: `01_state_machine.md`(전이 원본) · `01_product_spec.md`(화면 11개) · `01_rubric.md` ·
 > `02_ai_architecture.md`(4.4·6·8절) · `02_ai_contracts.md`(SSE·`<<<META>>>` M1~M8) ·
 > `03_voice_pipeline.md`(P1~P6) · `04_data_layer.md`(3·5·8·11·12·13절) ·
-> `00_input/decisions.md`(D1~D29 — **D27 예약 게이트 · D28 BYOK · D29 체험 동의**)
+> `00_input/decisions.md`(D1~D34 — **D27 예약 게이트 · D28 BYOK · D29 체험 동의 · D34 단일 버킷 재유도**)
 > 짝 문서: `05_deploy.md`(환경변수·런타임·무료 플랜 한도)
 
 ## 변경 로그
@@ -56,6 +56,21 @@
   - `maxDuration` 표(11.2절)를 300초 상한 기준으로 재조정했습니다. **300을 다 쓰지 않습니다** — 근거는 11.2.1절.
   - 11.3절을 "상한이 60초보다 낮을 경우의 대비"에서 **"확인된 300초 아래에서 남는 위험"**으로 바꿨습니다.
   - **엔드포인트 수 변화 없음(41개).** 프론트 대응 훅·응답 타입 변화 **없음**.
+
+- 2026-09-11 (7차) **D34 반영 — 무료 티어 실측으로 예약 버킷이 3개에서 1개가 됐습니다.** 해당 절만 고쳤습니다.
+  - **원본은 `02_ai_architecture.md` 8.3.1·8.3.4절, 전이 문구 원본은 `01_state_machine.md` 2절 전이 표 + 각주 ※입니다.**
+    `gemini-2.5-pro`는 무료 RPD 0, `flash` 계열은 RPD 20 — 둘 다 쓸 수 없어 **5개 역할 전부 `gemini-3.1-flash-lite`**로
+    통일됐고, 세션당 예약은 **단일 버킷 `flash_lite` 34**(`pro`·`flash`는 휴면, 요청량 0)입니다.
+  - **4.7.3절 1번(`→ completed`)이 "`flash_lite` 전량 반납"에서 "부분 반납"으로 바뀌었습니다.**
+    `released = greatest(reserved − consumed − 6, 0)`, **남는 held = 6**(평가자 패스 A+B 4 + 코치 2).
+    평가자·코치가 이제 **같은 버킷**을 먹으므로 전량 반납하면 리포트를 만들 여력이 사라집니다.
+  - 4.7.4절 재시도 예약 버킷: #16 `pro` 3 → **`flash_lite` 4**, #18 `flash` 2 → **`flash_lite` 2**
+    (엔드포인트 표 #16·#18 비고도 같이 고쳤습니다).
+  - 4.7.1절 `p_limits`는 **키 3종을 그대로 보냅니다** — 요청량 0인 휴면 버킷은 DB 함수가 원장 행을 만들지 않고 건너뜁니다.
+  - 4.7.6절 정원을 잠그는 주체를 `pro` 3 × N → **`flash_lite` 34 × N**(하루 12세션)으로 정정.
+  - 11.3절 조정 레버 1번("Evaluator를 pro → flash로 내린다")을 **삭제 표시**했습니다 — 존재하지 않는 선택지입니다.
+  - **엔드포인트 수·응답 shape·대응 훅 변화 없음(41개).** 버킷 이름은 어떤 응답에도 실리지 않으므로(4.7.5절 금지 항목)
+    **프론트 타입에 영향이 없습니다.**
 
 ---
 
@@ -173,9 +188,9 @@ type EvaluationResponse = { evaluation: Evaluation | null };
 | 13 | POST | `/api/sessions/[sessionId]/pause` | auth | `{ pauseReason: PauseReason }` | `{ session: Session }` | 아니오 | ~200ms | `in_progress`→`paused` | `usePauseSession` |
 | 14 | POST | `/api/sessions/[sessionId]/resume` | auth | — | `{ session: Session, currentQuestion: Question \| null, lastInterviewerTurn: Turn \| null }` | 아니오 | ~250ms | `paused`→`in_progress` | `useResumeSession` |
 | 15 | POST | `/api/sessions/[sessionId]/complete` | auth | — | `{ session: Session }` | 아니오 | ~350ms | `in_progress`→`completed` / `paused`→`completed`, **이어서 `completed`→`evaluating`**(서버가 평가 등록 — D18, 6.2절) | `useCompleteSession` |
-| 16 | POST | `/api/sessions/[sessionId]/evaluate` | auth | — | `202 EvaluationJobAccepted` | 아니오 | ~300ms(작업은 45~90s) | **`failed`→`evaluating` 전용(재시도, D18).** `completed`·`evaluating`·`evaluated`에 호출하면 **409 `invalid_transition`**. **체험 세션이면 `pro` 3을 여기서 다시 예약합니다 — 실패 시 503, `failed` 유지(4.7.4절)** | **`useRetryEvaluation`** (구 `useStartEvaluation`) |
+| 16 | POST | `/api/sessions/[sessionId]/evaluate` | auth | — | `202 EvaluationJobAccepted` | 아니오 | ~300ms(작업은 45~90s) | **`failed`→`evaluating` 전용(재시도, D18).** `completed`·`evaluating`·`evaluated`에 호출하면 **409 `invalid_transition`**. **체험 세션이면 `flash_lite` 4를 여기서 다시 예약합니다 — 실패 시 503, `failed` 유지(4.7.4절)** | **`useRetryEvaluation`** (구 `useStartEvaluation`) |
 | 17 | GET | `/api/sessions/[sessionId]/evaluation` | auth | — | `{ evaluation: Evaluation \| null }` — **`Evaluation`에 `myFeedback`·`myDisputes` 포함(D20, 12절)** | 아니오 | ~300ms | **없음** (단, `report_first_viewed_at`을 최초 1회 기록 — 지표 2) | `useEvaluation` |
-| 18 | POST | `/api/sessions/[sessionId]/coach/retry` | auth | — | `202 { sessionId, evaluationId, coachStatus: 'running' }` | 아니오 | ~250ms(작업은 20~40s) | **없음** (`evaluated` 유지. 점수·인용은 건드리지 않는 UPDATE). **체험 세션이면 `flash` 2를 다시 예약 — 실패 시 503, 리포트는 계속 열람 가능(4.7.4절)** | `useRetryCoach` |
+| 18 | POST | `/api/sessions/[sessionId]/coach/retry` | auth | — | `202 { sessionId, evaluationId, coachStatus: 'running' }` | 아니오 | ~250ms(작업은 20~40s) | **없음** (`evaluated` 유지. 점수·인용은 건드리지 않는 UPDATE). **체험 세션이면 `flash_lite` 2를 다시 예약 — 실패 시 503, 리포트는 계속 열람 가능(4.7.4절)** | `useRetryCoach` |
 | 19 | GET | `/api/sessions/[sessionId]/transcript` | auth | — | `{ turns: Turn[], questions: Question[] }` | 아니오 | ~250ms | **없음** | `useTranscript` |
 | 20 | PUT | `/api/sessions/[sessionId]/feedback` | auth | `{ isHelpful: boolean, comment?: string \| null }` | `{ feedback: ReportFeedback }` | 아니오 | ~200ms | **없음** | `useReportFeedback` |
 | 21 | POST | `/api/sessions/[sessionId]/disputes` | auth | `{ scoreId, citationId?, reasonCode, comment? }` | `201 { dispute: ScoreDispute }` | 아니오 | ~200ms | **없음** | `useCreateDispute` |
@@ -212,7 +227,7 @@ type EvaluationResponse = { evaluation: Evaluation | null };
 |---|---|---|---|---|---|
 | I1 | POST | `/api/internal/jobs/plan` | internal | 플래너 실행 → `context_summary`·오프닝 질문·스냅샷 커밋 | `configuring`→`ready` |
 | I2 | POST | `/api/internal/jobs/evaluate` | internal | **평가자 → 코치를 한 호출 안에서 순차 실행**(D31, 6.2절). 1단계: `evaluations`·`evaluation_scores`·`evaluation_citations` 저장. 2단계: `summary`/`improvements`/`coach_payload`/축별 `improvement` UPDATE. body의 `stage`가 `'coach_only'`면 1단계를 건너뜁니다(#18 재시도 경로) | 평가 실패+잔여 재시도 시 `evaluating`→`completed`, 소진 시 `evaluating`→`failed`. **코치 단계는 성공·실패 어느 쪽이든 `evaluating`→`evaluated`** |
-| C1 | GET | `/api/cron/daily` | cron | 일 1회 워치독 **5종**(`05_deploy.md` 5절. **5종째는 D27 만료 예약 스윕** — `01_state_machine.md` 7.5절). **`paused`→`completed`로 보낼 때 평가를 함께 등록합니다**(D18 — 이 경로에는 클라이언트가 존재하지 않습니다). **1·2·3단계의 종료 전이는 전부 예약 반납을 동반합니다**(4.7.3절) | `paused`→`completed`(→ 이어서 `completed`→`evaluating`)/`abandoned`, `evaluating`→`failed`, `in_progress`→`paused` |
+| C1 | GET | `/api/cron/daily` | cron | 일 1회 워치독 **5종**(`05_deploy.md` 5절. **5종째는 D27 만료 예약 스윕** — `01_state_machine.md` 7.5절). **`paused`→`completed`로 보낼 때 평가를 함께 등록합니다**(D18 — 이 경로에는 클라이언트가 존재하지 않습니다). **1·2·3단계의 종료 전이는 전부 예약 반납을 동반합니다**(4.7.3절 — **단 1단계 `paused→completed`는 6을 남기는 부분 반납**입니다) | `paused`→`completed`(→ 이어서 `completed`→`evaluating`)/`abandoned`, `evaluating`→`failed`, `in_progress`→`paused` |
 
 > **내부 워커 라우트는 2종입니다 (D31 — 3종에서 줄었습니다).** `POST /api/internal/jobs/coach`(구 I3)는
 > **삭제됐습니다.** 코치는 I2 안에서 평가자 다음에 이어 실행되며, 별도의 HTTP 진입점을 갖지 않습니다.
@@ -413,6 +428,9 @@ releaseSessionQuota(sessionId, fundingSource, buckets, reason)  // 반납 6지�
 - **`p_limits`는 서버가 계산해 넘깁니다 (R8).** DB는 환경변수를 읽을 수 없으므로, 그날 원장 행에 박을
   `limit_calls`를 `floor(AI_RPD_LIMIT_<BUCKET> × (1 − AI_QUOTA_SAFETY_MARGIN_PCT/100))`로 **라우트가 계산**해
   `{"pro":n,"flash":n,"flash_lite":n}` 형태로 전달합니다(`04_data_layer.md` 12.2절 R8).
+  **키 3종은 그대로 보냅니다 — D34 이후 `pro`·`flash`는 휴면 버킷이라 `p_request`가 0이고, 요청량 0인
+  버킷은 DB 함수가 원장 행을 만들지 않고 건너뜁니다**(`02_ai_architecture.md` 8.3.1절). 세션당 실제 요청은
+  `{"pro":0,"flash":0,"flash_lite":34}` 하나뿐입니다.
 - **`quota_date`는 `AI_QUOTA_RESET_TIMEZONE` 기준의 날짜**이지 UTC 날짜가 아닙니다. `new Date().toISOString().slice(0,10)`으로
   계산하면 리셋 경계에서 어긋납니다.
 - **`fundingSource`는 #3에서 확정되고 이후 어떤 라우트도 바꾸지 않습니다.** DB 트리거가 UPDATE를
@@ -429,15 +447,39 @@ releaseSessionQuota(sessionId, fundingSource, buckets, reason)  // 반납 6지�
 
 | # | 지점 | 호출 | 반납 버킷 |
 |---|---|---|---|
-| 1 | `→ completed` (#15, #9 종료 조건, C1 1단계) | `release(id, ['flash_lite'], 'completed')` | **`flash_lite`만.** `pro`·`flash`는 **절대 반납하지 마세요** — 평가와 코치가 남아 있습니다 |
+| 1 | `→ completed` (#15, #9 종료 조건, C1 1단계) | `release(id, ['flash_lite'], 'completed')` — **부분 반납** | **`flash_lite` 한 버킷에서 `reserved − consumed − 6`**(0 미만이면 0). **6은 남깁니다** — 평가자 4 + 코치 2가 아직 같은 버킷을 먹습니다(D34) |
 | 2 | **I2 코치 단계 완료 → `evaluated`** | `release(id, null, 'settled')` | 잔여 전부(정산) |
 | 3 | #33 `cancel` (7개 전이 전부) | `release(id, null, 'canceled')` | 전부 |
 | 4 | C1 `paused → abandoned` | `release(id, null, 'abandoned')` | 전부 |
 | 5 | I2 재시도 소진 → `failed`, I1 플래너 실패, #35 `abandon-preparation` | `release(id, null, 'failed')` | 전부 |
 | 6 | C1 만료 예약 스윕(워치독 5종째) | `quota_date < today AND status='held'` 행 정리 | 전부(`reason='expired'`) |
 
+**1번은 "전량"이 아니라 "부분"입니다 (2026-09-11 D34).** D34 이전에는 버킷이 3개였고 면접이 끝나면
+`flash_lite` 26을 **전량** 반납하면서 평가·코치용 `pro` 3 + `flash` 4는 계속 붙들고 있었습니다.
+지금은 **활성 버킷이 `flash_lite` 하나뿐**이고 평가자·코치도 **같은 버킷**에서 먹으므로,
+면접이 끝났다고 전량 반납하면 **리포트를 만들 여력이 사라집니다.** 그래서 1번만 뺄셈이 다릅니다.
+
+```
+# 1번(→ completed) — 부분 반납
+released := greatest(reserved_calls - consumed_calls - 6, 0)
+남는 held := 6                                    # 평가자 패스 A+B 4 + 코치 2 (02_ai_architecture.md 8.3.1절 내역 표)
+
+# 2~6번 — 전량 반납(정산·취소·포기·실패·만료)
+released := greatest(reserved_calls - consumed_calls, 0)
+```
+
+- **세션당 예약은 `flash_lite` 34 한 건입니다**(`02_ai_architecture.md` 8.3.1절). `pro`·`flash` 버킷은
+  **휴면(요청량 0)** 이라 원장 행 자체가 만들어지지 않으므로, 반납 호출에 이 두 버킷을 넣을 일이 없습니다.
+  `ModelBucket` 값 3종과 DDL은 그대로 남아 있습니다(유료 전환 대비) — **값이 남아 있다고 해서
+  반납 대상이라는 뜻이 아닙니다.**
+- **잔여 6은 2번(`evaluating → evaluated`)에서 정산 반납됩니다.** 즉 1번과 2번은 **같은 세션에서 순서대로
+  둘 다 일어납니다** — 1번이 일어났다고 2번을 건너뛰면 세션당 6이 영구히 샙니다.
+- 원본 문구는 `01_state_machine.md` 2절 전이 표(`→ completed` 3행)와 같은 문서 각주 ※입니다.
+
 **멱등이어야 합니다 — 이중 반납 금지.** 종료 상태로 가는 경로가 여럿이므로(`failed → canceled`,
-`abandoned → canceled`) 반납은 **세션이 처음 종료 계열에 도달할 때 한 번만** 일어나야 합니다.
+`abandoned → canceled`) **전량 반납(2~6번)은 세션이 처음 종료 계열에 도달할 때 한 번만** 일어나야 합니다.
+(1번의 부분 반납은 예외가 아니라 **그 앞 단계**입니다 — 예약 행은 `held`로 남고 `reserved`가 6으로 줄어들 뿐이며,
+뒤이은 2~6번 중 하나가 그 6을 마저 가져갑니다.)
 `release_session_quota()`는 `status='held'` 행만 대상으로 하는 멱등 연산이고, **라우트도 그 사실에 의존해
 "이미 반납했는지"를 스스로 기억하지 않습니다.** 이중 반납은 쓰지 않은 여력을 원장에 되돌려 놓아
 오늘 정원을 실제보다 크게 만들고, 그러면 **벽이 다시 면접 도중으로 돌아옵니다**(`01_state_machine.md` 2절).
@@ -451,8 +493,8 @@ releaseSessionQuota(sessionId, fundingSource, buckets, reason)  // 반납 6지�
 
 | 라우트 | 필요량 | 실패 시 |
 |---|---|---|
-| #16 `POST .../evaluate` (`failed` 재시도 전용) | `pro` 3 | **503 `capacity_unavailable`. 전이하지 않습니다.** 세션은 `failed`에 남고 재시도 버튼도 그대로입니다 |
-| #18 `POST .../coach/retry` | `flash` 2 | **503.** `evaluated` 유지. 점수·인용은 이미 있으므로 **리포트 자체는 계속 열람 가능**합니다 |
+| #16 `POST .../evaluate` (`failed` 재시도 전용) | `flash_lite` **4** (평가자 패스 A + 패스 B, 재시도 여유 포함) | **503 `capacity_unavailable`. 전이하지 않습니다.** 세션은 `failed`에 남고 재시도 버튼도 그대로입니다 |
+| #18 `POST .../coach/retry` | `flash_lite` **2** | **503.** `evaluated` 유지. 점수·인용은 이미 있으므로 **리포트 자체는 계속 열람 가능**합니다 |
 
 둘 다 이미 `released`된 세션에 다시 예약하는 경로이며, 같은 unique 키를 재사용해 `status`를 `held`로 되돌립니다.
 **`byok` 세션에서는 두 라우트 모두 예약 단계를 건너뜁니다.**
@@ -483,8 +525,9 @@ releaseSessionQuota(sessionId, fundingSource, buckets, reason)  // 반납 6지�
 #### 4.7.6 체험 예약은 **사용자당 동시 1건** — 두 번째 `prepare`는 409 (D30)
 
 `profiles.trial_consumed_at`은 **첫 주질문에 답한 시점**에 기록되는데 예약은 그보다 앞선 `prepare`에서
-잡힙니다. 그 틈 때문에 세션을 여러 개 만들어 `prepare`만 반복하면 **실제 체험은 0회인데 `pro` 3 × N을
-동시에 점유**할 수 있고, `pro`가 그날 체험 정원을 결정하므로(8.3.1절) **한 사용자가 정원 전체를 잠급니다.**
+잡힙니다. 그 틈 때문에 세션을 여러 개 만들어 `prepare`만 반복하면 **실제 체험은 0회인데 `flash_lite` 34 × N을
+동시에 점유**할 수 있고, `flash_lite`가 그날 체험 정원을 혼자 결정하므로(`02_ai_architecture.md` 8.3.1절 —
+하루 12세션) **한 사용자가 탭 12개로 정원 전체를 잠급니다.**
 악의가 없어도 브라우저 탭 몇 개면 발생합니다.
 
 **`funding_source = 'trial_shared'` 사용자가 이미 `status='held'` 예약을 갖고 있으면 #6의 두 번째 예약을
@@ -536,7 +579,9 @@ releaseSessionQuota(sessionId, fundingSource, buckets, reason)  // 반납 6지�
 
 ```ts
 type FundingSource = 'trial_shared' | 'byok';
-type ModelBucket   = 'flash_lite' | 'flash' | 'pro';
+type ModelBucket   = 'flash_lite' | 'flash' | 'pro';  // D34 이후 활성 버킷은 'flash_lite' 하나.
+                                                      // 'flash'·'pro'는 휴면(요청량 0)이며 값만 남겨 둡니다(유료 전환 대비).
+                                                      // ROLE_BUCKET은 5개 역할 전부를 'flash_lite'로 매핑합니다.
 
 interface LlmCallContext {
   sessionId: string;
@@ -1277,15 +1322,17 @@ export const dynamic = 'force-dynamic';   // 인증 응답이 캐시되면 남�
 **조정 순서는 바뀌지 않았습니다** (`02_ai_architecture.md` 4.2절 지시 그대로):
 
 ```
-1) Evaluator 모델을 pro → flash 로 내린다   ← "첫 번째 조정 레버"
-   (Coach보다 먼저 내리지 않는다 — 인용 정확도가 우선)
-2) 그래도 넘으면 평가를 축 단위로 쪼갠다 (5축 = 5호출).
+1) [2026-09-11 D34로 삭제] "Evaluator 모델을 pro → flash 로 내린다"는 더 이상 선택지가 아니다.
+   무료 티어 실측에서 pro 계열은 RPD 0, flash 계열은 RPD 20이라 둘 다 쓸 수 없고,
+   5개 역할 전부가 이미 gemini-3.1-flash-lite 하나를 쓴다(02_ai_architecture.md 4.2·8.3.7절).
+   모델을 내리는 레버 자리는 비어 있다 — 현재 레버는 같은 문서 8.3.9절 표에 있다.
+2) 넘으면 평가를 축 단위로 쪼갠다 (5축 = 5호출).
    대가: 호출 수가 5배로 늘어 RPD를 태운다. 인용 검증은 축 단위라 쪼개도 정합성은 유지된다
 3) 대화 전문을 넣는 방침(5.3절)은 마지막까지 건드리지 않는다 — 요약본으로 채점하면 인용 오프셋이
    전부 어긋나 핵심 가치 2번이 무너진다
 ```
 
-> **300초가 확인됐다고 해서 1·2번 레버가 필요 없어진 것은 아닙니다.** 그 레버들이 방어하는 진짜 제약은
+> **300초가 확인됐다고 해서 남은 2번 레버가 필요 없어진 것은 아닙니다.** 그 레버가 방어하는 진짜 제약은
 > 실행 시간이 아니라 **RPD와 체험 정원**입니다(4.7절). 실행 상한은 그중 한 증상이었을 뿐입니다.
 
 **사용자 요청 라우트는 여유가 큽니다.** 가장 느린 #26(문서 추출)도 최악 ~25s로 120s 상한의 20% 수준이고,
@@ -1685,7 +1732,7 @@ D4가 약속한 "접수되었습니다" 확인이 사라지고 사용자가 같�
 | `qa-inspector` (**2차**) | 재검증 요청: (1) 전이 표 33행 전수 대응은 **4.6절**에 정리했습니다 — 남은 미대응은 29번 `evaluated → evaluating` **1행뿐이고 `[later]`로 의도된 것**입니다. (2) F1은 6.2·6.3절, F2는 4.2·4.3절 + #33, F3은 12.3절, F4는 12.4절 + #34, F6은 4.5절, F8은 4.4절 + #35에서 각각 대응했습니다. (3) **F10(15절 #1의 노후화)은 아직 손대지 않았습니다** — 이번 지시 범위 밖이라 남겨 두었습니다. (4) 대응 훅 이름이 바뀐 것은 #16 하나(`useStartEvaluation` → `useRetryEvaluation`)이며, 신설 훅은 `useCancelSession`·`useDocument`·`useAbandonPreparation` 3개입니다 |
 | `shadcn-ui-engineer` (**3차 / D27·D28·D29 — 신설 6개 + shape 변경 2건**) | **신설 엔드포인트 6개와 훅:** (1) `#36 GET /api/capacity` → `{ capacity: Capacity }` / `useCapacity` — **`canStartSession`은 `keyStatus==='connected'`면 항상 true**이고, `availableAtIso`가 `null`이면 **"내일 오세요"를 렌더하지 마세요**(기다려도 안 풀리는 벽입니다). (2) `#37 GET /api/account/api-key` → `{ apiKey: ApiKeyStatus }` / `useApiKeyStatus`. (3) `#38 PUT /api/account/api-key` (body `{ apiKey }`) → `{ apiKey: ApiKeyStatus }` / `useConnectApiKey` — **연결과 교체가 같은 라우트**입니다. (4) `#39 DELETE /api/account/api-key` → `{ apiKey: ApiKeyStatus }`(`keyStatus='none'`) / `useDisconnectApiKey` — **`{ ok: true }`가 아닙니다.** (5) `#40 POST /api/account/api-key/verify` → `{ apiKey: ApiKeyStatus }` / `useVerifyApiKey`. (6) `#41 POST /api/trial-consent` (body `{ consentVersion, sessionId? }`) → `{ consent: TrialConsent }` / `useGrantTrialConsent`. **`ApiKeyStatus`에 키 원문 필드가 없으므로 "보기" 토글·복사 버튼을 만들 수 없습니다** — 화면에 쓸 값은 `keyLast4` 하나입니다 |
 | `shadcn-ui-engineer` (**3차 / 기존 shape 변경**) | (1) **`Session`에 `fundingSource: 'trial_shared' \| 'byok'`가 추가됐습니다**(nullable 아님). (2) **`PauseReason`이 3개 → 5개**입니다 — 재개 패널이 `byok_key_invalid`·`byok_quota_exhausted`를 분기해야 하고, **`byok_quota_exhausted`에는 재개 가능 시각을 표시하지 마세요**(`resumableAfter`가 `null`입니다). (3) 신규 오류 4종을 처리하세요: **503 `capacity_unavailable`**(여력 부족 화면, **1순위 버튼은 "키 연결하기"**), **409 `trial_consent_required`**(동의 다이얼로그), **409 `byok_key_invalid` / `byok_quota_exhausted`**(세 문구를 서로 다르게 — `06_ui_plan.md`가 `code`로 조회하는 고정 문안이며 **프로바이더 메시지를 그대로 띄우지 마세요**). (4) **`consentVersion`은 `useCapacity` 응답에서 받아 `#41`에 그대로 되돌려 보냅니다** — 하드코딩하면 `409 consent_version_stale`이 납니다. (5) 동의 문구 원본은 `src/lib/consent/trial-consent.ts` 한 곳이고 다이얼로그가 이 상수를 import합니다(두 번째 사본을 만들면 해시가 갈라집니다) |
-| `qa-inspector` (**3차 검증 요청 — 엔드포인트별로 나눠서 봐 주세요**) | (1) **키 원문이 어떤 응답에도 없는지** — `ApiKeyStatus`에 자리가 없고 키 원문의 방향은 #38 요청 body 하나뿐입니다(4.8.1절). **body 로깅 미들웨어가 #38에 붙어 있지 않은지**가 남은 유일한 누출 경로입니다. (2) **공용 키 폴백 금지** — `resolveCallCredentials` 호출이 **재시도 루프 안에** 있는 코드가 없는지 grep(4.8.2절). (3) **`byok` 세션이 예약 원장에 행을 만들지 않는지** — 분기가 `src/lib/quota/gate.ts` 네 함수 진입부 한 곳에만 있는지(4.7.0절). (4) **반납 6지점 전수**(4.7.3절)와 **이중 반납이 없는지**(#23/#31에 반납 호출을 따로 두지 않았는지). (5) **동의 없이 `prepare`가 통과하지 않는지** — 특히 **옛 버전 동의만 가진 사용자**(DB 트리거는 통과시킵니다, R9). (6) **503 `capacity_unavailable`과 429 `rate_limited`가 섞이지 않는지**, `details`에 버킷·잔여량·한도가 없는지 |
+| `qa-inspector` (**3차 검증 요청 — 엔드포인트별로 나눠서 봐 주세요**) | (1) **키 원문이 어떤 응답에도 없는지** — `ApiKeyStatus`에 자리가 없고 키 원문의 방향은 #38 요청 body 하나뿐입니다(4.8.1절). **body 로깅 미들웨어가 #38에 붙어 있지 않은지**가 남은 유일한 누출 경로입니다. (2) **공용 키 폴백 금지** — `resolveCallCredentials` 호출이 **재시도 루프 안에** 있는 코드가 없는지 grep(4.8.2절). (3) **`byok` 세션이 예약 원장에 행을 만들지 않는지** — 분기가 `src/lib/quota/gate.ts` 네 함수 진입부 한 곳에만 있는지(4.7.0절). (4) **반납 6지점 전수**(4.7.3절)와 **이중 반납이 없는지**(#23/#31에 반납 호출을 따로 두지 않았는지). **D34 추가 — 1번(`→ completed`)이 `− 6`을 뺀 부분 반납인지, 2번(`→ evaluated`)이 그 6을 정산하는지 둘 다 확인해 주세요.** 1번이 전량 반납이면 완주한 세션이 리포트를 못 받고, 2번이 빠지면 세션당 6이 영구히 샙니다. (5) **동의 없이 `prepare`가 통과하지 않는지** — 특히 **옛 버전 동의만 가진 사용자**(DB 트리거는 통과시킵니다, R9). (6) **503 `capacity_unavailable`과 429 `rate_limited`가 섞이지 않는지**, `details`에 버킷·잔여량·한도가 없는지 |
 | `shadcn-ui-engineer` (**3차 / 함정 2건**) | (1) **503을 무조건 "여력 부족" 화면으로 렌더하지 마세요.** `useCapacity`의 `keyStatus === 'invalid'`이면 원인은 여력이 아니라 **무효한 키**이고, 이때 띄울 문구는 "키를 다시 확인해 주세요"입니다(15절 #11). 세 상황(공용 여력 소진 / 키 무효 / 사용자 키 한도 소진)의 문구는 서로 달라야 합니다. (2) **#41 응답의 `consent.sessionId`가 요청에 보낸 값과 다를 수 있습니다** — 같은 문구 버전에 이미 동의한 사용자는 **기존 행이 그대로 반환**되기 때문입니다(멱등). 이 값으로 화면을 분기하지 마세요. 동의 여부 판정은 `useCapacity`의 `requiresTrialConsent` 하나입니다 |
 | `ai-interview-architect` · `product-architect` (**판단 요청 회신 — D30으로 확정됨**) | **체험 예약 중복 문제는 D30으로 확정됐고 계약에 반영했습니다.** 완화책 (a)를 채택합니다 — 체험 사용자가 이미 `held` 예약을 가지고 있으면 #6 `prepare`의 두 번째 예약을 **409 `trial_reservation_exists`**로 거절합니다(4.7.6절, 13절). **8.3.3절의 "예약은 세션에 붙는다"는 뒤집지 않았습니다** — 사용자당 동시 예약 개수만 1건으로 제한합니다. 강제 지점은 `reserve_session_quota`(DB 함수)이며 라우트는 예외를 409로 번역할 뿐입니다. **`byok` 세션에는 해당하지 않습니다** |
 | `voice-pipeline-engineer` | **토큰 발급 라우트는 이번에도 만들지 않습니다.** 브라우저 내장 STT/TTS를 쓰므로 인증할 프로바이더가 없다는 3.5절 판단이 그대로이고, **BYOK는 이 판단을 바꾸지 않습니다** — 사용자 키는 LLM 경로에만 쓰이고 음성 경로에는 닿지 않습니다. 그래서 `byok` 세션에서도 폴백 사다리 1·2단계(TTS 텍스트화 → STT 텍스트 전환)가 그대로 동작합니다(`01_state_machine.md` 4.5절 규칙 4). **`pause_reason`이 5종이 되었으므로 음성 UI가 일시정지 사유를 분기한다면 신규 2개를 처리**해야 하고, `stream_error.code`에도 `byok_key_invalid`·`byok_quota_exhausted` 2종이 늘었습니다(5.2절) |
@@ -1732,6 +1779,7 @@ D4가 약속한 "접수되었습니다" 확인이 사라지고 사용자가 같�
 | **9** | **`02_ai_architecture.md` 13.6.2절 `/api/capacity` 응답 모양** | 평탄한 오브젝트(`{ canStartSession, availableAtIso }`)로 적혀 있는데, 이 문서 1절 래핑 규칙은 **단건 응답을 리소스 이름 키로 감싸라**고 못 박고 있습니다 | **`{ capacity: Capacity }`로 감쌌습니다**(4.7.5절). 필드 이름·의미는 13.6.2절 그대로이고 래핑만 다릅니다. 1절이 이 문서의 법이고 훅이 언랩을 전제하므로 이쪽을 따랐습니다 |
 | **10** | **`02_ai_architecture.md` 13.6.1절 vs `04_data_layer.md` 3.14.1절 — `reserve_session_quota` 시그니처** | `p_limits jsonb` 인자의 유무가 다릅니다(**R8**) | **`04`를 따릅니다.** DB가 환경변수를 읽을 수 없으므로 `limit_calls`는 라우트가 계산해 넘겨야 하고, 이는 13.6.1절 마지막 문단의 지시를 시그니처로 옮긴 것입니다(4.7.1절) |
 | **11** | **`01_state_machine.md` 2절 #3 가드 — 키가 `invalid`인 사용자** | "**유효한** 사용자 키가 연결돼 있으면 `byok`"이므로, `keyStatus='invalid'` + 체험 소진인 사용자는 **체험 경로로 떨어져 503 `capacity_unavailable`** 을 받습니다. 그런데 **진짜 원인은 여력이 아니라 무효한 키**입니다 | 오류 코드는 그대로 두고(재원을 정할 수 없다는 사실은 같습니다) **프론트가 `useCapacity`의 `keyStatus='invalid'`로 분기**해 여력 부족 화면이 아니라 **"키를 다시 확인해 주세요"** 를 띄우도록 14절에 전달했습니다. 여력 부족 문구를 띄우면 사용자가 고칠 수 있는 문제를 고치지 못합니다 |
+| **13** | **`02_ai_architecture.md` 8.3.1·8.3.4절 본문 "평가·코치 몫 **8**" vs 같은 8.3.1절 역할별 내역 표 "평가자 4 + 코치 2 = **6**"** | 면접 종료 시 남겨 두는 hold 양이 같은 문서 안에서 어긋납니다. 합계 34는 **6일 때만** 맞습니다("8"은 버킷 3개 시절 `pro 3 + flash 4 = 7` 계열 숫자가 D34 재유도에서 함께 갱신되지 않고 남은 것으로 보입니다). `01_state_machine.md` 각주 ※도 같은 지적을 하고 6을 채택했습니다 | **이 계약도 `6`을 채택했습니다**(4.7.3절 1번). 내역 표에서 유도되는 값이고 전이 표 원본과 일치하기 때문입니다. **확정은 `02_ai_architecture.md` 소유자(`ai-interview-architect`)의 몫이며, 8로 확정되면 4.7.3절 1번의 `− 6`과 "남는 held = 6"을 함께 고쳐야 합니다** |
 | ~~12~~ | ~~체험 1회(D28) vs 예약이 세션에 붙는다(`02_ai_architecture.md` 8.3.3절)~~ | **✅ 해소(D30).** 체험 사용자는 **동시에 `held` 예약을 하나만** 가지며, 두 번째 `prepare` 예약은 **409 `trial_reservation_exists`**로 거절합니다. 완화책 후보 (a)가 채택됐고, 예약이 세션에 붙는다는 8.3.3절 결정은 **뒤집히지 않았습니다** — 사용자당 동시 개수만 제한합니다 | **4.7.6절 + 13절 오류 표에 반영 완료.** 강제 지점은 `reserve_session_quota`(DB 함수)이고 라우트는 예외를 409로 번역합니다. `details.existingSessionId`로 기존 세션 id를 실어 보내므로 프론트의 소거법·`activeSessions` 폴백은 폐기됩니다 |
 
 ---
@@ -1768,10 +1816,12 @@ D4가 약속한 "접수되었습니다" 확인이 사라지고 사용자가 같�
 ```
 
 ```
-[확인 필요 / 유지] 선택 모델(Gemini)의 무료 티어 RPM · RPD · TPM.
-  Google은 이 수치를 문서에 싣지 않고 AI Studio 대시보드에서 계정별로 확인하게 한다(2026-09-10 확인).
-  즉 문서를 더 읽어서 해결될 항목이 아니고, 소유자가 자기 대시보드에서 읽어 환경변수로 주입해야 한다.
-  05_deploy.md 3.1절에 읽는 절차를 적었다. 주입 전까지 D27 예약 게이트는 fail-open이다.
+[해소 2026-09-11 / D34] 선택 모델(Gemini)의 무료 티어 RPM · RPD · TPM — AI Studio 대시보드 실측 완료.
+  pro 계열 RPD 0, flash 계열 RPD 20, gemini-3.1-flash-lite 15 RPM / 250K TPM / RPD 500.
+  → 5개 역할 전부 gemini-3.1-flash-lite로 통일, 활성 버킷은 flash_lite 하나(세션당 34), 하루 체험 정원 12세션.
+  → 이 계약에서 갱신한 곳: 4.7.1(p_limits 3키 유지·요청량 0 건너뜀) · 4.7.3(→ completed는 6을 남기는 부분 반납) ·
+    4.7.4(재시도 예약 버킷) · 4.7.6(정원을 잠그는 버킷) · 11.3(모델 강등 레버 삭제) · 엔드포인트 표 #16·#18.
+  잔여: 수치는 여전히 환경변수로 주입한다(05_deploy.md 3.1절). 주입 전까지 D27 예약 게이트는 fail-open이다.
   → 이 계약이 이 값에 의존하는 지점은 4.7절(예약량)과 10.1절(429 정규화)이며,
     둘 다 값이 없어도 동작하도록 이미 설계돼 있다
 ```

@@ -180,11 +180,24 @@
 - [ ] RLS 정책의 **실제 동작** — 정책 SQL은 문서상 정합하나 실행 검증 불가
 
 **측정 대기 (`[확인 필요]`)**
-- [ ] `AI_RPD_LIMIT_*` 3종의 **실측값** — `05_deploy.md:268`·`:385` P1. **없으면 게이트가 fail-open**이고 D27 전체가 무효
+- [x] ~~`AI_RPD_LIMIT_*` 3종의 **실측값**~~ → **측정 완료 (2026-09-11 D34).** 운영상 의미 있는 버킷은 **1종뿐**입니다. `AI_RPD_LIMIT_FLASH_LITE = 500`이 실계정 대시보드 실측으로 확정됐고(`02_ai_architecture.md:132`·`:1068`), `flash`·`pro`는 **휴면 버킷(세션당 예약 0)** 이라 게이트가 아예 요청하지 않으므로 RPD 값이 무의미합니다 — **비워 두는 것이 정상**(`02_ai_architecture.md:1069-1070`·`:1616`). 남은 일은 측정이 아니라 **주입**입니다:
+  - [ ] `AI_RPD_LIMIT_FLASH_LITE = 500`이 운영 환경변수에 실제로 들어갔는지 — 미주입이면 게이트는 여전히 fail-open (`05_deploy.md:482` P1)
+  - [ ] `[확인 필요]` `05_deploy.md`의 `AI_RPD_LIMIT_*` 서술(`:65-67`·`:210`·`:315`·`:330`·`:482`)이 아직 **"3종 실측" + `gemini-2.5-*` 모델명 + "`pro`가 체험 정원을 결정한다"** 프레임 — D34 미반영. 소유자 `vercel-platform-engineer` 작업 진행 중 (본 보고서 작성 시점 기준)
 - [ ] Vercel 무료 플랜 실행 시간 상한·크론 최소 주기 — I2 `maxDuration 60`이 성립하는지
 - [ ] 선택 모델이 JSON Schema의 `minLength`/`minItems`를 어디까지 강제하는지
 - [ ] 브라우저별 STT/TTS 실측 V1~V5(`03_voice_pipeline.md:892`)
 - [ ] 사용자 키 검증 호출 1회(#38·#40)가 **사용자 키의 한도를 얼마나 먹는지** — `last_verified_at` 유예 창의 길이가 여기 걸림
+
+**D34 빠른 스캔 — `02_ai_architecture.md` 신규 미결 항목 (2026-09-11, 전수 재검증 아님)**
+
+D34 재설계가 **새로 연** 항목과, D34가 **닫았어야 하는데 남은** 노후 서술입니다. 다른 문서(`.env.example`, `05_deploy.md`, `04_data_layer.md`, `01_state_machine.md`, `02_prompts/evaluator.md`)는 동시 편집 중이라 스캔 대상에서 제외했고, 다음 라운드 대조 대상입니다.
+
+- [ ] **신규 추적 항목 ✅ 편입.** `[확인 필요]` 이번에 재지 않은 최신 Flash 계열(`gemini-3.5-flash`·`3.5-flash-lite`·`3.6-flash`·`3.7-flash`·`3.8-flash`)의 무료 티어 RPD — `02_ai_architecture.md:249-254`. **하나라도 RPD > 500이면 하루 체험 정원 12가 즉시 올라갑니다.** 측정 전까지 추정 금지가 문서에 명시돼 있어 설계상 결함은 아니고, **"측정 대기" 성격이라 이 절이 맞는 자리**입니다. 소유자: 계정 보유자(측정) → `ai-interview-architect`(반영)
+- [ ] **노후 서술 (D34 미반영, 신규 결함 성격) — 소유자 `ai-interview-architect`.** 단일 버킷 전환 후에도 `pro`가 정원을 결정한다는 D27 시절 문장이 3곳 남아 있습니다. 지금은 `pro` 예약이 0이라 **본문과 서로 모순**입니다:
+  - `02_ai_architecture.md:862` — "`pro` 3 × N을 동시에 점유", "`pro`가 체험 정원을 결정하므로(8.3.1절)" → D30 가드의 **근거 자체가 무효한 서술**로 읽힘 (가드의 필요성은 유효하므로 `flash_lite 34 × N` 기준으로 고쳐 써야 함)
+  - `02_ai_architecture.md:1002` — "8.3.1절의 `floor(pro 유효한도 / 3)`" → 실제 공식은 `floor(425 / 34)` (4.2.3절)
+  - `02_ai_architecture.md:1006`·`:1009` — "평가(`pro` 3)와 코치(`flash` 4 중 2)" → 단일 버킷 `flash_lite` 기준으로 재기술 필요
+- [ ] **노후 `[확인 필요]` 마커 — 소유자 `ai-interview-architect`.** `02_ai_architecture.md:1062` "무료 티어의 실제 RPM/RPD/TPM은 아직 측정되지 않았다(4.2절, 14절)" → **4.2절이 이미 실측표로 대체**했으므로 이 마커는 제거 대상. 남겨 두면 본 보고서의 "측정 완료" 판정과 문서가 어긋납니다
 
 ---
 
@@ -192,7 +205,7 @@
 
 | 소유자 | 조치 |
 |---|---|
-| `ai-interview-architect` | **G1**(`02_ai_contracts.md` 3.5절 `stream_error.code`에 `byok_key_invalid`·`byok_quota_exhausted` 추가), **G4**(`02_ai_architecture.md` 8.3.5절 SQL·13.6.1절 표를 `p_limits` 포함 4인자로 + **D30 동시 예약 가드 전체를 반영**), G8 |
+| `ai-interview-architect` | **G1**(`02_ai_contracts.md` 3.5절 `stream_error.code`에 `byok_key_invalid`·`byok_quota_exhausted` 추가), **G4**(`02_ai_architecture.md` 8.3.5절 SQL·13.6.1절 표를 `p_limits` 포함 4인자로 + **D30 동시 예약 가드 전체를 반영**), G8, **D34 잔여**(6절 "D34 빠른 스캔" — `:862`·`:1002`·`:1006`의 `pro` 기준 서술과 `:1062` 노후 `[확인 필요]` 마커 정리) |
 | `shadcn-ui-engineer` | **G2**(`usePrepareSession` 오류 표에 409 `trial_reservation_exists` 추가, `details.existingSessionId`로만 링크 생성, **`activeSessions` 폴백 폐기**, 14절 §5·16절 #10 닫기), G10 |
 | `vercel-platform-engineer` | **G3**(4.6절 전이 표를 35행으로 확장, 신규 BYOK 전이 2행의 담당을 #9로 명시), G11, G8 |
 | `supabase-engineer` | **G6**(3.6절에 비전이 이벤트 `to_status` 규약 명문화 — `05:1593` R-A 회신), G9 |
