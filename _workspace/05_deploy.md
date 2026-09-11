@@ -147,7 +147,7 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
 | CI 검사 | `grep -rn "NEXT_PUBLIC_.*\(SERVICE_ROLE\|API_KEY\|SECRET\)" src/` 가 **0행**이어야 통과 |
 | CI 검사 2 | 클라이언트 번들(`.next/static/**`)에 `SUPABASE_SERVICE_ROLE_KEY`·`GOOGLE_AI_API_KEY`의 **값**이 없는지 확인 |
 | **AI 프로바이더를 클라이언트에서 직접 부르지 않음** | 고정 제약. 브라우저에서 LLM을 부르는 코드 경로는 하나도 없습니다 |
-| **CI 검사 3 (D28)** | `grep -rn "get_user_api_key\|decrypted_secret" src/` 의 결과가 **`src/lib/ai/credentials.ts` 한 파일뿐**이어야 통과. 복호화 지점이 늘어나는 것을 CI가 잡습니다 |
+| **CI 검사 3 (D28)** | `grep -rn "get_user_api_key\|decrypted_secret" src/ --exclude=database.types.ts` 의 결과가 **`src/lib/ai/credentials.ts` 한 파일뿐**이어야 통과. 복호화 지점이 늘어나는 것을 CI가 잡습니다. **`--exclude`가 필요한 이유(2026-09-11 구현 중 발견):** `src/lib/supabase/database.types.ts`는 **생성 파일**이고 스키마의 모든 함수 시그니처를 담으므로 `get_user_api_key`라는 **이름**이 반드시 들어갑니다. 제외하지 않으면 정상 상태에서 CI가 실패하고, 그 실패에 익숙해지는 순간 이 검사는 아무 일도 하지 않습니다. 타입 선언에는 **호출이 없으므로** 제외해도 검사의 뜻(복호화 **호출** 지점이 하나인가)은 그대로입니다 |
 | **CI 검사 4 (D28)** | 응답 직렬화에 키가 섞이는 사고 방지 — `grep -rn "select('\*')\|select(\"\*\")" src/app/api/account/api-key/` 가 **0행**. `user_api_keys`를 `select *`로 읽어 그대로 반환하는 경로를 두지 않습니다 |
 
 ### 1.4 사용자 API 키(BYOK)는 **환경변수가 아닙니다** (D28)

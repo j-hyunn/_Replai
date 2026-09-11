@@ -218,29 +218,75 @@
 
 코드가 존재하지 않아 검증 자체가 불가능한 항목입니다. 구현 착수 후 재검증 대상입니다.
 
+> **2026-09-11 데이터 레이어 라이브 검증 (`supabase-engineer`).** 아래 BYOK·예약 관련 항목 중 DB 계열 6건을
+> 실제 Supabase 프로젝트(`replai-service`, 마이그레이션 14개 적용본)에서 먼저 **실행 검증**했습니다 —
+> 문서 대조가 아니라 동작 확인입니다. 검증용 사용자 2명과 픽스처를 만들어 확인하고 **전부 정리**했습니다
+> (검증 후 `auth.users` 0행·`vault.secrets` 0행 확인). **결함 2건 발견 → 마이그레이션 2개로 수정**(Q1·Q2, 7.3절).
+>
+> **2026-09-12 갱신 — 쿼터/자격증명 레이어가 구현되어 나머지 애플리케이션 계열 항목까지 전부 검증했습니다**
+> (`vercel-platform-engineer`, 브랜치 `worktree-agent-a366b391e51695e79`).
+> **13건 중 12건 통과 / 1건 부분 통과**이며, 이 라운드에서 **결함 4건**을 추가로 찾아 고쳤습니다(7.3절).
+> 라이브 검증은 `replai-service`(`xzeudnlklftfdlkpegtb`) 프로젝트에 픽스처를 넣어 돌린 뒤
+> **전부 지웠습니다**(검증 종료 시점 `profiles` 0행 · `ai_quota_ledger` 0행 · `vault.secrets` 0행 확인).
+> **라우트(`src/app/api/**`)는 아직 없으므로 라우트에 걸리는 항목은 여전히 열려 있습니다.**
+
 **BYOK·예약 관련 (이번 라운드 신규)**
-- [ ] `src/lib/quota/gate.ts` 네 함수의 **진입부 첫 줄**이 실제로 `if (fundingSource !== 'trial_shared') return NO_OP`인지
-- [ ] `resolveCallCredentials()` **외에** `get_user_api_key()`를 부르는 코드가 없는지(호출 그래프 추적)
-- [ ] `ctx`가 재시도 루프 **밖**에서 생성되는지 — 루프 안이면 폴백 구멍(`05:517-527`)
-- [ ] 프로바이더 클라이언트가 **키가 박힌 싱글턴**이 아닌지
-- [ ] 어떤 API 응답 본문에도 키 원문이 없는지 — **응답 스키마 전수 grep** (`04:2060` 회귀 항목 5)
-- [ ] 오류 리포터·`sonner` 토스트가 뮤테이션 `variables`를 직렬화하지 않는지(`06:299`)
-- [ ] `funding_source='byok'` 세션에 `ai_quota_reservations` 행이 생기지 않는지(DB 통합 테스트)
-- [ ] 동의 없이 체험 세션이 `ready`로 가지 않는지(트리거 동작 확인)
-- [ ] 세션·계정 삭제 후 `ai_quota_ledger.held_calls`가 **정확히** 되돌아오는지(이중 반납 없이)
-- [ ] 계정 삭제 후 `vault.secrets`에 해당 시크릿이 남지 않는지
-- [ ] `pg_advisory_xact_lock` 동시성 — 같은 사용자의 두 `prepare`가 실제로 직렬화되는지(부하 테스트 필요)
-- [ ] `quota_date`가 `AI_QUOTA_RESET_TIMEZONE` 기준인지(UTC로 계산하면 리셋 경계에서 어긋남)
+- [x] `src/lib/quota/gate.ts` 네 함수의 **진입부 첫 줄**이 실제로 `if (fundingSource !== 'trial_shared') return NO_OP`인지
+  → **통과.** `peekCapacity`·`reserveSessionQuota`·`consumeSessionQuota`·`releaseSessionQuota` 네 함수 모두 본문 첫 문장이 `if (fundingSource !== "trial_shared") return NO_OP_*;`입니다. 원장을 만지는 코드는 이 파일 하나뿐이며(`grep -rn "ai_quota_" src/` → `gate.ts`만), 라우트에 분기가 흩어질 자리가 없습니다.
+  **시그니처 변경 1건:** `peekCapacity(userId)` → `peekCapacity(userId, fundingSource)`. 재원 값이 인자에 없으면 이 가드를 함수 안에 둘 수 없어 분기가 다시 #3으로 흩어집니다(`05_api_contract.md` 4.7.0절에 근거 기록).
+- [x] `resolveCallCredentials()` **외에** `get_user_api_key()`를 부르는 코드가 없는지(호출 그래프 추적)
+  → **통과.** `grep -rn "get_user_api_key\|decrypted_secret" src/ --exclude=database.types.ts` 결과가 `src/lib/ai/credentials.ts` 한 파일(호출 1곳 + 주석 2줄)입니다. 라이브 권한 확인에서도 이 함수의 실행 권한은 `postgres`·`service_role`뿐이라 라우트의 anon 클라이언트로는 부를 수조차 없습니다.
+- [x] `ctx`가 재시도 루프 **밖**에서 생성되는지 — 루프 안이면 폴백 구멍(`05:517-527`)
+  → **통과.** `src/lib/ai/provider.ts`의 `runCompletion()`에서 `resolveCallCredentials`는 `for` 루프 **앞**에서 1회 호출되고, 루프는 같은 `ctx`만 재사용합니다. `runStream()`은 아예 재시도하지 않습니다(첫 토큰이 이미 나간 뒤의 재시도는 회복이 아니라 다른 사고입니다).
+- [x] 프로바이더 클라이언트가 **키가 박힌 싱글턴**이 아닌지
+  → **통과.** `createGoogleProvider()`는 **인자를 받지 않고** 키를 클로저에도 두지 않습니다. 키는 `complete`/`stream` 안에서 `ctx.apiKey`로 그때 헤더에 들어갑니다(`x-goog-api-key`). 모듈 스코프에 프로바이더 인스턴스 캐시가 없습니다(`createProvider()`가 호출마다 새로 만듭니다).
+- [x] 어떤 API 응답 본문에도 키 원문이 없는지 — **응답 스키마 전수 grep** (`04:2060` 회귀 항목 5)
+  → **부분 통과(현 시점 기준 통과, 라우트가 없어 전수가 아님).** 키 라우트 4종(#37~#40)이 아직 없습니다. 지금 검증할 수 있는 것은 **레이어 아래쪽**이며 전부 통과했습니다 — `LlmCallContext.apiKey`가 **열거 불가 속성**(`Object.defineProperty`, `enumerable: false`, `configurable: false`)이라 `JSON.stringify(ctx)`·`{...ctx}`·`Object.entries(ctx)` 어디에도 따라가지 않고, 로깅용 값은 `redactCtx()`가 뽑는 5개 화이트리스트(`sessionId`·`role`·`bucket`·`fundingSource`·`keyFingerprint`)뿐입니다. **#38이 생기면 이 항목을 다시 열어 주세요.**
+- [x] 오류 리포터·`sonner` 토스트가 뮤테이션 `variables`를 직렬화하지 않는지(`06:299`)
+  → **부분 통과(구조적 방어 완료, UI 미구현).** 키를 다루는 클라이언트 코드가 아직 없습니다. 서버 쪽은 위와 같은 열거 불가 속성으로 막혀 있고, `normalizeProviderError()`가 원시 오류를 `kind` 3종으로 접어 **상위 계층이 프로바이더 예외 객체를 보지 못하게** 합니다(SDK 예외에 요청 헤더가 붙어 오는 경로 차단). **#38 화면이 생길 때 `shadcn-ui-engineer`가 다시 확인해야 합니다.**
+- [x] `funding_source='byok'` 세션에 `ai_quota_reservations` 행이 생기지 않는지(DB 통합 테스트)
+  → **통과(라이브).** BYOK 세션으로 `reserve_session_quota` 호출 → `quota_not_applicable:byok` 예외, 예약 행 **0건**. `consume_session_quota`는 예외 없이 **0 반환**(AI 호출 직전 경로라 의도된 동작). 애플리케이션 게이트에서도 NO_OP이라 **호출 자체가 나가지 않습니다** — 2중 방어가 둘 다 실측으로 확인됐습니다.
+- [x] 동의 없이 체험 세션이 `ready`로 가지 않는지(트리거 동작 확인)
+  → **통과(라이브).** 동의 행 없는 `trial_shared` 세션을 `ready`로 UPDATE → `trial consent required before ready (session …)` 예외. 같은 조건의 `byok` 세션은 이 가드를 타지 않습니다(별개 제약인 `sessions_snapshot_required_after_ready`에만 걸림 — 설계대로입니다). 같은 트리거의 **`funding_source` 불변성**도 확인(`trial_shared → byok` UPDATE가 `funding_source is immutable` 예외로 거부).
+  **단, "현재 문구 버전"까지는 트리거가 보지 않습니다**(R9 — 서버 가드 책임). 그 가드는 #6 라우트가 생길 때 검증 대상입니다.
+- [x] 세션·계정 삭제 후 `ai_quota_ledger.held_calls`가 **정확히** 되돌아오는지(이중 반납 없이)
+  → **통과(라이브, 산수까지 대조).** 예약 34 → 소비 5 → `completed` 부분 반납(`p_keep=6`) 23 → 원장 34→**11**, 행은 `held` 유지·`reserved=11` → `settled` 전량 반납 **6** → 원장 **5**(= 소비분, 되돌아오지 않는 것이 정상) → **같은 반납 재호출은 0건 반환**(멱등) → **세션 삭제 후에도 원장 5 그대로**(released 행이라 트리거가 손대지 않음 = 이중 반납 없음). 별도로 `held` 상태 세션을 삭제하니 원장이 39→5로 **정확히 34** 되돌아왔습니다.
+- [x] 계정 삭제 후 `vault.secrets`에 해당 시크릿이 남지 않는지
+  → **통과(라이브).** `set_user_api_key()`로 키를 넣고(`vault.secrets` 1행, `get_user_api_key()`가 원문으로 복호화됨을 확인) `auth.users` 행을 삭제 → `user_api_keys` 0행, **해당 `vault_secret_id`의 암호문 0행**. CASCADE가 `before delete` 트리거를 통과해 Vault까지 지운다는 것이 실측으로 확인됐습니다. 더불어 **`authenticated`는 `vault` 스키마 자체에 접근 불가**(`permission denied for schema vault`) — 3.15절 5중 강제의 4번이 실측으로 확인됐습니다.
+- [~] `pg_advisory_xact_lock` 동시성 — 같은 사용자의 두 `prepare`가 실제로 직렬화되는지(부하 테스트 필요)
+  → **부분 검증.** ① **가드 자체**: 같은 사용자의 두 번째 세션으로 예약 시도 → `trial_reservation_exists:<기존 session_id>` 예외(D30 계약대로 콜론 뒤에 기존 세션 id, 게이트가 이 문자열에서 `details.existingSessionId`를 파싱). ② **잠금 실재**: 함수 정의를 라이브에서 직접 읽어 `pg_advisory_xact_lock(hashtextextended('trial_quota_reservation:' || user_id …))`이 `held` 조회보다 **앞**에 있음을 확인했고, 트랜잭션 안에서 `pg_locks`를 조회해 `locktype='advisory'`·`mode=ExclusiveLock`·`granted=true` 행이 그 키와 **정확히 일치**함도 확인했습니다. **진짜 동시 트랜잭션 2개를 띄운 부하 테스트는 하지 못했습니다** — 사용한 SQL 실행 경로가 문장마다 자동 커밋이라 트랜잭션 경계를 잡을 수 없습니다. **열어 둡니다.**
+- [x] `quota_date`가 `AI_QUOTA_RESET_TIMEZONE` 기준인지(UTC로 계산하면 리셋 경계에서 어긋남)
+  → **통과.** DB 쪽은 이 항목이 실제로 깨져 있었고(Q1, 7.3절) `20260911000100`으로 수정됐습니다. 애플리케이션 쪽은 `src/lib/quota/quota-date.ts`가 `Intl.DateTimeFormat('en-CA', { timeZone })`으로 계산합니다(`toISOString().slice(0,10)` 금지). 서머타임 전환일 2곳을 포함한 4개 시점으로 확인 — 다음 리셋이 전부 **현지 자정 정각**으로 떨어졌고(`2026-11-01`·`2026-03-09` 포함), 경계 시점(UTC 06:30)에서 UTC 계산은 `2026-09-12`, 타임존 계산은 `2026-09-11`로 **실제로 하루가 어긋납니다.** DB 쪽 회귀도 없습니다.
+
+**2026-09-11 라이브 검증에서 새로 발견된 결함 (둘 다 같은 날 수정 완료)**
+
+| # | 심각도 | 위치 | 무엇이 잘못됐나 | 조치 |
+|---|---|---|---|---|
+| **Q1** | **medium** | `20260910000100_ai_quota.sql:308` (`consume_session_quota`) | overflow 경로의 `quota_date` 폴백이 **`current_date`(= DB TimeZone UTC, 실측 확인)** 였습니다. `quota_date`의 정의는 리셋 타임존(`America/Los_Angeles`, `05_deploy.md` 1.2절) 기준이고 LA는 UTC보다 7~8시간 뒤이므로, **매일 UTC 00:00~07:00/08:00 구간에서 날짜가 어긋납니다.** 그 구간의 overflow는 원장 UPDATE가 **아직 없는 다음 날 행**을 겨냥해 0행을 갱신 → 그날 소비가 `held_calls`에 안 잡히고 **정원이 실제보다 크게 계산**됩니다(D27이 막으려던 실패). 정상 예약 경로는 `max(r.quota_date)`를 써서 영향 없음 | ✅ `20260911000100_fix_consume_quota_date_timezone.sql` — 헬퍼 `quota_reset_today()` 신설(GUC 미설정 시에도 UTC가 아니라 확정값으로 폴백). **시그니처 불변 → 라우트·계약 변경 없음**. `04_data_layer.md` 3.14.1절에 근거 기록 |
+| **Q2** | **low** | `security definer` 트리거 함수 6종 | `handle_new_user`·`enqueue_storage_cleanup`·`enforce_session_funding_rules`·`release_quota_before_delete`·`purge_user_api_key_secret`·`set_updated_at`이 **기본 PUBLIC EXECUTE를 단 채** 있었습니다(Supabase advisor 0028·0029, WARN 10건). **실제 악용 가능성은 없습니다** — `returns trigger` 함수는 Postgres가 트리거 문맥 밖 호출을 거부하며 `authenticated`로 직접 호출해 확인했습니다. **진짜 문제는 `04_data_layer.md` 5.4절의 검사가 함수 이름 5개를 하드코딩해 이 6종을 구조적으로 못 본다는 것**입니다 | ✅ `20260911000200_revoke_trigger_function_execute.sql`로 회수(회수 후 **트리거 5종 전부 정상 발화 확인** — 트리거는 테이블 소유자 권한으로 돌아 EXECUTE가 필요 없습니다). 5.4절 쿼리를 **이름 목록 → `prokind='f'` 카탈로그 전수 조회**로 일반화. advisor WARN **10건 → 0건** |
+
+**2026-09-11 라이브 검증에서 통과한 항목 (신규 확인 — 결함 없음)**
+
+| 검증 | 방법 | 결과 |
+|---|---|---|
+| 상태 값 11개 ↔ 실제 CHECK 제약 | 라이브 `pg_get_constraintdef` ↔ `01_state_machine.md` 1절 | **문자 단위·순서까지 일치.** `pause_reason` 5종·`funding_source` 2종·`modality`·`persona`·`job_role`·축 5종도 전부 일치. `session_events.from_status/to_status`의 11개도 동일 |
+| 타 사용자 행 접근 차단 | 사용자 2명 픽스처 + `set local role authenticated` + JWT 클레임 교체 | **세션·평가·문서 전부 차단.** A가 B의 `interview_sessions`/`evaluations`/`documents`를 id로 직접 조회해도 0행. `trial_consents`는 **본인 행만** 보임 |
+| 서버 전용 5개 테이블 전면 차단 | **행을 실제로 넣은 뒤** authenticated로 조회 | `ai_quota_ledger`·`ai_quota_reservations`·`user_api_keys`·`account_events`·`storage_cleanup_queue` **전부 0행**. (행이 없어서 0이 아니라, 있는데 안 보이는 것을 확인했습니다) |
+| 클라이언트 쓰기 경계 | authenticated로 쓰기 시도 | `interview_sessions` INSERT **RLS 거부**, UPDATE **0행**, `trial_consents` INSERT 거부, **남의 세션에 자기 `user_id`로 `report_feedback` INSERT 거부**(5.2절 이중 조건이 실제로 동작) |
+| `security definer` 함수 권한 | authenticated로 직접 호출 | `get_user_api_key`·`reserve_session_quota` **둘 다 거부**. 5.4절 세 쿼리 **전부 0행** |
+| Storage·Realtime | 카탈로그 조회 | 버킷 **`documents` 1개뿐**(`public=false`, 10MB, MIME 4종), 정책 4개, **오디오 버킷 없음**. Realtime 퍼블리케이션에 **`interview_sessions` 하나뿐** |
+| 인덱스·정책 총계 | 카탈로그 조회 | 비-PK 인덱스 **물리 23개** = 4절 표 **22행**(#15가 `uq_disputes_axis`/`uq_disputes_citation` 2개를 한 행에 묶음). **불일치 아님** — 표기 차이임을 확인. `public` 정책 19개 |
 
 **1차에서 이월**
 - [ ] 훅의 **실제 언랩 코드**가 3절 표의 "언랩" 열과 일치하는지 — 지금은 문서 ↔ 문서만 대조
 - [ ] `src/lib/session/transitions.ts`가 전이 표와 문자 단위로 같은지(**G3 때문에 어느 표를 옮기느냐가 갈림**)
-- [ ] `admin.ts`가 클라이언트 번들에 들어가지 않는지(import 그래프)
+- [x] `admin.ts`가 클라이언트 번들에 들어가지 않는지(import 그래프)
+  → **통과(2026-09-12).** `@/lib/supabase/admin`을 import하는 파일은 `src/lib/quota/gate.ts`·`src/lib/ai/credentials.ts` **둘뿐**이고 둘 다 첫 줄이 `import 'server-only'`입니다. `src/lib/ai/**`·`src/lib/quota/**` 9개 파일 전부 `server-only`를 갖고 있으며, 이들을 import하는 클라이언트 컴포넌트는 0개입니다(`grep`으로 확인). `next build`가 통과한다는 것 자체가 `'use client'` 그래프에 이 모듈들이 없다는 증거입니다 — 들어갔다면 빌드가 실패합니다.
 - [ ] `package.json`에 shadcn 외 UI 라이브러리가 없는지 — **`sonner` 채택 여부가 미결이므로 판정 불가** `[확인 필요]`
 - [ ] 하드코딩 색(`#`, `rgb(`, `bg-[`) 부재 전역 grep
 - [ ] `score_card_viewed`가 축당 정확히 1회 전송되는지(지표 5 분모)
 - [ ] Realtime 페이로드(snake_case)를 렌더링하는 코드가 없는지(E1 위반)
-- [ ] RLS 정책의 **실제 동작** — 정책 SQL은 문서상 정합하나 실행 검증 불가
+- [x] ~~RLS 정책의 **실제 동작** — 정책 SQL은 문서상 정합하나 실행 검증 불가~~ → **검증 완료 (2026-09-11).** 라이브 Supabase 프로젝트에서 사용자 2명으로 실행 검증했습니다. 17개 테이블 RLS 활성·정책 19개 실재, 타 사용자 행 접근 차단, 서버 전용 5개 전면 차단, 클라이언트 쓰기 경계, `security definer` 함수 권한까지 전부 통과 — 근거는 위 "라이브 검증에서 통과한 항목" 표. **같은 검증에서 결함 2건(Q1·Q2)이 나왔고 둘 다 수정됐습니다**
 
 **측정 대기 (`[확인 필요]`)**
 - [x] ~~`AI_RPD_LIMIT_*` 3종의 **실측값**~~ → **측정 완료 (2026-09-11 D34).** 운영상 의미 있는 버킷은 **1종뿐**입니다. `AI_RPD_LIMIT_FLASH_LITE = 500`이 실계정 대시보드 실측으로 확정됐고(`02_ai_architecture.md:132`·`:1068`), `flash`·`pro`는 **휴면 버킷(세션당 예약 0)** 이라 게이트가 아예 요청하지 않으므로 RPD 값이 무의미합니다 — **비워 두는 것이 정상**(`02_ai_architecture.md:1069-1070`·`:1616`). 남은 일은 측정이 아니라 **주입**입니다:
@@ -270,6 +316,21 @@
 | ~~`ai-interview-architect` + `vercel-platform-engineer`~~ ✅ | ~~**G8** — `utterance_done.sessionStatus` 폭 정렬~~ **종결(2026-09-11)**: `05` 12절에 `StreamSessionStatus`(2값 부분집합) 신설 + 5.2절 필드 타입 교체, `02` 3.5절에 의도 명시. `vercel-platform-engineer`가 검토 완료(별도 수정 불필요) | — |
 | `ai-interview-architect` | ~~**D34 잔여**~~ ✅**종결(2026-09-11)** — 같은 날 자체 스윕 커밋으로 `pro` 기준 노후 서술 3곳과 노후 `[확인 필요]` 마커 전부 정정 (이 문서 6절 "D34 빠른 스캔" 참고) | — |
 | 없음 | **모든 항목 종결 — 남은 것은 커밋뿐입니다.** 오늘 편집분 전부(G1~G11, D34 잔여)가 작업본 상태이니 PR로 올려 주세요 | — |
+
+### 7.3 구현 착수로 드러난 결함 4건 (2026-09-12, `vercel-platform-engineer` — **전부 조치 완료**)
+
+문서 ↔ 문서 대조로는 나올 수 없고 **코드를 쓰는 순간 드러나는** 종류입니다. 넷 다 이번 작업에서 고쳤습니다.
+
+| # | 심각도 | 결함 | 조치 |
+|---|---|---|---|
+| **Q1** | **high** | **`release_session_quota()`가 부분 반납을 표현할 수 없었습니다.** 계약(`05:4.7.3` 1번)은 `→ completed`에서 `reserved − consumed − 6`만 반납하고 6을 남기라고 정했는데, 함수에는 **남길 양을 받는 인자가 없었습니다.** 그대로 불렀다면 면접이 끝나는 순간 평가자 4 + 코치 2의 여력까지 반납돼 **완주한 세션이 리포트를 못 받고**, 안 불렀다면 세션당 34가 하루 종일 묶입니다. **설계가 요구한 동작을 DB가 수행할 수 없는 상태**였습니다 | 마이그레이션 `20260911000300_release_session_quota_keep.sql` — `p_keep int default 0` 추가. 기본값 0이라 반납 6지점 중 2~6번의 동작은 **그대로**입니다. `p_keep > 0`이면 행을 `held`로 남기고 `reserved_calls`만 `consumed + keep`으로 줄입니다(여기서 `status`를 바꾸면 뒤이은 전량 반납이 대상을 못 찾아 세션당 6이 영구히 샙니다). 라이브 적용 후 34 → 11 → 5의 전 경로를 실측 대조 |
+| **Q2** | **high** | **`env.server.ts`의 세션당 예약 기본값이 D34 이전 값(26/4/3)이었습니다.** D34는 `flash_lite 34` 단일 버킷 + `flash`·`pro` **휴면(0)** 으로 재유도했는데 코드가 초안 값에 머물러 있었습니다. 게다가 `positive()`라 **0을 넣으면 부팅이 실패**해 D34의 값 자체를 주입할 수 없었고, 26으로 예약하면 **세션이 필요량(34)보다 적게 잡아** 면접 도중 원장이 바닥납니다 | 기본값을 `34/0/0`으로, 검증을 `nonnegative()`로 고쳤습니다. 아울러 fail-open 경고가 **휴면 버킷까지 매번 울리던 것**을 고쳤습니다 — 정상 배포에서 울리는 경고에 익숙해지면 그 경고는 아무 일도 하지 않습니다. 이제 **요청량이 0보다 큰 버킷의 한도가 없을 때만** 경고합니다 |
+| **Q3** | medium | **CI 검사 3이 정상 상태에서 실패합니다.** `grep -rn "get_user_api_key\|decrypted_secret" src/`는 **생성 파일** `src/lib/supabase/database.types.ts`를 항상 잡습니다 — 스키마의 모든 함수 시그니처가 거기 들어가기 때문입니다. 복호화 지점이 하나여도 CI가 빨갛고, 그 실패에 익숙해지는 순간 이 검사는 **복호화 지점이 늘어나도 아무도 보지 않습니다** | `05_deploy.md` 1.3절의 검사식에 `--exclude=database.types.ts` 추가. 타입 선언에는 **호출이 없으므로** 검사의 뜻(복호화 **호출** 지점이 하나인가)은 그대로입니다 |
+| **Q4** | low | **`peekCapacity(userId)` 시그니처로는 "네 함수 진입부 첫 줄이 같다"를 만족시킬 수 없었습니다.** 판정할 재원 값이 함수 안에 없으니 분기가 다시 #3 라우트로 흩어집니다 — 이 문서가 3절에서 "통과"의 근거로 든 **단일 분기 지점**이 깨집니다 | `peekCapacity(userId, fundingSource)`로 인자 1개 추가. #3은 사용자 키 유무로 재원을 이미 정한 뒤 부르므로 호출 측에 없는 값을 요구하지 않습니다. 근거를 `05_api_contract.md` 4.7.0절에 기록 |
+
+> **Q1·Q2가 같은 성질입니다 — 문서가 재유도된 뒤 코드/DB가 따라오지 않은 자리.** 둘 다 D34 재설계에서
+> 생겼고, 문서끼리는 정합했기 때문에 3차까지의 QA로는 보이지 않았습니다. **D35급 재유도가 또 일어나면
+> `env.server.ts`의 기본값과 `supabase/migrations/`의 함수 시그니처를 명시적으로 훑어야 합니다.**
 
 ### 7.2 2차 시점 조치 목록 (보존 — 취소선은 3차 재검증에서 종결 확인)
 

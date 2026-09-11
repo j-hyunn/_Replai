@@ -48,9 +48,14 @@ const serverEnvSchema = z.object({
   AI_QUOTA_SAFETY_MARGIN_PCT: z.coerce.number().int().min(0).max(100).default(15),
   /** Gemini RPD는 태평양 시간 자정에 리셋됩니다 (05_deploy.md 3.1절, 2026-09-10 확인). */
   AI_QUOTA_RESET_TIMEZONE: z.string().default("America/Los_Angeles"),
-  AI_RESERVE_FLASH_LITE_PER_SESSION: z.coerce.number().int().positive().default(26),
-  AI_RESERVE_FLASH_PER_SESSION: z.coerce.number().int().positive().default(4),
-  AI_RESERVE_PRO_PER_SESSION: z.coerce.number().int().positive().default(3),
+  /**
+   * 세션당 예약량 (D34 — 02_ai_architecture.md 8.3.1절).
+   * `flash`·`pro`는 **휴면 버킷**이라 기본값이 0이며, 0은 정상값이므로 `positive()`가 아니라
+   * `nonnegative()`입니다. 요청량 0인 버킷은 DB 함수가 원장 행조차 만들지 않고 건너뜁니다.
+   */
+  AI_RESERVE_FLASH_LITE_PER_SESSION: z.coerce.number().int().nonnegative().default(34),
+  AI_RESERVE_FLASH_PER_SESSION: z.coerce.number().int().nonnegative().default(0),
+  AI_RESERVE_PRO_PER_SESSION: z.coerce.number().int().nonnegative().default(0),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;
@@ -75,18 +80,22 @@ export function serverEnv(): ServerEnv {
 
 /**
  * fail-open은 확정 동작이지만 침묵하지는 않습니다 (05_deploy.md 1.2절).
- * 한도 3종 중 하나라도 없으면 예약 게이트는 열린 채로 동작하므로 D27은 실질적으로 미적용입니다.
+ * 한도가 없으면 예약 게이트는 열린 채로 동작하므로 D27은 실질적으로 미적용입니다.
+ *
+ * **휴면 버킷은 경고하지 않습니다** (D34) — 세션당 예약량이 0인 버킷은 게이트가 아예 요청하지
+ * 않으므로 RPD 값이 없는 것이 정상입니다. 세 버킷을 무조건 경고하면 정상 배포에서 매번 울리는
+ * 경고가 되고, 경고가 울리는 것이 정상이 되면 경고는 아무 일도 하지 않습니다.
  */
 function warnIfQuotaGateInert(env: ServerEnv): void {
   if (!env.AI_QUOTA_GATE_ENABLED) return;
   const missing = (
     [
-      ["AI_RPD_LIMIT_FLASH_LITE", env.AI_RPD_LIMIT_FLASH_LITE],
-      ["AI_RPD_LIMIT_FLASH", env.AI_RPD_LIMIT_FLASH],
-      ["AI_RPD_LIMIT_PRO", env.AI_RPD_LIMIT_PRO],
+      ["AI_RPD_LIMIT_FLASH_LITE", env.AI_RPD_LIMIT_FLASH_LITE, env.AI_RESERVE_FLASH_LITE_PER_SESSION],
+      ["AI_RPD_LIMIT_FLASH", env.AI_RPD_LIMIT_FLASH, env.AI_RESERVE_FLASH_PER_SESSION],
+      ["AI_RPD_LIMIT_PRO", env.AI_RPD_LIMIT_PRO, env.AI_RESERVE_PRO_PER_SESSION],
     ] as const
   )
-    .filter(([, value]) => value === undefined)
+    .filter(([, limit, reservePerSession]) => reservePerSession > 0 && limit === undefined)
     .map(([name]) => name);
 
   if (missing.length > 0) {
