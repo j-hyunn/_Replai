@@ -492,3 +492,57 @@
       (크론은 UI가 부르지 않습니다). 계약 1절 봉투 규칙과 충돌하지 않는지 확인이 필요합니다.
 - [ ] **평가 재시도의 실제 도달** — `runEvaluatorPasses()`가 아직 던지므로 3회 재시도 후 `failed`가
       실측 경로입니다. **프롬프트가 붙은 뒤에야** ①·② 경로가 성공으로 끝나는 것을 볼 수 있습니다.
+
+### 8.5 2회차 재검증 (2026-09-12, `qa-inspector`) — **하네스 규정상 마지막 재검증**
+
+> 8.4절은 조치자의 자기 보고입니다. 이 절은 **QA가 파일 현재 상태를 직접 읽어** 독립 확인한
+> 결과입니다. 읽은 파일: `src/app/api/internal/jobs/evaluate/route.ts`(전문)·
+> `src/app/api/cron/daily/route.ts`(전문)·`src/lib/session/{lifecycle,store,transitions}.ts`(전문)·
+> `src/lib/ai/{errors,provider}.ts`(정규화·스트림)·`src/app/api/sessions/[sessionId]/{start,turns}/route.ts`·
+> `src/app/api/sessions/route.ts`·`src/lib/api/respond.ts`·`vercel.json`·`supabase/migrations/**`.
+> **이 라운드도 코드를 수정하지 않았습니다.**
+
+| # | 심각도(발견 시) | 판정 | 근거 |
+|---|---|---|---|
+| **R1** | critical | **재검증 통과** | 되돌림(29행) 뒤 구동자 3단이 실재합니다 — 같은 호출 재개(`evaluate/route.ts:243-254`), 자기 재호출(`279-328`, `after()` + `x-job-secret`, `delayMs ≤ 15s`), 3회 실패 시 `exhaust()` → `failed`(`290-295`). 재진입은 `resumeEvaluating()`(`167-179`)이라 `evaluations` 행도 `attempt_count`도 리셋되지 않습니다. 선점 경합: 재호출을 받은 새 인스턴스의 조건부 UPDATE 키는 `evaluations.status='running'`이며 되돌림 경로가 이 값을 바꾸지 않으므로 **0행 경합은 발생하지 않습니다**. `completed → failed`는 전이 표 27행에 실재해 `after()` 안의 `exhaust()`가 `assertTransition`에 막히지 않습니다. 크론 4번(`completed` 고아)은 `updated_at < now − WATCHDOG_EVALUATING_TIMEOUT_MIN`(기본 10분) 가드가 있고 `trg_interview_sessions_updated_at`이 실재하므로 **방금 되돌린 세션을 낚아채지 않습니다**. 워치독 5종 전부 구현(`cron/daily/route.ts:79-83`)이며 `vercel.json`에 `crons` 등록 확인. **`completed`에 방치되고 끝나는 경로는 찾지 못했습니다.** 다만 Hobby 크론이 일 1회라 **함수가 통째로 죽은 경우의 회복 지연은 최대 24시간**입니다(설계 제약, 결함 아님) |
+| **R2** | high | **재검증 통과** | `start/route.ts:52-56` — `from !== "ready"`면 409 `invalid_transition`(`details:{from,to:"in_progress"}`). `paused → in_progress`의 진입점은 #14 `resume`뿐이며 재개 가드 3종은 `resume/route.ts:52-79`에 그대로 있습니다 |
+| **R3** | high | **재검증 통과** | `stream_error.code` 5종 전부 도달 가능: `llm_timeout`(`errors.ts:229-231` 408/504·타임아웃 마커) · `llm_rate_limited`(`errors.ts:209-227`) · `llm_failed`(분류 불명 `errors.ts:242` + 비정규화 오류 `turns:637`) · `byok_key_invalid`/`byok_quota_exhausted`(`turns:664-672`). 전이 표 **14행**은 `turns:705-725`(`pause_reason:'rate_limited'` + `resumable_after = now + (Retry-After ?? 1h)`), **20행**은 `turns:678-693`(`failSession(..., 'provider_permanent_error')`)에 실재합니다. 판정 순서도 계약 10.2절대로 401/403 → 429 → 408/504 → 4xx `permanent` → 나머지 `transient`이며 **5xx를 `permanent`가 잡아채지 않습니다**(`errors.ts:234-236`은 400~499만, 409 제외). 공용 키의 401/403은 `permanent`(`errors.ts:203-205`) ✅ |
+| **R4** | medium | **재검증 통과** | `provider.ts:155-189` — 첫 토큰 이후(`yieldedAny`)에는 재시도하지 않고, `attempt`를 정직하게 넘기며(`169`), 클라이언트 abort는 재시도 루프를 돌리지 않습니다(`173`). 재시도마다 `consumeSessionQuota`를 호출 **전에** 부릅니다(`159`, 계약 4.7.2절대로) |
+| **R5** | medium | **부분 통과** | `session_notice`가 `utterance_done`보다 **먼저** 전송됩니다(`turns:340-341`), 종류는 `distress_guard`·`pressure_capped` 2종. `rate_limit_fallback` 종류는 여전히 미전송이며 이는 8.4절이 스스로 밝힌 잔여입니다 — 4단계에서는 같은 스트림에 `stream_error`가 나가므로 UI가 정보를 잃지는 않습니다. **문안 합의(`shadcn-ui-engineer`)는 미착수** |
+| **R6** | medium | **재검증 통과** | 반납과 기록이 `releaseAndRecord()` 한 함수로 묶여(`lifecycle.ts:63-83`) 5지점 전부와 **크론 만료 스윕(6번째 지점, `releaseExpiredReservation`)** 까지 같은 이벤트를 남깁니다. `recordObservationEvent`가 `from_status = to_status`를 강제하므로 비전이 이벤트 규약도 지켜집니다. BYOK는 `applicable:false`로 기록 없음 |
+| **R7** | medium | **재검증 통과** | `turns:390-400` — `aborted`면 META 도착 여부와 무관하게 `interviewer_stream_aborted`를 남기고(`detail:{metaMissing}`), `interviewer_meta_missing`은 별개 이벤트입니다 |
+| **R8** | low | **재검증 통과** | `sessions/route.ts:182-189` — `ApiError('internal_error', …, { status: 501 })` |
+
+**검증·빌드 (QA가 직접 실행).** `npm run typecheck`(`next typegen && tsc --noEmit`) · `npm run lint` ·
+`npm run build` **3종 전부 통과**. 빌드용 `.env.local`은 검증 직후 삭제했고 커밋하지 않았습니다
+(`git status` 청결 확인).
+
+#### 크론 응답 봉투 판정 (8.4절 미결 질문)
+
+**충돌하지 않습니다 — 조건부 통과.** `{ ok: true, watchdogs: {…} }`는 계약 1절의
+"부작용만 `{ok:true}`"와 "복합(각 리소스를 자기 이름의 키로)"의 중간 형태이지만,
+① 1절의 금지 규칙은 **최상위 배열**과 **성공/오류 바디 혼합** 둘뿐이고 둘 다 위반이 아니며,
+② 1절이 규칙의 근거로 든 것은 "훅이 깨진다"인데 **C1은 41개 엔드포인트 표의 대응 훅 열이 비어
+있는 유일한 계열**(플랫폼 크론이 호출)이고, ③ 1절 스스로 "오브젝트로 감싸면 필드 추가는 하위
+호환"이라고 적었습니다. **단, 계약 1절에 이 형태의 자리가 없다는 것은 사실이므로**
+`vercel-platform-engineer`는 1절에 "내부/크론 라우트는 `{ok:true}`에 관측 카운터를 덧붙일 수
+있다(대응 훅이 없는 경로에 한함)" 한 줄을 추가해 주세요. **low · 문서 조치 · 코드 변경 불필요.**
+
+#### 이번 라운드에서 **새로 발견된** 결함
+
+| # | 심각도 | 경계 | 위치 | 현재 | 기대 | 소유자 |
+|---|---|---|---|---|---|---|
+| **R9** | **medium** | 전이 표 11행 ↔ #9 ↔ 크론 워치독 2 | `src/app/api/sessions/[sessionId]/turns/route.ts`(`applyTransition` 호출은 646·707 두 곳뿐) + `src/app/api/cron/daily/route.ts:122-135` | **전이 표 11행(`in_progress → in_progress`, "답변 제출 → 다음 질문 생성")을 실행하는 코드가 없습니다.** #9는 `turns`·`questions`만 쓰고 세션 행을 건드리지 않으므로 ① 11행이 **죽은 전이**이고, ② 턴마다 `session_events`가 남지 않으며, ③ **`interview_sessions.updated_at`이 턴마다 갱신되지 않습니다.** 그런데 워치독 2는 "정상 진행 중인 세션은 턴마다 `updated_at`이 갱신되므로 여기 걸리지 않습니다"(`cron/daily/route.ts:124`)를 전제로 `updated_at` 기준 `max_duration_min + 30분`을 봅니다 → **`start` 이후 그만큼 지난 진행 중 세션이 크론 시각에 `paused(connection_lost)`로 끊깁니다**(20분 세션이면 시작 50분 뒤부터). 크론이 일 1회라 적중 확률은 낮지만 **잰 시계가 틀렸습니다** | 둘 중 하나: (a) #9가 턴 확정 시 11행을 `applyTransition`으로 실행(표·지표·`updated_at` 셋이 한 번에 맞습니다), 또는 (b) 워치독 2가 `turns`의 최신 `created_at`을 기준으로 방치를 판정. **(a)를 권합니다** — 11행이 표에만 있고 코드에 없는 상태가 R2·R3과 같은 성질의 구멍입니다 | `vercel-platform-engineer` |
+| **R10** | low | 크론 워치독 3 ↔ I2 정산 구간 | `src/app/api/cron/daily/route.ts:169-179`·`276-287` ↔ `evaluate/route.ts:132-139` | 워치독 3은 `evaluating`인데 `running` 평가가 없으면 **즉시 `failSession`** 합니다(주석 `171`은 "재등록 대상"이라고 적혀 있어 **주석과 코드가 반대**입니다). I2는 `evaluations.status='succeeded'`로 닫은 **직후**(`132-135`) `settleEvaluatedSession()`(`139`)으로 `evaluated` 전이를 하므로, 그 사이 수 ms 동안 "`evaluating` + `running` 없음"이 성립합니다. 이 창에 크론이 겹치면 **평가에 성공한 세션이 `failed`로 내려가고** I2의 정산 전이는 0행으로 409를 던집니다 | 세션 `updated_at`에도 워치독 시한 가드를 걸거나(크론 4번과 같은 형태), `running`이 없을 때는 **재등록**(주석대로)으로 처리 | `vercel-platform-engineer` |
+| **R11** | low | I2 ↔ `evaluations` 원장 | `src/app/api/internal/jobs/evaluate/route.ts:82-101` | 선점 UPDATE가 `started_at`을 먼저 찍은 뒤 `resumeEvaluating()` 결과가 `evaluating`이 아니면 `return ok()`로 빠집니다. 그때 **`evaluations` 행은 `running`인 채로 남고**, 워치독 3은 `evaluating` 세션만·워치독 4는 `completed` 세션만 훑으므로 (예: 크론이 먼저 `failed`로 내린 세션) 그 행을 정리하는 주체가 없습니다 | 그 분기에서 `evaluations`를 `failed`(또는 `canceled`)로 닫거나, 워치독에 "종료 상태 세션의 `running` 평가 정리"를 추가 | `vercel-platform-engineer` |
+
+> **R9~R11은 이번 라운드가 마지막 재검증(하네스 규정 2회)이므로 이 리포트에 `미해결`로 남습니다.**
+> 8.3절의 기존 미검증 항목(훅 부재로 인한 API↔훅 경계 전체 · SSE 실행 검증 · #12 모달리티 전환 ·
+> RLS 라이브 재검증 등)은 **이번 라운드 범위 밖**이며 신규 결함으로 세지 않았습니다.
+
+#### 최종 상태
+
+- **R1~R8: critical 0 · high 0 남음** — 8.1절 8건은 전부 종결(R5만 부분, 잔여는 UI 문안 협의).
+- **신규: medium 1(R9) · low 2(R10·R11) 미해결.** 세션을 영구 정지시키는 경로는 없으며,
+  R9는 "정상 진행 중 세션이 드물게 끊길 수 있음", R10·R11은 좁은 경합 창과 원장 잔여입니다.
+- 브랜치 상태는 **PR 가능**입니다(빌드 3종 통과 · critical/high 0 · 신규 3건은 후속 과제).
