@@ -180,6 +180,11 @@ async function loadInheritedConfig(
 }
 
 export function GET() {
-  // #2 `GET /api/sessions`(목록)는 이번 라운드 범위 밖입니다.
-  return fail(new ApiError("not_found", "아직 제공하지 않는 엔드포인트입니다."));
+  // #2 `GET /api/sessions`(목록)는 아직 구현되지 않았습니다.
+  //
+  // **404가 아니라 501입니다.** 계약에 있는 경로가 404를 돌려주면 훅 라운드에서 "경로 오타"와
+  // 구분되지 않아, 훅이 멀쩡한데도 URL을 고치러 가게 됩니다.
+  return fail(
+    new ApiError("internal_error", "아직 구현되지 않은 엔드포인트입니다.", { status: 501 }),
+  );
 }
