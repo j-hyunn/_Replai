@@ -43,13 +43,18 @@
   - 금칙어 검사를 12.1절 옆이 아니라 **4.14.4절**에 상시 검사 항목으로 두었습니다.
 - 2026-09-10 **QA 2차 G2 대응 — D30 소거법·폴백 폐기.** 4.4절만 고쳤고 문서를 재작성하지 않았습니다.
   - 계약 3차 갱신이 **409 `trial_reservation_exists`** 와 `details.existingSessionId`(**항상 채워짐, `null` 아님**)를
-    확정했습니다(`05_api_contract.md` :1512 · :1530 · 4.7.6절).
+    확정했습니다(`05_api_contract.md` **13절 오류 표 + 13절 `trial_reservation_exists` 예시 · 4.7.6절**).
+    **인용은 줄 번호가 아니라 절 번호로 답니다** — 계약이 갱신될 때마다 줄이 밀려 인용이 썩습니다.
   - **소거법 폐기** — "다른 409 3종이 아니면 D30"으로 판정하던 방식을 삭제하고, `usePrepareSession`의 오류를
     **`error.code` 직접 분기**로 바꿨습니다(409 4종 + 503 1종). 알 수 없는 `code`는 일반 오류로 떨어집니다.
   - **`activeSessions` 폴백 삭제** — `[이어서 하기]`의 목적지는 `details.existingSessionId` 하나뿐입니다.
     추측으로 고른 세션은 사용자를 엉뚱한 면접으로 보냅니다.
   - D30 안내에 **`[이전 면접 취소하기]`(#33 `useCancelSession`)** 를 추가했습니다 — 취소는 예약 반납을
     부작용으로 가지므로 막다른 길이 아닙니다. 이 안내를 503 여력 부족 화면과 섞지 않습니다.
+  - **재확인(D34 이후)** — 계약이 D34로 재작성된 뒤에도 **409 `trial_reservation_exists`** 와
+    `details.existingSessionId`(**항상 채워짐**)는 그대로입니다(`05_api_contract.md` 13절 · 4.7.6절).
+    이 절의 계약 인용을 **줄 번호에서 절 번호로 바꿨습니다** — D34로 줄이 밀려 인용이 엉뚱한 타입 정의를
+    가리키고 있었습니다. 분기 로직 자체는 고칠 것이 없었습니다(소거법·폴백은 이미 삭제된 상태).
   - **16절 #10 해소 처리**(14절 §5·15절 서술도 함께 정리). **16절 #11도 해소** — `02_ai_architecture.md`
     13.6.3절에 "API 키"·"한도" 예외가 명문화되어 QA가 grep 히트를 오탐으로 처리할 필요가 없어졌습니다.
   - 훅 추가·개명·삭제 없음(**43개 그대로**). 새 UI 라이브러리 없음.
@@ -597,7 +602,7 @@ function useInterviewStream(sessionId: string): {
 **`usePrepareSession`이 돌려주는 오류 5종(409 4종 + 503 1종) — `error.code`로 직접 분기합니다**
 
 > **소거법 금지.** "다른 코드가 아니면 D30"으로 판정하지 않습니다. 계약 13절이 네 가지 409에 각각
-> 고유한 `code`를 두었으므로(`05_api_contract.md` :1512) 분기는 **언제나 `error.code`의 `switch`**이며,
+> 고유한 `code`를 두었으므로(`05_api_contract.md` **13절 오류 표**) 분기는 **언제나 `error.code`의 `switch`**이며,
 > 알지 못하는 `code`는 D30이 아니라 **일반 오류 안내**로 떨어집니다.
 
 | 응답 | 원인 | 화면 |
@@ -621,7 +626,7 @@ function useInterviewStream(sessionId: string): {
 > `[이어서 하기]`  `[이전 면접 취소하기]`  `[여기 남기]`
 
 - **목적지는 `details.existingSessionId` 하나뿐입니다.** 계약이 이 값을 **항상 채워 보내며 `null`이 아니라고**
-  못박았으므로(`05_api_contract.md` :1530 · 4.7.6절), `[이어서 하기]`는
+  못박았으므로(`05_api_contract.md` **13절 `trial_reservation_exists` 응답 예시 · 4.7.6절**), `[이어서 하기]`는
   `route-for-status(useSession(details.existingSessionId))`로 보냅니다.
 - **`useDashboard`의 `activeSessions`에서 세션을 찾는 폴백은 폐기했습니다.** 추측으로 고른 세션은 사용자를
   엉뚱한 면접으로 보냅니다. `existingSessionId`가 없으면 링크를 만들지 말고 일반 오류 안내로 떨어뜨립니다
@@ -1947,7 +1952,7 @@ Radix `Toast`를 직접 조립하는 쪽은 접근성 처리를 스스로 떠안
 **남은 요청은 없습니다.** 3번(꼬리질문 요약)은 `useTranscript`로 파생 계산하고(7.4절),
 4번(프로필 수정)은 읽기 전용으로 둡니다(4.11절).
 
-| ~~5~~ | ~~D30(체험 예약 1건 제한)의 오류 `code`와 `details`~~ | — | **✅ 해소(계약 3차 갱신).** 13절에 **409 `trial_reservation_exists`** 가 추가되고 `details.existingSessionId`가 **항상 채워진다고** 확정됐습니다(`05_api_contract.md` :1512 · :1530 · 4.7.6절). 요청한 (a)·(b) 둘 다 그대로 반영됐습니다 | **잠정 동작 폐기.** 소거법과 `activeSessions` 폴백을 4.4절에서 **삭제**하고 `error.code` 직접 분기로 바꿨습니다 |
+| ~~5~~ | ~~D30(체험 예약 1건 제한)의 오류 `code`와 `details`~~ | — | **✅ 해소(계약 3차 갱신).** 13절에 **409 `trial_reservation_exists`** 가 추가되고 `details.existingSessionId`가 **항상 채워진다고** 확정됐습니다(`05_api_contract.md` **13절 오류 표 · 13절 응답 예시 · 4.7.6절**). 요청한 (a)·(b) 둘 다 그대로 반영됐습니다 | **잠정 동작 폐기.** 소거법과 `activeSessions` 폴백을 4.4절에서 **삭제**하고 `error.code` 직접 분기로 바꿨습니다 |
 
 **신설 엔드포인트 3개를 받았습니다 — 회신 완료.** `#33 cancel`(D19) · `#34 GET 문서 단건`(D21) ·
 `#35 abandon-preparation`(F8). 대응 훅 `useCancelSession` · `useDocument` · `useAbandonPreparation`을
@@ -2006,7 +2011,7 @@ Radix `Toast`를 직접 조립하는 쪽은 접근성 처리를 스스로 떠안
 | **8** ✅신규 | `01_product_spec.md` 7절 `/sessions` 화면 요구 vs 이 문서 4.9절 | 제품 스펙의 `/sessions` 요구에 **"취소된 세션 보기" 토글이 없습니다**(QA F12 — `canceled`·"취소"라는 단어가 `01_product_spec.md`·`01_domain_model.md` 어디에도 없음). UI는 D19에 따라 토글을 만듭니다 | `product-architect`가 스펙에 토글 요구를 추가해 주세요. **UI 쪽은 계약 4.3절(`includeCanceled`)에 이미 맞춰 두었으므로 차단 요인은 아닙니다** |
 | **9** ✅신규 | `01_state_machine.md` 2절 전이 표 95행 (`configuring → failed` 트리거) vs `05_api_contract.md` #35 | 전이 표의 트리거 문구가 "사용자가 재시도 포기"라고만 적혀 있고 **진입점이 #35라는 사실이 없습니다.** UI는 추출 실패 배너 안의 [이 세션 준비 포기]를 그 진입점으로 구현합니다(4.4절) | `product-architect`가 트리거 문구에 진입점을 반영해 주세요(문구 변경일 뿐 전이는 그대로). 계약 4.4절이 이미 같은 요청을 냈습니다 |
 
-| ~~10~~ | ~~`00_input/decisions.md` **D30** vs `05_api_contract.md` **13절 오류 표**~~ | **✅ 해소(계약 3차 갱신).** 13절에 **409 `trial_reservation_exists`** 가 추가되고 `details.existingSessionId`가 **항상 채워진다**고 확정됐습니다(`05_api_contract.md` :1512 · :1530 · 4.7.6절) | **4.4절에 반영 완료.** 소거법과 `useDashboard`의 `activeSessions` 폴백을 **삭제**하고 `error.code` 직접 분기로 바꿨으며, `[이어서 하기]`의 목적지를 `details.existingSessionId`로 고정하고 `[이전 면접 취소하기]`(#33)를 함께 두었습니다 |
+| ~~10~~ | ~~`00_input/decisions.md` **D30** vs `05_api_contract.md` **13절 오류 표**~~ | **✅ 해소(계약 3차 갱신).** 13절에 **409 `trial_reservation_exists`** 가 추가되고 `details.existingSessionId`가 **항상 채워진다**고 확정됐습니다(`05_api_contract.md` **13절 오류 표 · 13절 응답 예시 · 4.7.6절**) | **4.4절에 반영 완료.** 소거법과 `useDashboard`의 `activeSessions` 폴백을 **삭제**하고 `error.code` 직접 분기로 바꿨으며, `[이어서 하기]`의 목적지를 `details.existingSessionId`로 고정하고 `[이전 면접 취소하기]`(#33)를 함께 두었습니다 |
 | ~~11~~ | ~~`02_ai_architecture.md` **13.6.3절 금칙어 목록** vs `01_product_spec.md` **6.5.6절**~~ | **✅ 해소.** `02_ai_architecture.md` 13.6.3절이 금칙어 목록에 **"API 키"·"한도" 예외를 명문화**했습니다. 세 문서가 더 이상 충돌하지 않습니다 | **UI 방침 변경 없음.** "한도"는 여전히 **4.14.3절 한 곳에서만** 쓰고 4.14.1·4.14.2에는 쓰지 않습니다(4.14.4절). QA는 이제 이 두 단어의 grep 히트를 **오탐이 아니라 명문화된 예외**로 처리하면 됩니다 |
 | **12** ★신규 | `02_ai_architecture.md` **13.6.3절 ①②의 문구** vs `01_product_spec.md` **6.5.5절** | 13.6.3절 ①②의 문안은 **D27 시점**의 것이라 키 연결 CTA가 없고 "{availableAtIso} 이후에 다시 시작할 수 있어요"가 본문에 고정돼 있습니다. D28 이후 `availableAtIso`는 **체험 소진 시 `null`** 이므로 그대로 쓰면 빈 문장이 남습니다 | 13.7.3절이 이미 "1순위 버튼을 키 연결하기로 바꾸라"고 지시했으므로 **UI는 6.5.5절 + 13.7.3절 문안을 채택**했습니다(4.14.1절). 13.6.3절 ①②의 본문도 같은 문안으로 갱신되면 세 문서가 한 문장을 말하게 됩니다 |
 
