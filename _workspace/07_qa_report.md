@@ -249,6 +249,13 @@
 - [x] 동의 없이 체험 세션이 `ready`로 가지 않는지(트리거 동작 확인)
   → **통과(라이브).** 동의 행 없는 `trial_shared` 세션을 `ready`로 UPDATE → `trial consent required before ready (session …)` 예외. 같은 조건의 `byok` 세션은 이 가드를 타지 않습니다(별개 제약인 `sessions_snapshot_required_after_ready`에만 걸림 — 설계대로입니다). 같은 트리거의 **`funding_source` 불변성**도 확인(`trial_shared → byok` UPDATE가 `funding_source is immutable` 예외로 거부).
   **단, "현재 문구 버전"까지는 트리거가 보지 않습니다**(R9 — 서버 가드 책임). 그 가드는 #6 라우트가 생길 때 검증 대상입니다.
+  → **R9 서버 가드 구현·확인 완료 (2026-09-12).** `src/app/api/sessions/[sessionId]/prepare/route.ts`가
+  `trial_consents`를 `(user_id, CURRENT_TRIAL_CONSENT_VERSION)`으로 조회하고, 없으면
+  **409 `trial_consent_required` + `details.requiredConsentVersion`** 으로 거절하며 **전이하지 않습니다.**
+  버전 상수는 `src/lib/consent/trial-consent.ts` **한 파일**에만 있고(환경변수 아님, D29 · `05_deploy.md` 1.5절),
+  #41이 같은 상수로 버전을 대조해 불일치면 409 `consent_version_stale`을 돌려줍니다.
+  `consent_text_sha256`은 **서버가** 공백 정규화 후 계산합니다 — 클라이언트가 보내지 않습니다.
+  이로써 "옛 버전 동의만 가진 사용자가 DB 층을 통과하는" 구멍이 라우트에서 막혔습니다.
 - [x] 세션·계정 삭제 후 `ai_quota_ledger.held_calls`가 **정확히** 되돌아오는지(이중 반납 없이)
   → **통과(라이브, 산수까지 대조).** 예약 34 → 소비 5 → `completed` 부분 반납(`p_keep=6`) 23 → 원장 34→**11**, 행은 `held` 유지·`reserved=11` → `settled` 전량 반납 **6** → 원장 **5**(= 소비분, 되돌아오지 않는 것이 정상) → **같은 반납 재호출은 0건 반환**(멱등) → **세션 삭제 후에도 원장 5 그대로**(released 행이라 트리거가 손대지 않음 = 이중 반납 없음). 별도로 `held` 상태 세션을 삭제하니 원장이 39→5로 **정확히 34** 되돌아왔습니다.
 - [x] 계정 삭제 후 `vault.secrets`에 해당 시크릿이 남지 않는지
@@ -279,13 +286,29 @@
 
 **1차에서 이월**
 - [ ] 훅의 **실제 언랩 코드**가 3절 표의 "언랩" 열과 일치하는지 — 지금은 문서 ↔ 문서만 대조
-- [ ] `src/lib/session/transitions.ts`가 전이 표와 문자 단위로 같은지(**G3 때문에 어느 표를 옮기느냐가 갈림**)
+- [x] `src/lib/session/transitions.ts`가 전이 표와 문자 단위로 같은지(**G3 때문에 어느 표를 옮기느냐가 갈림**)
+  → **통과(2026-09-12, `vercel-platform-engineer`).** 파일이 생겼고 **기계 대조로 34/34 일치**를 확인했습니다.
+  대조 방법: `01_state_machine.md` 2절 전이 표를 파싱해 `(from, to)` **다중집합**을 만들고
+  `SESSION_TRANSITIONS` 배열에서 같은 다중집합을 뽑아 비교했습니다 — 집합이 아니라 다중집합이라
+  **같은 `(from, to)`의 행 수까지** 봅니다(`in_progress → paused` 5행, `paused → completed` 2행,
+  `in_progress → in_progress` 2행이 그대로 5·2·2로 나왔습니다). 결과: 누락 0 · 추가 0 · 행 수 차이 0,
+  `from`/`to` 값 전부 상태 11개 안, `[later]` 행은 **31번(`evaluated → evaluating`) 하나뿐**이고
+  `mvp: false`로 표시돼 `canTransition()`이 거부합니다(#16이 `evaluated`에 409를 주는 근거).
+  **G3이 걱정한 BYOK 2행(15·16)도 실재**하며 담당이 `#9`입니다. 전이 표 35행째(모든 상태 → 행 삭제)는
+  상태 전이가 아니라 DELETE라 이 배열에 담지 않았고, 그 사실을 파일 말미에 주석으로 남겼습니다.
 - [x] `admin.ts`가 클라이언트 번들에 들어가지 않는지(import 그래프)
   → **통과(2026-09-12).** `@/lib/supabase/admin`을 import하는 파일은 `src/lib/quota/gate.ts`·`src/lib/ai/credentials.ts` **둘뿐**이고 둘 다 첫 줄이 `import 'server-only'`입니다. `src/lib/ai/**`·`src/lib/quota/**` 9개 파일 전부 `server-only`를 갖고 있으며, 이들을 import하는 클라이언트 컴포넌트는 0개입니다(`grep`으로 확인). `next build`가 통과한다는 것 자체가 `'use client'` 그래프에 이 모듈들이 없다는 증거입니다 — 들어갔다면 빌드가 실패합니다.
 - [ ] `package.json`에 shadcn 외 UI 라이브러리가 없는지 — **`sonner` 채택 여부가 미결이므로 판정 불가** `[확인 필요]`
 - [ ] 하드코딩 색(`#`, `rgb(`, `bg-[`) 부재 전역 grep
 - [ ] `score_card_viewed`가 축당 정확히 1회 전송되는지(지표 5 분모)
-- [ ] Realtime 페이로드(snake_case)를 렌더링하는 코드가 없는지(E1 위반)
+- [~] Realtime 페이로드(snake_case)를 렌더링하는 코드가 없는지(E1 위반)
+  → **부분 검증(2026-09-12) — API 쪽은 통과, 프론트는 미구현이라 판정 불가.**
+  이 라운드에서 검증 가능해진 것은 **"우리 라우트가 내보내는 응답에 snake_case가 없는가"** 뿐입니다.
+  변환은 `src/lib/api/serialize.ts`의 **명시적 매퍼**(`toSessionDto`·`toQuestionDto`·`toTurnDto`·
+  `toTrialConsentDto`) 한 곳에서만 일어나고, 범용 deep camelize를 두지 않았습니다(E3의 jsonb 본문을
+  건드리지 않기 위해서입니다). DTO 타입의 필드명을 정규식으로 훑어 **snake_case 필드 0건**,
+  SSE 페이로드(`utterance_chunk`·`utterance_done`·`stream_error`)도 전부 camelCase임을 확인했습니다.
+  **E1의 진짜 대상(Realtime 페이로드를 구독해 렌더링하는 코드)은 프론트가 생길 때 다시 열어야 합니다.**
 - [x] ~~RLS 정책의 **실제 동작** — 정책 SQL은 문서상 정합하나 실행 검증 불가~~ → **검증 완료 (2026-09-11).** 라이브 Supabase 프로젝트에서 사용자 2명으로 실행 검증했습니다. 17개 테이블 RLS 활성·정책 19개 실재, 타 사용자 행 접근 차단, 서버 전용 5개 전면 차단, 클라이언트 쓰기 경계, `security definer` 함수 권한까지 전부 통과 — 근거는 위 "라이브 검증에서 통과한 항목" 표. **같은 검증에서 결함 2건(Q1·Q2)이 나왔고 둘 다 수정됐습니다**
 
 **측정 대기 (`[확인 필요]`)**
@@ -327,6 +350,32 @@
 | **Q2** | **high** | **`env.server.ts`의 세션당 예약 기본값이 D34 이전 값(26/4/3)이었습니다.** D34는 `flash_lite 34` 단일 버킷 + `flash`·`pro` **휴면(0)** 으로 재유도했는데 코드가 초안 값에 머물러 있었습니다. 게다가 `positive()`라 **0을 넣으면 부팅이 실패**해 D34의 값 자체를 주입할 수 없었고, 26으로 예약하면 **세션이 필요량(34)보다 적게 잡아** 면접 도중 원장이 바닥납니다 | 기본값을 `34/0/0`으로, 검증을 `nonnegative()`로 고쳤습니다. 아울러 fail-open 경고가 **휴면 버킷까지 매번 울리던 것**을 고쳤습니다 — 정상 배포에서 울리는 경고에 익숙해지면 그 경고는 아무 일도 하지 않습니다. 이제 **요청량이 0보다 큰 버킷의 한도가 없을 때만** 경고합니다 |
 | **Q3** | medium | **CI 검사 3이 정상 상태에서 실패합니다.** `grep -rn "get_user_api_key\|decrypted_secret" src/`는 **생성 파일** `src/lib/supabase/database.types.ts`를 항상 잡습니다 — 스키마의 모든 함수 시그니처가 거기 들어가기 때문입니다. 복호화 지점이 하나여도 CI가 빨갛고, 그 실패에 익숙해지는 순간 이 검사는 **복호화 지점이 늘어나도 아무도 보지 않습니다** | `05_deploy.md` 1.3절의 검사식에 `--exclude=database.types.ts` 추가. 타입 선언에는 **호출이 없으므로** 검사의 뜻(복호화 **호출** 지점이 하나인가)은 그대로입니다 |
 | **Q4** | low | **`peekCapacity(userId)` 시그니처로는 "네 함수 진입부 첫 줄이 같다"를 만족시킬 수 없었습니다.** 판정할 재원 값이 함수 안에 없으니 분기가 다시 #3 라우트로 흩어집니다 — 이 문서가 3절에서 "통과"의 근거로 든 **단일 분기 지점**이 깨집니다 | `peekCapacity(userId, fundingSource)`로 인자 1개 추가. #3은 사용자 키 유무로 재원을 이미 정한 뒤 부르므로 호출 측에 없는 값을 요구하지 않습니다. 근거를 `05_api_contract.md` 4.7.0절에 기록 |
+
+### 7.4 상태 머신·API 라우트 라운드 (2026-09-12, `vercel-platform-engineer`)
+
+`src/lib/session/transitions.ts`와 세션 계열 핵심 라우트를 구현하며 확인한 것입니다.
+**결함은 발견되지 않았습니다** — 앞선 라운드에서 Q1(`p_keep`)·Q2(예약 기본값)가 이미 고쳐져 있어
+반납 계약이 코드에서 그대로 성립했습니다.
+
+| 검증 | 방법 | 결과 |
+|---|---|---|
+| 전이 표 ↔ `transitions.ts` | `(from, to)` **다중집합** 기계 대조 | **34/34 일치.** 6절 "1차에서 이월" 항목 참조 |
+| 반납 6지점의 코드 상 실재 | `releaseSessionQuota(` 전역 grep | `src/lib/session/lifecycle.ts` **한 파일 5곳**(`completed`·`settled`·`canceled`·`abandoned`·`failed`). 6번(만료 스윕)은 C1 소유라 이 라운드 밖 |
+| **`completed` 부분 반납과 `settled` 전량 반납이 둘 다 불리는가** | 호출 그래프 추적 | **둘 다 실재.** `completeSession()`(#15 `complete` · #9 종료 조건)이 `['flash_lite'] + 'completed'`로 부분 반납하고, `settleEvaluatedSession()`(I2 코치 단계 종료)이 `null + 'settled'`로 잔여 6을 가져갑니다. `'completed'`일 때만 게이트가 `p_keep = 6`을 넘깁니다 |
+| 삭제 경로에 반납 호출이 **없는가** | `DELETE /api/sessions/[sessionId]` 코드 검사 | **없습니다(의도).** `before delete` 트리거가 이미 반납하므로 라우트가 부르면 이중 반납입니다. 그 사실을 삭제 지점에 주석으로 박았습니다 |
+| 재원 분기가 라우트로 흩어지지 않았는가 | `peekCapacity(`·`reserveSessionQuota(` 전역 grep | 호출은 **#3 한 곳 · #6 한 곳**뿐이고 둘 다 `fundingSource`를 인자로 넘깁니다. 라우트에 `if (fundingSource === 'byok')` 분기가 없습니다 — 판정은 게이트 진입부에만 있습니다 |
+| 응답의 camelCase 변환이 **정확히 1회**인가 | 매퍼 위치·DTO 필드명 검사 | 변환은 `src/lib/api/serialize.ts` 매퍼 4종에서만. DTO 타입에 snake_case 필드 **0건**. 범용 deep camelize 없음 |
+| `StreamSessionStatus`(G8) 규약 | #9 타입 정의 | `Extract<SessionStatus, 'in_progress' \| 'completed'>`로 **좁혀서** 선언했고, 넓히지 말라는 근거를 타입 옆에 적었습니다 |
+| 타입체크 · lint · build | `npm run typecheck` / `npm run lint` / `next build` | **3종 전부 통과.** `any`·강제 캐스트 0건 — DB의 `text` 컬럼은 `sessionStatusOf()`·`narrow()`가 유니온으로 **검증해서** 좁힙니다(캐스트가 아닙니다) |
+
+**이 라운드에서 닫지 못한 것 (다음 담당자용)**
+
+| # | 내용 | 소유자 |
+|---|---|---|
+| 1 | I2의 평가자·코치 **AI 단계가 아직 연결되지 않았습니다.** 상태 머신·재시도·반납 배선은 계약대로 완성됐고 두 함수(`runEvaluatorPasses`·`runCoachPass`)가 연결 지점입니다. 지금은 던지므로 재시도 3회 후 `failed`로 내려가며 **예약은 정상 반납됩니다**(점수를 지어내 저장하는 것보다 정확한 실패가 낫다는 판단). 따라서 `settled` 반납은 **코드 경로는 실재하나 런타임으로 도달하지 못합니다** — 프롬프트가 붙는 즉시 도달합니다 | `ai-interview-architect` |
+| 2 | 면접관·플래너 프롬프트는 **출력 규약(M1~M5)과 신뢰 경계만 담은 최소 프롬프트**입니다(`src/lib/ai/interviewer.ts`·`planner.ts`). 자리 표시자가 아니라 실제로 호출되는 프롬프트이며, `02_prompts/`의 정식 프롬프트로 교체하면 됩니다 | `ai-interview-architect` |
+| 3 | G2·G3·G6 카운터(`probeRepeatCount`·`avoidanceSignalCount`·`consecutivePressureTurns`)가 **0으로 고정**입니다. G1(깊이)·G4(중단 신호)는 동작하므로 압박이 무한히 이어지지는 않습니다 | `ai-interview-architect` |
+| 4 | 이번 라운드 범위 밖 라우트: #1 #2 #10~#12 #16~#32 #34 #36~#40, C1 크론 | `vercel-platform-engineer` |
 
 > **Q1·Q2가 같은 성질입니다 — 문서가 재유도된 뒤 코드/DB가 따라오지 않은 자리.** 둘 다 D34 재설계에서
 > 생겼고, 문서끼리는 정합했기 때문에 3차까지의 QA로는 보이지 않았습니다. **D35급 재유도가 또 일어나면
