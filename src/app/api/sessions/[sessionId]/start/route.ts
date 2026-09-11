@@ -41,6 +41,20 @@ export function POST(
 
     const from = sessionStatusOf(session);
 
+    // **`ready`에서만 시작합니다** (전이 표 8행 · 계약 4.6절 8행).
+    //
+    // 전이 표에는 `paused → in_progress`(21행)도 있으므로 `assertTransition`은 `paused` 세션의
+    // `start`도 통과시킵니다. 그러나 그 행의 담당은 **#14 `resume`뿐**이며, 거기에만 재개 가드
+    // 3종(7일 시한 · `rate_limited`의 `resumable_after` 경과 · `byok_key_invalid`의 키 재검증)이
+    // 있습니다. 여기서 막지 않으면 `paused` 세션에 `start`를 보내는 것만으로 그 셋이 전부
+    // 우회되고, `pause_reason`이 지워지며 `started_at`이 덮어써져 시간 상한까지 리셋됩니다.
+    // **"전이 표에 있는 조합"과 "이 라우트가 담당하는 행"은 다릅니다.**
+    if (from !== "ready") {
+      throw new ApiError("invalid_transition", "지금 상태에서는 할 수 없는 동작입니다.", {
+        details: { from, to: "in_progress" },
+      });
+    }
+
     if (session.current_modality === "voice" && !body.micReady) {
       // 마이크 없이 음성 세션을 시작하면 사용자는 답할 길이 없는 질문을 듣습니다.
       // 텍스트로 진행할 생각이라면 #12로 모달리티를 먼저 바꾸는 것이 정확한 경로입니다.
