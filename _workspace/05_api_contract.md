@@ -405,11 +405,25 @@ MVP에서 이 전이가 일어나는 경로는 존재하지 않아야 하고, #1
 ```ts
 // src/lib/quota/gate.ts — 원장을 만지는 유일한 모듈. 라우트는 여기만 부른다.
 // 네 함수 전부 진입부 첫 줄이 같다:  if (fundingSource !== 'trial_shared') return NO_OP;
-peekCapacity(userId)                                  // #3 문 앞 조회 (비원자적, 홀드 없음)
+peekCapacity(userId, fundingSource)                   // #3 문 앞 조회 (비원자적, 홀드 없음)
 reserveSessionQuota(sessionId, fundingSource)         // #6 / #16 / #18 확정 예약 (원자적)
 consumeSessionQuota(sessionId, fundingSource, bucket) // 프로바이더 호출 직전
 releaseSessionQuota(sessionId, fundingSource, buckets, reason)  // 반납 6지점
 ```
+
+> **2026-09-11 구현 반영 (`vercel-platform-engineer`).** `src/lib/quota/gate.ts`가 위 4종을 그대로
+> 구현했고, 문서와 두 가지가 달라졌습니다 — 둘 다 **진입부 가드를 성립시키기 위한 변경**입니다.
+>
+> 1. **`peekCapacity`가 `fundingSource`를 인자로 받습니다.** 초안 시그니처(`peekCapacity(userId)`)로는
+>    "네 함수 전부 진입부 첫 줄이 같다"를 만족시킬 수 없습니다 — 판정할 재원 값이 함수 안에 없으니
+>    분기가 다시 라우트(#3)로 흩어집니다. #3은 사용자 키 유무로 재원을 이미 정한 뒤 이 함수를
+>    부르므로(4.7.1절 ①②) 호출 측에 없는 값을 요구하는 것도 아닙니다.
+> 2. **네 함수의 반환값에 `applicable: boolean`이 붙습니다.** `NO_OP`이 "여력이 없다"로 읽히면
+>    BYOK 세션이 막힙니다 — `peekCapacity`의 NO_OP은 `{ applicable: false, hasCapacity: true }`이며,
+>    **BYOK 사용자는 여력과 무관하게 항상 통과**한다는 4.7.5절 규칙이 이 값으로 표현됩니다.
+>
+> 한도 미설정(fail-open)도 `applicable: false`로 돌아옵니다 — 게이트가 꺼진 것과 BYOK라서 해당이
+> 없는 것은 라우트 입장에서 같은 처분(그냥 통과)이기 때문입니다.
 
 > **분기를 라우트에 흩으면 한 군데를 빠뜨리는 순간 BYOK 세션이 공용 원장을 갉아먹습니다.**
 > 증상은 "체험 정원이 왜인지 부족하다"로만 보여 원인을 찾기 어렵습니다.
@@ -467,6 +481,16 @@ released := greatest(reserved_calls - consumed_calls - 6, 0)
 # 2~6번 — 전량 반납(정산·취소·포기·실패·만료)
 released := greatest(reserved_calls - consumed_calls, 0)
 ```
+
+> **2026-09-11 결함 정정 — DB 함수가 부분 반납을 표현할 수 없었습니다.**
+> 위 1번은 문서에만 있었고 `release_session_quota(uuid, text[], text)`에는 **남길 양을 받는 인자가
+> 없었습니다.** 그대로 `'completed'`로 불렀다면 면접이 끝나는 순간 평가자 4 + 코치 2의 여력까지
+> 반납돼 **완주한 세션이 리포트를 받지 못했을 것**이고, 반대로 부르지 않았다면 세션당 34가 하루 종일
+> 묶였을 것입니다. 마이그레이션 `20260911000300_release_session_quota_keep.sql`이
+> **`p_keep int default 0`** 을 더해 해소했습니다(기본값이 0이라 2~6번의 동작은 그대로입니다).
+> `p_keep > 0`이면 행을 **`held`로 남기고** `reserved_calls`만 `consumed + keep`으로 줄입니다 —
+> 여기서 `status`를 `released`로 바꾸면 뒤이은 전량 반납이 대상을 못 찾아 세션당 6이 영구히 샙니다.
+> 남길 양(6)은 애플리케이션 상수 `COMPLETED_KEEP_CALLS`이며 **DB는 정책을 모릅니다.**
 
 - **세션당 예약은 `flash_lite` 34 한 건입니다**(`02_ai_architecture.md` 8.3.1절). `pro`·`flash` 버킷은
   **휴면(요청량 0)** 이라 원장 행 자체가 만들어지지 않으므로, 반납 호출에 이 두 버킷을 넣을 일이 없습니다.
