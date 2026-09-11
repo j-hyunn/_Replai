@@ -18,10 +18,11 @@
 
 ## 요약
 
-> **⚠️ 2026-09-12 — 8절(상태 머신 + 세션 API 라우트 통합 정합성 검증)이 최신입니다.**
-> critical 1건(R1 — 평가가 되돌아온 뒤 재등록 주체가 없어 세션이 `completed`에 영구 정지)과
-> high 2건(R2 — #8 `start`가 `paused` 세션의 재개 가드를 우회 / R3 — 전이 표 14·20행 미구현)이
-> **열려 있습니다.** 아래 1~7절은 그 이전 라운드의 기록입니다.
+> **⚠️ 2026-09-12 — 8절(상태 머신 + 세션 API 라우트 통합 정합성 검증)이 최신이고,
+> 8.4절에 그 8건(R1~R8)의 조치 기록이 붙었습니다.**
+> `vercel-platform-engineer`가 **R1~R8 전부를 코드로 고쳤다고 보고**했습니다(커밋 해시는 8.4절).
+> **QA의 재검증은 아직입니다 — 8.4절의 모든 항목은 "재검증 필요" 상태이며 종결이 아닙니다.**
+> 아래 1~7절은 그 이전 라운드의 기록입니다.
 
 > **2026-09-11 최종 — 2차 QA의 미결 11건(high 4 · medium 3 · low 4) 전부 종결.**
 > high는 G1~G4, medium은 G5~G7, low는 G8~G11 — 아래 종결 현황 표와 4·7절에 소유자별 근거가 있습니다.
@@ -426,6 +427,9 @@
 > **반대쪽 비용**입니다 — 표에 있는 조합이라는 이유로 `assertTransition`이 통과시키므로,
 > **"어느 라우트가 그 행의 담당인가"(4.6절)를 라우트가 스스로 한 번 더 확인해야 합니다.**
 
+> **[2026-09-12 후속] R1~R8 전부에 조치가 들어갔습니다 — 조치 내용·커밋·재검증 포인트는 8.4절.**
+> **위 표의 기록은 발견 시점 그대로 보존**하며, 종결 여부는 QA의 다음 재검증이 정합니다.
+
 ### 8.2 통과 항목 (이번 라운드에 직접 대조한 것만)
 
 | 검증 | 방법 | 결과 |
@@ -459,3 +463,32 @@
 - [ ] **RLS 라이브 재검증** — 이번 라운드는 라이브 SQL을 돌리지 않았습니다. 6절의 2026-09-11 결과를 **그대로 인용**한 것이지 재확인이 아닙니다.
 - [ ] **부분 반납 34 → 6 → 0의 런타임 실측** — R1 때문에 `settled` 반납에 도달하는 경로가 실제로 돌지 않습니다(코드 경로는 실재).
 - [ ] `evaluations`·`evaluation_scores`·`evaluation_citations` 저장 계약(9.1절 가중치·9.2절 UTF-16 오프셋) — 저장 코드가 아직 없습니다. `[확인 필요]`
+
+### 8.4 조치 기록 (2026-09-12, `vercel-platform-engineer`) — **전 항목 재검증 필요**
+
+> **이 절은 조치자의 자기 보고입니다. QA의 독립 재검증이 아닙니다.**
+> 다음 라운드에서 `qa-inspector`가 파일 현재 상태를 직접 읽어 확인해 주세요 —
+> 3차 재검증(G1~G4)에서 그랬듯 "보고 전달"과 "재검증"은 다른 것입니다.
+> 검증·빌드: `npm run typecheck` · `npm run lint` · `npm run build` **3종 전부 통과**
+> (`any`·강제 캐스트 0건, 새 UI 라이브러리 0건, 신규 `NEXT_PUBLIC_` 0건).
+
+| # | 조치 | 커밋 | 재검증 포인트 |
+|---|---|---|---|
+| **R1** | **되돌림(29행) 뒤의 구동자를 3단으로 만들었습니다** — ① 같은 호출 안의 재개(백오프 ≤ 15초 **그리고** 소프트 데드라인이 재시도 1회를 감당할 때), ② 자기 재호출(`after()` + `JOB_SECRET` fetch, 본문에 `delayMs ≤ 15s`), ③ 자기 재호출을 3회 못 띄우면 **그 자리에서 `failed`**. 재진입은 `enqueueEvaluation`이 아니라 I2 내부 `resumeEvaluating()`이라 `evaluations` 행도 `attempt_count`도 리셋되지 않습니다. 아울러 **C1 크론(워치독 5종)을 구현**해 함수가 통째로 죽은 경우의 바깥 그물을 만들었습니다(`evaluating` 10분 지연 · **`completed` 고아** · `paused` 7일 · `in_progress` 방치 · 만료 예약 스윕) | `cbcc8b2`(워커) · `91e2cf3`(크론) | **`completed`에 방치되고 끝나는 경로가 정말 없는지** 호출 그래프로 다시 세어 주세요. 특히 ②가 성공했는데 새 호출이 선점 UPDATE에서 0행을 받는 경합, 그리고 크론 4번(`completed` 고아)이 **I2가 방금 되돌려 둔 세션을 낚아채지 않는지**(`updated_at < now − 10분` 가드) |
+| **R2** | `start` 라우트가 `from !== "ready"`면 **409 `invalid_transition`**(`details:{from,to:"in_progress"}`)을 던집니다. `paused`의 진입점은 #14뿐입니다 | `048e05e` | 같은 성질의 구멍이 다른 라우트에도 있는지 — **"전이 표에 있는 조합"과 "4.6절이 정한 담당"이 어긋나는 라우트** 전수 대조 |
+| **R3** | `normalizeProviderError`에 `transientCause`(`timeout`/`rate_limited`/`failed`)·`retryAfterSec`·`retriesExhausted`를 추가하고 4번째 분류 **`permanent`** 를 신설했습니다. 스트림 오류 처리는 ① 예산 남음 → `stream_error{code: 원인별, retryable:true}`(상태 유지), ② **예산 소진 → 전이 표 14행** `paused(rate_limited)` + `resumable_after = now + (Retry-After ?? 1시간)` + `rate_limit_fallback` 이벤트, ③ **`permanent` → 전이 표 20행** `failed(provider_permanent_error)`로 갈립니다. **공용 키의 401/403은 `byok_key_invalid`가 아니라 `permanent`** 입니다(10.1절 마지막 행 — 우리 설정 오류를 사용자에게 "키를 확인하세요"로 안내하지 않습니다) | `27e3483`(정규화) · `3e91f18`(라우트) | `'rate_limited'`·`'provider_permanent_error'`가 코드에 **실재**하는지, 5.2절 `stream_error.code` 5종이 **전부 도달 가능**한지. `permanent` 판정이 5xx를 잡아채지 않는지(429·401/403·타임아웃을 **먼저** 배제한 뒤에만 4xx를 `permanent`로 봅니다) |
+| **R4** | `runStream`이 **첫 토큰 이전에 한해** 재시도합니다(1s→2s→4s, 지터 ±20%, 예산 60초). `attempt`를 정직하게 넘기므로 401 한 번으로 `byok_key_invalid`가 확정되지 않습니다. 토큰이 나간 뒤의 실패는 재시도 없이 `retriesExhausted:false`로 올라가 **세션을 옮기지 않습니다** | `27e3483` | 재시도마다 `consumeSessionQuota`를 부르는 것이 맞는지(4.7.2절 "호출을 보내기 전에" — RPD는 실패한 호출도 셉니다), 클라이언트 abort가 재시도 루프를 돌리지 않는지 |
+| **R5** | `session_notice` 전송 구현 — G4 → `distress_guard`, G6 → `pressure_capped`. **`utterance_done`보다 먼저** 나갑니다 | `3e91f18` | `rate_limit_fallback` 종류는 아직 전송하지 않습니다(1·2단계는 클라이언트 판정, 3단계는 `runStream` 내부라 라우트가 관측하지 못합니다). **문안은 `shadcn-ui-engineer`와 맞춰야 합니다** |
+| **R6** | 반납 5지점 전부가 `quota_released`를 `detail:{reason, released}`로 기록합니다. BYOK는 `applicable:false`라 기록도 없습니다 | `cedc69b` | 6번째 지점(크론 만료 스윕)도 같은 이벤트를 남기는지, 비전이 이벤트의 `to_status` 규약(`from = to = 현재 상태`)을 지키는지 |
+| **R7** | `interviewer_stream_aborted`를 **META 누락과 분리**해 abort면 항상 기록합니다(`detail:{metaMissing}`) | `3e91f18` | 5.4절 3e의 순서(a~e)가 코드 순서와 같은지 |
+| **R8** | `GET /api/sessions`가 404 → **501** | `b243aa7` | — |
+
+**이번 조치로 새로 생긴 미검증 항목**
+
+- [ ] **C1 크론 5종의 런타임 동작** — 정적으로만 확인했습니다. 특히 2번(`in_progress` 방치)의
+      `max_duration_min + 30분` 근사와 5번(만료 예약 스윕)의 `quota_date < today` 경계는
+      **날짜 경계에서 한 번 돌려 봐야** 합니다(`AI_QUOTA_RESET_TIMEZONE`이 태평양 시간입니다).
+- [ ] **크론 응답 모양** — `{ ok: true, watchdogs: {…} }`는 관측 카운터이며 대응 훅이 없습니다
+      (크론은 UI가 부르지 않습니다). 계약 1절 봉투 규칙과 충돌하지 않는지 확인이 필요합니다.
+- [ ] **평가 재시도의 실제 도달** — `runEvaluatorPasses()`가 아직 던지므로 3회 재시도 후 `failed`가
+      실측 경로입니다. **프롬프트가 붙은 뒤에야** ①·② 경로가 성공으로 끝나는 것을 볼 수 있습니다.
