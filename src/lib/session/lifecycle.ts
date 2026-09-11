@@ -2,13 +2,14 @@ import "server-only";
 
 import { after } from "next/server";
 
+import type { ModelBucket } from "@/lib/ai/roles";
 import { ApiError } from "@/lib/api/errors";
 import { sessionStatusOf, type SessionRow } from "@/lib/api/serialize";
 import { publicEnv } from "@/lib/env.public";
 import { serverEnv } from "@/lib/env.server";
-import { releaseSessionQuota } from "@/lib/quota/gate";
-import { FUNDING_SOURCES, type FundingSource } from "@/lib/session/status";
-import { applyTransition, type Admin } from "@/lib/session/store";
+import { releaseSessionQuota, type ReleaseReason } from "@/lib/quota/gate";
+import { FUNDING_SOURCES, type SessionStatus, type FundingSource } from "@/lib/session/status";
+import { applyTransition, recordObservationEvent, type Admin } from "@/lib/session/store";
 import type { TransitionTrigger } from "@/lib/session/transitions";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -49,6 +50,56 @@ export function fundingSourceOf(session: Pick<SessionRow, "funding_source">): Fu
 
 const statusOf = sessionStatusOf;
 
+/**
+ * 반납 + **관측 기록**을 한 쌍으로 묶습니다 (계약 4.7.3절 · QA R6).
+ *
+ * DB 함수는 `p_reason`을 저장하지 않습니다 — 마이그레이션이 "사유는 **라우트가**
+ * `session_events.detail`로 남긴다"고 명시한 자리입니다
+ * (`20260911000300_release_session_quota_keep.sql`). 예약(`quota_reserved`)만 기록되고 반납이
+ * 기록되지 않으면, 원장이 어긋났을 때 **반납 누락과 이중 반납을 로그로 구분할 수 없습니다.**
+ *
+ * BYOK 세션은 반납 자체가 no-op이므로 기록도 남기지 않습니다(`applicable: false`).
+ */
+async function releaseAndRecord(
+  sessionId: string,
+  fundingSource: FundingSource,
+  buckets: ModelBucket[] | null,
+  reason: ReleaseReason,
+  status: SessionStatus,
+  trigger: TransitionTrigger,
+  admin: Admin,
+): Promise<void> {
+  const result = await releaseSessionQuota(sessionId, fundingSource, buckets, reason, admin);
+  if (!result.applicable) return;
+
+  await recordObservationEvent(
+    sessionId,
+    status,
+    "quota_released",
+    trigger,
+    { reason, released: result.released },
+    admin,
+  );
+}
+
+/**
+ * 반납 6지점 **#6 — C1 만료 예약 스윕**(`reason: 'expired'`).
+ *
+ * 어제 날짜의 `held` 행이 남아 있다는 것은 위 5지점 중 하나가 돌지 못했다는 뜻입니다. 그 행은
+ * 오늘의 여력을 잡아먹지는 않지만(원장은 날짜별) **원장과 현실이 어긋난 흔적**이므로 정리하고
+ * 기록을 남깁니다.
+ *
+ * 예약 행은 `trial_shared` 세션에만 존재하므로 재원을 다시 조회하지 않습니다 — BYOK 세션을
+ * 넘겨도 대상 행이 0건이라 아무 일도 일어나지 않습니다.
+ */
+export function releaseExpiredReservation(
+  sessionId: string,
+  status: SessionStatus,
+  admin: Admin = createAdminClient(),
+): Promise<void> {
+  return releaseAndRecord(sessionId, "trial_shared", null, "expired", status, "scheduler", admin);
+}
+
 // ── 1번 · 부분 반납 + 평가 등록 ───────────────────────────────────────────────
 
 export type CompleteTrigger = Extract<
@@ -87,7 +138,15 @@ export async function completeSession(
   });
 
   // 반납 6지점 #1 — **부분 반납**입니다(`reason: 'completed'`가 게이트에서 `p_keep = 6`이 됩니다).
-  await releaseSessionQuota(session.id, fundingSource, ["flash_lite"], "completed", admin);
+  await releaseAndRecord(
+    session.id,
+    fundingSource,
+    ["flash_lite"],
+    "completed",
+    "completed",
+    trigger,
+    admin,
+  );
 
   return enqueueEvaluation(completed, trigger, admin);
 }
@@ -200,7 +259,15 @@ export async function settleEvaluatedSession(
   });
 
   // 반납 6지점 #2 — 전량(정산). `p_keep = 0`이라 1번이 남긴 6까지 돌아옵니다.
-  await releaseSessionQuota(session.id, fundingSource, null, "settled", admin);
+  await releaseAndRecord(
+    session.id,
+    fundingSource,
+    null,
+    "settled",
+    "evaluated",
+    "ai_completion",
+    admin,
+  );
 
   return evaluated;
 }
@@ -231,7 +298,7 @@ export async function cancelSession(
 
   // 반납 6지점 #3 — 전량. 멱등이므로 `failed → canceled`처럼 이미 반납된 세션에서도 안전합니다
   // (DB 함수가 `status='held'` 행만 대상으로 합니다).
-  await releaseSessionQuota(session.id, fundingSource, null, "canceled", admin);
+  await releaseAndRecord(session.id, fundingSource, null, "canceled", "canceled", "user_action", admin);
 
   return canceled;
 }
@@ -256,7 +323,15 @@ export async function abandonSession(
   });
 
   // 반납 6지점 #4 — 전량.
-  await releaseSessionQuota(session.id, fundingSource, null, "abandoned", admin);
+  await releaseAndRecord(
+    session.id,
+    fundingSource,
+    null,
+    "abandoned",
+    "abandoned",
+    "scheduler",
+    admin,
+  );
 
   return abandoned;
 }
@@ -295,7 +370,7 @@ export async function failSession(
   });
 
   // 반납 6지점 #5 — 전량. 예약이 잡혀 있지 않았다면(=`prepare` 전) 0행을 지나갑니다.
-  await releaseSessionQuota(session.id, fundingSource, null, "failed", admin);
+  await releaseAndRecord(session.id, fundingSource, null, "failed", "failed", trigger, admin);
 
   return failed;
 }
