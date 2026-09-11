@@ -7,8 +7,12 @@ import {
   type InterviewerGuards,
   type ResolvedMeta,
 } from "@/lib/ai/interviewer";
-import { isNormalizedProviderError } from "@/lib/ai/errors";
-import { MetaStreamParser, type InterviewerAction } from "@/lib/ai/meta-stream";
+import { isNormalizedProviderError, type TransientCause } from "@/lib/ai/errors";
+import {
+  MetaStreamParser,
+  type InterviewerAction,
+  type InterviewerMeta,
+} from "@/lib/ai/meta-stream";
 import { runStream } from "@/lib/ai/provider";
 import { ApiError } from "@/lib/api/errors";
 import { fail } from "@/lib/api/respond";
@@ -21,7 +25,7 @@ import {
   type SessionRow,
   type TurnRow,
 } from "@/lib/api/serialize";
-import { completeSession, fundingSourceOf } from "@/lib/session/lifecycle";
+import { completeSession, failSession, fundingSourceOf } from "@/lib/session/lifecycle";
 import { MODALITIES, PERSONA_BUDGET, shouldComplete, type Persona } from "@/lib/session/persona";
 import type { SessionStatus } from "@/lib/session/status";
 import { applyTransition, recordObservationEvent, type Admin } from "@/lib/session/store";
@@ -97,6 +101,13 @@ type StreamErrorCode =
   | "byok_quota_exhausted";
 
 type StreamError = { code: StreamErrorCode; retryable: boolean; messageKo: string };
+
+/** 계약 5.2절 3행 — G4·G6가 발동했음을 UI에 알리는 신호. `utterance_done` **이전**에 나갑니다. */
+type SessionNotice = {
+  kind: "distress_guard" | "pressure_capped" | "rate_limit_fallback";
+  level: number | null;
+  messageKo: string;
+};
 
 export async function POST(
   request: Request,
@@ -323,7 +334,10 @@ function streamInterviewer(prepared: Prepared, signal: AbortSignal): Response {
           send("utterance_chunk", payload);
         }
 
-        const done = await commitInterviewerTurn(prepared, parser, false);
+        const { done, notices } = await commitInterviewerTurn(prepared, parser, false);
+        // 5.2절 — `session_notice`는 **`utterance_done`보다 먼저** 나갑니다. 뒤에 보내면
+        // UI가 이미 턴을 끝낸 뒤라 3지 선택 다이얼로그를 띄울 자리가 없습니다.
+        for (const notice of notices) send("session_notice", notice);
         send("utterance_done", done);
       } catch (error) {
         if (signal.aborted) {
@@ -369,17 +383,29 @@ async function commitInterviewerTurn(
   prepared: Prepared,
   parser: MetaStreamParser,
   aborted: boolean,
-): Promise<UtteranceDone> {
+): Promise<{ done: UtteranceDone; notices: SessionNotice[] }> {
   const { admin, session, currentQuestion, answer } = prepared;
   const spoken = parser.spokenText();
   const { meta, missing } = parser.parseMeta();
 
+  // **abort와 META 누락은 서로 다른 사건입니다** (5.4절 3e는 조건 없이 abort를 기록합니다).
+  // 한 이벤트로 합치면 META가 정상 도착한 뒤 사용자가 끊은 경우가 관측에서 통째로 사라집니다.
+  if (aborted) {
+    await recordObservationEvent(
+      session.id,
+      "in_progress",
+      "interviewer_stream_aborted",
+      "system_error",
+      { metaMissing: missing },
+      admin,
+    );
+  }
   if (missing) {
     // M6 — 대화는 멈추지 않습니다. 경고만 남깁니다.
     await recordObservationEvent(
       session.id,
       "in_progress",
-      aborted ? "interviewer_stream_aborted" : "interviewer_meta_missing",
+      "interviewer_meta_missing",
       aborted ? "system_error" : "ai_completion",
       null,
       admin,
@@ -405,15 +431,53 @@ async function commitInterviewerTurn(
   const sessionStatus = await resolveSessionStatus(prepared, resolved, aborted);
 
   return {
-    turnId,
-    questionId: question?.id ?? null,
-    parentQuestionId: resolved.parentQuestionId,
-    depth: resolved.depth,
-    questionKind: resolved.questionKind,
-    action: resolved.action,
-    targetAxis: resolved.targetAxis,
-    sessionStatus,
+    done: {
+      turnId,
+      questionId: question?.id ?? null,
+      parentQuestionId: resolved.parentQuestionId,
+      depth: resolved.depth,
+      questionKind: resolved.questionKind,
+      action: resolved.action,
+      targetAxis: resolved.targetAxis,
+      sessionStatus,
+    },
+    notices: buildNotices(prepared, resolved, meta),
   };
+}
+
+/**
+ * 가드 발동을 `session_notice`로 바꿉니다 (계약 5.2절 3행).
+ *
+ * **`action`을 서버에서 덮어쓴 것만으로는 UI가 알 길이 없습니다.** G4가 발동하면 사용자는
+ * "계속 / 잠시 쉬기 / 여기서 마무리" 3지 선택을 받아야 하는데, 그 다이얼로그를 띄울 신호가
+ * 이 이벤트입니다.
+ */
+function buildNotices(
+  prepared: Prepared,
+  resolved: ResolvedMeta,
+  meta: InterviewerMeta | null,
+): SessionNotice[] {
+  const notices: SessionNotice[] = [];
+  const { guards } = prepared;
+
+  if (resolved.action === "comfort" && (guards.distressSignalDetected || meta?.distress_detected)) {
+    notices.push({
+      kind: "distress_guard",
+      level: null,
+      messageKo:
+        "잠시 숨을 고를까요? 계속 이어가셔도 되고, 잠시 쉬거나 여기서 마무리하셔도 괜찮아요.",
+    });
+  }
+
+  if (resolved.action === "neutral_transition" && guards.consecutivePressureTurns >= 5) {
+    notices.push({
+      kind: "pressure_capped",
+      level: guards.consecutivePressureTurns,
+      messageKo: "압박 질문이 이어져 잠시 완화된 흐름으로 전환했어요.",
+    });
+  }
+
+  return notices;
 }
 
 async function insertInterviewerTurn(
@@ -573,7 +637,7 @@ async function handleStreamFailure(prepared: Prepared, error: unknown): Promise<
     return {
       code: "llm_failed",
       retryable: true,
-      messageKo: "면접관 응답을 받지 못했어요. 잠시 후 다시 시도해 주세요.",
+      messageKo: TRANSIENT_MESSAGE_KO.llm_failed,
     };
   }
 
@@ -608,9 +672,79 @@ async function handleStreamFailure(prepared: Prepared, error: unknown): Promise<
     };
   }
 
+  // ── 전이 표 20행 — 복구 불가 오류 → `failed` ───────────────────────────────
+  // 재시도해도 같은 결과인 오류(컨텍스트 초과·모델명 오타·공용 키의 401/403)입니다.
+  // `paused`로 두면 사용자가 "이어서 하기"를 눌러도 같은 자리에서 다시 죽습니다.
+  if (error.kind === "permanent") {
+    await failSession(
+      prepared.session,
+      "provider_permanent_error",
+      "system_error",
+      "provider_permanent_error",
+      prepared.admin,
+    ).catch((failError: unknown) => {
+      console.error("[turns] 실패 전이에 실패했습니다", failError);
+    });
+
+    return {
+      code: "llm_failed",
+      retryable: false,
+      messageKo: "면접을 계속 진행할 수 없는 오류가 발생해 세션을 종료했어요.",
+    };
+  }
+
+  // ── `transient` — 원인별로 코드를 가릅니다 (계약 5.2절) ────────────────────
+  const code = TRANSIENT_CODE[error.transientCause ?? "failed"];
+
+  // 3단계 — 아직 백오프 예산이 남아 있습니다. 세션은 `in_progress` 그대로이고 UI는
+  // 다시 제출할 수 있습니다. **상태를 옮기지 않는 것이 이 분기의 요지입니다.**
+  if (!error.retriesExhausted) {
+    return { code, retryable: true, messageKo: TRANSIENT_MESSAGE_KO[code] };
+  }
+
+  // ── 전이 표 14행 — 4단계(백오프 60초 초과) → `paused(rate_limited)` ────────
+  const retryAfterSec = error.retryAfterSec ?? DEFAULT_RESUMABLE_AFTER_SEC;
+  await applyTransition({
+    sessionId: prepared.session.id,
+    from: "in_progress",
+    to: "paused",
+    trigger: "system_error",
+    eventName: "rate_limit_fallback",
+    // 계약 10.1절 "기록" 행 — `{ step, layer, provider, retryAfterSec }`.
+    detail: { step: 4, layer: "llm", provider: "google", retryAfterSec },
+    patch: {
+      pause_reason: "rate_limited",
+      paused_at: new Date().toISOString(),
+      // 10.1절 — `now() + (retryAfterSec ?? 1시간)`. `byok_*`와 달리 **여기는 채웁니다**:
+      // 우리 쪽 한도라 리셋 시점을 근사할 수 있고, #14가 이 값으로 재개를 막습니다.
+      resumable_after: new Date(Date.now() + retryAfterSec * 1000).toISOString(),
+    },
+    admin: prepared.admin,
+  }).catch((transitionError: unknown) => {
+    console.error("[turns] 일시정지 전이에 실패했습니다", transitionError);
+  });
+
   return {
-    code: "llm_rate_limited",
-    retryable: true,
-    messageKo: "면접관이 답변을 정리하고 있습니다. 잠시만요.",
+    code,
+    // 4단계는 `retryable: false`입니다 — 지금 다시 눌러도 같은 한도에 부딪힙니다.
+    retryable: false,
+    messageKo: "요청이 몰려 잠시 멈췄어요. 안내된 시각 이후에 이어서 진행할 수 있습니다.",
   };
 }
+
+const TRANSIENT_CODE: Record<TransientCause, StreamErrorCode> = {
+  timeout: "llm_timeout",
+  rate_limited: "llm_rate_limited",
+  failed: "llm_failed",
+};
+
+const TRANSIENT_MESSAGE_KO: Record<StreamErrorCode, string> = {
+  llm_timeout: "면접관 응답이 늦어지고 있어요. 잠시 후 다시 시도해 주세요.",
+  llm_rate_limited: "면접관이 답변을 정리하고 있습니다. 잠시만요.",
+  llm_failed: "면접관 응답을 받지 못했어요. 잠시 후 다시 시도해 주세요.",
+  byok_key_invalid: "연결하신 키로 접속할 수 없었어요.",
+  byok_quota_exhausted: "연결하신 키의 사용량이 오늘 한도에 도달했어요.",
+};
+
+/** `Retry-After`가 없을 때의 재개 시각 — 계약 10.1절 `resumable_after` 행의 1시간입니다. */
+const DEFAULT_RESUMABLE_AFTER_SEC = 60 * 60;
