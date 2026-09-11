@@ -82,7 +82,9 @@ jobs:
 
       - name: Check for committed secrets
         run: |
-          if git ls-files | grep -E '(^|/)\.env($|\.)' ; then
+          # .env.example is tracked on purpose (.gitignore has !.env.example) and holds
+          # no secrets, only non-sensitive defaults. Every other .env* file stays blocked.
+          if git ls-files | grep -E '(^|/)\.env($|\.)' | grep -vE '(^|/)\.env\.example$' ; then
             echo "A .env file is tracked. Remove it and rotate any key it contained."
             exit 1
           fi

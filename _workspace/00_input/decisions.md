@@ -40,6 +40,7 @@
 | D30 | 체험 사용자는 **동시에 `held` 예약을 하나만** 가진다. 두 번째 예약은 `prepare`에서 409로 거절 | 리더 | `02_ai_architecture.md`, `04_data_layer.md`, `05_api_contract.md` |
 | D31 | Vercel Hobby `maxDuration`이 **300초**로 확인됨(60초 가정은 틀림). 평가·코치를 **워커 1회 호출 안에서 순차 실행**으로 단순화 | 리더 | `05_api_contract.md`, `05_deploy.md` |
 | D32 | Gemini 구조화 출력은 **`minLength`/`maxLength`를 지원하지 않음**. 인용 길이 20–160자는 **서버 검증이 유일한 강제 수단** | 리더 | `02_ai_contracts.md` |
+| D33 | Next.js 16의 `middleware.ts` deprecation을 따라 **`src/proxy.ts`** 로 이행. export 이름도 `proxy` | 리더 | `05_api_contract.md` |
 
 ---
 
@@ -390,6 +391,19 @@ BYOK 세션에는 해당하지 않습니다. 예약 자체를 하지 않기 때�
 **강제되지 않는 것은 인용 길이 하나뿐입니다.** 20–160자는 **서버 검증이 유일한 강제 수단**이며,
 DB CHECK가 최종 방어선입니다. 설계가 이미 서버 이중 검사를 두고 있어 동작은 바뀌지 않지만,
 계약이 "스키마가 막아준다"고 읽히면 안 되므로 **명시적으로 못박습니다.**
+
+### D33 — `middleware.ts` → `proxy.ts`
+
+스캐폴딩 중 Next.js 16.3.4가 빌드마다 경고를 냈습니다.
+
+> `The "middleware" file convention is deprecated. Please use "proxy" instead.`
+
+계약(`05_api_contract.md` 7.2절)이 `middleware.ts`를 명시하고 있었지만 **프레임워크를 따릅니다.**
+파일명은 계약의 본질이 아니라 구현 세부이고, 빌드마다 뜨는 경고를 안고 가면 **경고를 무시하는 습관**이
+생겨 정작 중요한 경고를 놓치게 됩니다. 지금 옮기는 비용은 파일명과 export 이름 두 줄입니다.
+
+`src/proxy.ts`로 옮기고 export도 `proxy`로 바꿨습니다. 경고 0건, 빌드 정상.
+계약 7.2절의 파일명 표기를 갱신합니다 — 동작과 보호 라우트 규칙은 그대로입니다.
 
 ---
 
