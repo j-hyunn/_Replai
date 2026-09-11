@@ -22,7 +22,7 @@ const PROTECTED_PAGE_PREFIXES = [
 /** 미들웨어가 인증을 판정하지 않는 API — 라우트가 자기 시크릿을 직접 검사합니다. */
 const SECRET_AUTH_API_PREFIXES = ["/api/internal/", "/api/cron/"];
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   // 이 응답 객체에 갱신된 쿠키가 실립니다. 그대로 반환해야 세션이 유지됩니다.
   let response = NextResponse.next({ request });
 

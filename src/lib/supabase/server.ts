@@ -30,7 +30,7 @@ export async function createClient() {
             }
           } catch {
             // 서버 컴포넌트에서 호출된 경우 쿠키를 쓸 수 없습니다.
-            // 세션 갱신은 middleware.ts가 담당하므로 여기서는 무시해도 안전합니다.
+            // 세션 갱신은 proxy.ts가 담당하므로 여기서는 무시해도 안전합니다.
           }
         },
       },
