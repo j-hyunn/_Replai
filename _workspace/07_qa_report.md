@@ -218,6 +218,12 @@
 
 코드가 존재하지 않아 검증 자체가 불가능한 항목입니다. 구현 착수 후 재검증 대상입니다.
 
+> **2026-09-11 데이터 레이어 라이브 검증 반영 (`supabase-engineer`).** 아래 DB 계열 항목 6건을
+> 실제 Supabase 프로젝트(`replai-service`, 마이그레이션 14개 적용본)에서 **실행 검증**했습니다 —
+> 문서 대조가 아니라 동작 확인입니다. 검증용 사용자 2명과 픽스처를 만들어 확인하고 **전부 정리**했습니다
+> (검증 후 `auth.users` 0행·`vault.secrets` 0행 확인). **결함 2건 발견 → 마이그레이션 2개로 수정**(아래 Q1·Q2).
+> 애플리케이션 코드가 필요한 항목(`gate.ts`·`ctx`·싱글턴·토스트 등)은 **여전히 미검증**입니다.
+
 **BYOK·예약 관련 (이번 라운드 신규)**
 - [ ] `src/lib/quota/gate.ts` 네 함수의 **진입부 첫 줄**이 실제로 `if (fundingSource !== 'trial_shared') return NO_OP`인지
 - [ ] `resolveCallCredentials()` **외에** `get_user_api_key()`를 부르는 코드가 없는지(호출 그래프 추적)
@@ -225,12 +231,31 @@
 - [ ] 프로바이더 클라이언트가 **키가 박힌 싱글턴**이 아닌지
 - [ ] 어떤 API 응답 본문에도 키 원문이 없는지 — **응답 스키마 전수 grep** (`04:2060` 회귀 항목 5)
 - [ ] 오류 리포터·`sonner` 토스트가 뮤테이션 `variables`를 직렬화하지 않는지(`06:299`)
-- [ ] `funding_source='byok'` 세션에 `ai_quota_reservations` 행이 생기지 않는지(DB 통합 테스트)
-- [ ] 동의 없이 체험 세션이 `ready`로 가지 않는지(트리거 동작 확인)
-- [ ] 세션·계정 삭제 후 `ai_quota_ledger.held_calls`가 **정확히** 되돌아오는지(이중 반납 없이)
-- [ ] 계정 삭제 후 `vault.secrets`에 해당 시크릿이 남지 않는지
-- [ ] `pg_advisory_xact_lock` 동시성 — 같은 사용자의 두 `prepare`가 실제로 직렬화되는지(부하 테스트 필요)
-- [ ] `quota_date`가 `AI_QUOTA_RESET_TIMEZONE` 기준인지(UTC로 계산하면 리셋 경계에서 어긋남)
+- [x] ~~`funding_source='byok'` 세션에 `ai_quota_reservations` 행이 생기지 않는지(DB 통합 테스트)~~ → **검증 완료 (2026-09-11).** `byok` 세션으로 `reserve_session_quota()` 호출 → **`quota_not_applicable:byok` 예외**, 예약 행 **0개**. `consume_session_quota()`는 **조용히 0 반환**하고 행을 만들지 않음(0개) — 3.14.1절의 "예약은 막고 소비는 흘려보낸다"가 실제로 그렇게 동작합니다
+- [x] ~~동의 없이 체험 세션이 `ready`로 가지 않는지(트리거 동작 확인)~~ → **검증 완료 (2026-09-11).** 동의 행이 없는 사용자의 `trial_shared` 세션을 `created → ready`로 UPDATE → `trg_sessions_funding_rules`가 **예외로 차단**. 같은 트리거의 **`funding_source` 불변성**도 함께 확인(`trial_shared → byok` UPDATE가 `funding_source is immutable` 예외로 거부)
+- [x] ~~세션·계정 삭제 후 `ai_quota_ledger.held_calls`가 **정확히** 되돌아오는지(이중 반납 없이)~~ → **검증 완료 (2026-09-11).** `reserved_calls = 34` 예약 후 계정 삭제(=`auth.users` DELETE → 전 테이블 CASCADE) → `held_calls` **34 → 0**. 예약 행 직접 삭제 경로도 **34 → 0**. 둘 다 음수로 내려가지 않았고(이중 반납 없음) `trg_quota_release_on_delete`가 마지막 방어선으로 동작함을 확인
+- [x] ~~계정 삭제 후 `vault.secrets`에 해당 시크릿이 남지 않는지~~ → **검증 완료 (2026-09-11).** `set_user_api_key()`로 키 저장(`vault.secrets` 1행) → 계정 삭제 → **0행**. `trg_user_api_keys_purge_secret`가 CASCADE 사슬에서 실제로 발화합니다. 더불어 **`authenticated`는 `vault` 스키마 자체에 접근 불가**(`permission denied for schema vault`) — 3.15절 5중 강제의 4번이 실측으로 확인됐습니다
+- [x] ~~`pg_advisory_xact_lock` 동시성 — 같은 사용자의 두 `prepare`가 실제로 직렬화되는지(부하 테스트 필요)~~ → **검증 완료 (2026-09-11, 부하 테스트 없이).** ① **가드 자체**: 같은 사용자의 두 번째 세션으로 예약 시도 → `trial_reservation_exists:<기존 session_id>` 예외(D30 계약대로 콜론 뒤에 기존 세션 id). ② **잠금 실재**: 트랜잭션 안에서 `pg_locks`를 조회해 `locktype='advisory'`·`mode=ExclusiveLock`·`granted=true` 행이 있고, 그 키가 `hashtextextended('trial_quota_reservation:'||user_id, 0)`과 **정확히 일치**함을 확인했습니다. 잠금이 실제로 걸리므로 **두 번째 트랜잭션은 첫 번째가 끝날 때까지 대기**합니다 — 부하 테스트는 이 사실을 재확인할 뿐이라 `[확인 필요]`에서 내립니다
+- [x] ~~`quota_date`가 `AI_QUOTA_RESET_TIMEZONE` 기준인지(UTC로 계산하면 리셋 경계에서 어긋남)~~ → **검증 완료 — 그리고 이 항목이 실제로 깨져 있었습니다(Q1).** 아래 신규 결함 표 참조. **수정 완료**(`20260911000100`)
+
+**2026-09-11 라이브 검증에서 새로 발견된 결함 (둘 다 같은 날 수정 완료)**
+
+| # | 심각도 | 위치 | 무엇이 잘못됐나 | 조치 |
+|---|---|---|---|---|
+| **Q1** | **medium** | `20260910000100_ai_quota.sql:308` (`consume_session_quota`) | overflow 경로의 `quota_date` 폴백이 **`current_date`(= DB TimeZone UTC, 실측 확인)** 였습니다. `quota_date`의 정의는 리셋 타임존(`America/Los_Angeles`, `05_deploy.md` 1.2절) 기준이고 LA는 UTC보다 7~8시간 뒤이므로, **매일 UTC 00:00~07:00/08:00 구간에서 날짜가 어긋납니다.** 그 구간의 overflow는 원장 UPDATE가 **아직 없는 다음 날 행**을 겨냥해 0행을 갱신 → 그날 소비가 `held_calls`에 안 잡히고 **정원이 실제보다 크게 계산**됩니다(D27이 막으려던 실패). 정상 예약 경로는 `max(r.quota_date)`를 써서 영향 없음 | ✅ `20260911000100_fix_consume_quota_date_timezone.sql` — 헬퍼 `quota_reset_today()` 신설(GUC 미설정 시에도 UTC가 아니라 확정값으로 폴백). **시그니처 불변 → 라우트·계약 변경 없음**. `04_data_layer.md` 3.14.1절에 근거 기록 |
+| **Q2** | **low** | `security definer` 트리거 함수 6종 | `handle_new_user`·`enqueue_storage_cleanup`·`enforce_session_funding_rules`·`release_quota_before_delete`·`purge_user_api_key_secret`·`set_updated_at`이 **기본 PUBLIC EXECUTE를 단 채** 있었습니다(Supabase advisor 0028·0029, WARN 10건). **실제 악용 가능성은 없습니다** — `returns trigger` 함수는 Postgres가 트리거 문맥 밖 호출을 거부하며 `authenticated`로 직접 호출해 확인했습니다. **진짜 문제는 `04_data_layer.md` 5.4절의 검사가 함수 이름 5개를 하드코딩해 이 6종을 구조적으로 못 본다는 것**입니다 | ✅ `20260911000200_revoke_trigger_function_execute.sql`로 회수(회수 후 **트리거 5종 전부 정상 발화 확인** — 트리거는 테이블 소유자 권한으로 돌아 EXECUTE가 필요 없습니다). 5.4절 쿼리를 **이름 목록 → `prokind='f'` 카탈로그 전수 조회**로 일반화. advisor WARN **10건 → 0건** |
+
+**2026-09-11 라이브 검증에서 통과한 항목 (신규 확인 — 결함 없음)**
+
+| 검증 | 방법 | 결과 |
+|---|---|---|
+| 상태 값 11개 ↔ 실제 CHECK 제약 | 라이브 `pg_get_constraintdef` ↔ `01_state_machine.md` 1절 | **문자 단위·순서까지 일치.** `pause_reason` 5종·`funding_source` 2종·`modality`·`persona`·`job_role`·축 5종도 전부 일치. `session_events.from_status/to_status`의 11개도 동일 |
+| 타 사용자 행 접근 차단 | 사용자 2명 픽스처 + `set local role authenticated` + JWT 클레임 교체 | **세션·평가·문서 전부 차단.** A가 B의 `interview_sessions`/`evaluations`/`documents`를 id로 직접 조회해도 0행. `trial_consents`는 **본인 행만** 보임 |
+| 서버 전용 5개 테이블 전면 차단 | **행을 실제로 넣은 뒤** authenticated로 조회 | `ai_quota_ledger`·`ai_quota_reservations`·`user_api_keys`·`account_events`·`storage_cleanup_queue` **전부 0행**. (행이 없어서 0이 아니라, 있는데 안 보이는 것을 확인했습니다) |
+| 클라이언트 쓰기 경계 | authenticated로 쓰기 시도 | `interview_sessions` INSERT **RLS 거부**, UPDATE **0행**, `trial_consents` INSERT 거부, **남의 세션에 자기 `user_id`로 `report_feedback` INSERT 거부**(5.2절 이중 조건이 실제로 동작) |
+| `security definer` 함수 권한 | authenticated로 직접 호출 | `get_user_api_key`·`reserve_session_quota` **둘 다 거부**. 5.4절 세 쿼리 **전부 0행** |
+| Storage·Realtime | 카탈로그 조회 | 버킷 **`documents` 1개뿐**(`public=false`, 10MB, MIME 4종), 정책 4개, **오디오 버킷 없음**. Realtime 퍼블리케이션에 **`interview_sessions` 하나뿐** |
+| 인덱스·정책 총계 | 카탈로그 조회 | 비-PK 인덱스 **물리 23개** = 4절 표 **22행**(#15가 `uq_disputes_axis`/`uq_disputes_citation` 2개를 한 행에 묶음). **불일치 아님** — 표기 차이임을 확인. `public` 정책 19개 |
 
 **1차에서 이월**
 - [ ] 훅의 **실제 언랩 코드**가 3절 표의 "언랩" 열과 일치하는지 — 지금은 문서 ↔ 문서만 대조
@@ -240,7 +265,7 @@
 - [ ] 하드코딩 색(`#`, `rgb(`, `bg-[`) 부재 전역 grep
 - [ ] `score_card_viewed`가 축당 정확히 1회 전송되는지(지표 5 분모)
 - [ ] Realtime 페이로드(snake_case)를 렌더링하는 코드가 없는지(E1 위반)
-- [ ] RLS 정책의 **실제 동작** — 정책 SQL은 문서상 정합하나 실행 검증 불가
+- [x] ~~RLS 정책의 **실제 동작** — 정책 SQL은 문서상 정합하나 실행 검증 불가~~ → **검증 완료 (2026-09-11).** 라이브 Supabase 프로젝트에서 사용자 2명으로 실행 검증했습니다. 17개 테이블 RLS 활성·정책 19개 실재, 타 사용자 행 접근 차단, 서버 전용 5개 전면 차단, 클라이언트 쓰기 경계, `security definer` 함수 권한까지 전부 통과 — 근거는 위 "라이브 검증에서 통과한 항목" 표. **같은 검증에서 결함 2건(Q1·Q2)이 나왔고 둘 다 수정됐습니다**
 
 **측정 대기 (`[확인 필요]`)**
 - [x] ~~`AI_RPD_LIMIT_*` 3종의 **실측값**~~ → **측정 완료 (2026-09-11 D34).** 운영상 의미 있는 버킷은 **1종뿐**입니다. `AI_RPD_LIMIT_FLASH_LITE = 500`이 실계정 대시보드 실측으로 확정됐고(`02_ai_architecture.md:132`·`:1068`), `flash`·`pro`는 **휴면 버킷(세션당 예약 0)** 이라 게이트가 아예 요청하지 않으므로 RPD 값이 무의미합니다 — **비워 두는 것이 정상**(`02_ai_architecture.md:1069-1070`·`:1616`). 남은 일은 측정이 아니라 **주입**입니다:
