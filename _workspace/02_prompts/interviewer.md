@@ -6,6 +6,14 @@
 > 이 파일의 **1절이 시스템 프롬프트 전문**이고 **2절이 사용자 메시지 템플릿 전문**입니다. 그대로 코드에 넣습니다.
 > 자리표시자는 `{{...}}` 형식이며 서버가 `02_ai_contracts.md` 3.1절 입력 오브젝트에서 채웁니다.
 
+> **구현 현황 (QA 8.8절 Q11).** `src/lib/ai/interviewer.ts`는 아직 이 파일 전문을 쓰지 않고
+> **최소 프롬프트**를 씁니다 — `context_summary`·`rolling_summary`·`<untrusted_derived_summary>`
+> 없음, 최근 대화는 태그 없는 평문, 방금 답변만 `<untrusted_answer>`(turn_id 속성 없음, "방금
+> 답변" 단 하나) 하나로 감쌉니다. 아래 1·2절의 `<untrusted_candidate_answer turn_id="...">`·
+> `<untrusted_derived_summary>`는 **이 전문을 실제로 연결할 다음 라운드**에서 쓰일 대상 태그이며,
+> 지금 코드가 내보내는 태그와는 다릅니다. 지금 프롬프트를 재생성할 때는 실제 코드
+> (`interviewer.ts`의 `SYSTEM_PROMPT`·`buildUserMessage()`)를 근거로 삼으세요.
+
 ---
 
 ## 1. 시스템 프롬프트 (`SYSTEM_INTERVIEWER`)

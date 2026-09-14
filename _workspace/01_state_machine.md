@@ -138,7 +138,7 @@ byok
 | `ready` | `in_progress` | 사용자가 "면접 시작" 클릭 | 음성 모드면 마이크 권한 확인 완료 | `started_at` 기록, 오프닝 질문 발화 |
 | `ready` | `configuring` | 사용자가 "설정 변경" 클릭 | — | 생성된 `questions` 폐기(실제 삭제). **예약은 반납하지 않고 유지**(같은 세션이 다시 `ready`로 갈 때 재예약하면 여력을 이중으로 먹는다. 재예약은 `(session_id, model_bucket)` unique로 멱등 — `02_ai_architecture.md` 8.3.3절) |
 | `ready` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지**. **예약 전량 반납**(체험 세션만) |
-| `in_progress` | `in_progress` | 답변 제출 → 다음 질문 생성 | 종료 조건(3절) 미충족 | `turns` 삽입, 꼬리질문이면 `questions.parent_question_id` 설정, `depth` 증가 |
+| `in_progress` | `in_progress` | 답변 제출 → 다음 질문 생성 | 종료 조건(3절) 미충족 | `turns` 삽입, 꼬리질문이면 `questions.parent_question_id` 설정, `depth` 증가, **`session_events`에 `answer_turn_completed` 기록**(아래 ※답변 턴) |
 | `in_progress` | `in_progress` | 모달리티 전환(음성↔텍스트) | — | `current_modality` 갱신, `session_events`에 `modality_switched` 기록. **상태는 바뀌지 않음** |
 | `in_progress` | `paused` | 사용자가 "일시정지" 클릭 | — | `pause_reason = 'user_requested'`, `paused_at` 기록, 오디오 버퍼 폐기 |
 | `in_progress` | `paused` | LLM 레이트 리밋 도달 + 백오프 대기 60초 초과 | 4절 폴백 사다리의 3단계 | `pause_reason = 'rate_limited'`, 재개 가능 시각 안내 |
@@ -163,6 +163,25 @@ byok
 | `failed` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지**. 예약은 `→ failed` 시점에 이미 반납됨(중복 반납 금지) |
 | `abandoned` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지**. 예약은 `→ abandoned` 시점에 이미 반납됨(중복 반납 금지) |
 | 모든 상태 | (행 삭제) | 사용자가 세션 삭제 / 계정 삭제 | — | DB 행과 Storage 객체 **실제 삭제**(소프트 삭제 아님) |
+
+### ※답변 턴 — `in_progress → in_progress`(11행)가 남기는 관측 이벤트
+
+이 전이는 상태 값을 바꾸지 않지만 **`session_events` 행을 남깁니다**
+(`event_name = 'answer_turn_completed'`, `from_status = to_status = 'in_progress'`,
+`trigger = 'user_action'`). 턴마다 한 행이 늘어납니다.
+
+| 왜 남기는가 | 근거 |
+|---|---|
+| `interview_sessions.updated_at`을 밀어 **워치독이 "살아 있는 세션"을 죽이지 않게** 합니다 | 조건부 UPDATE가 1행을 갱신 → `trg_interview_sessions_updated_at` 발화 |
+| 지표 1·2(완주율·턴 수)를 이 로그로 계산합니다 | `01_product_spec.md` 지표 절 |
+
+`session_events.event_name`에는 값 CHECK가 없고 길이 제약(1~64자)만 있으므로, 이름을 추가해도
+마이그레이션은 필요하지 않습니다. 다른 관측 전용 이름(`modality_switched`,
+`prompt_injection_suspected`, `planner_fallback_used`, `interviewer_output_rejected`,
+`quota_reserved`)과 같은 층위의 값입니다.
+
+> 이름을 만든 것은 `vercel-platform-engineer`(구현 `src/app/api/sessions/[sessionId]/turns/route.ts`)이며,
+> 여기 기록한 것은 2026-09-14 QA Q6 조치입니다.
 
 ### ※ 면접 종료 시의 **부분 반납** — 왜 "전량"이 아니고, 왜 "6"인가 (D34)
 

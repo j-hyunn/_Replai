@@ -1,0 +1,177 @@
+import "server-only";
+
+import { ApiError } from "@/lib/api/errors";
+import { type QuestionRow, type TurnRow } from "@/lib/api/serialize";
+import type { Admin } from "@/lib/session/store";
+
+/**
+ * 평가자·코치가 공유하는 **대화 전문/질문 트리 조립** (`02_prompts/evaluator.md` 6.2절).
+ *
+ * 두 호출이 같은 문자열을 봐야 하므로 렌더링을 한 곳에 둡니다. 다른 점은 **정화 여부 하나**이며
+ * 그것이 `sanitize` 인자입니다(`02_ai_contracts.md` 7절 표).
+ */
+
+/** 발화 1건의 프롬프트 반입 상한 (계약 7절). 넘으면 잘라내고 잘렸음을 표시합니다. */
+const MAX_TURN_CHARS = 4000;
+
+export type EvaluationContext = {
+  turns: TurnRow[];
+  questions: QuestionRow[];
+  /** `turn_id` → 턴. 인용 검증이 원문을 여기서 찾습니다. */
+  turnsById: Map<string, TurnRow>;
+  questionIds: Set<string>;
+};
+
+/**
+ * 평가에 필요한 세션의 전체 대화를 읽습니다.
+ *
+ * 라우트는 `SessionRow` 하나만 들고 있으므로 **필요한 것을 여기서 직접 읽습니다.**
+ * RLS를 우회하는 admin 클라이언트는 호출 측(워커)이 이미 들고 있는 것을 받습니다.
+ */
+export async function loadEvaluationContext(
+  admin: Admin,
+  sessionId: string,
+): Promise<EvaluationContext> {
+  const [turns, questions] = await Promise.all([
+    admin.from("turns").select("*").eq("session_id", sessionId).order("seq", { ascending: true }),
+    admin
+      .from("questions")
+      .select("*")
+      .eq("session_id", sessionId)
+      .order("order_index", { ascending: true }),
+  ]);
+
+  if (turns.error || questions.error) {
+    throw new ApiError("internal_error", "요청을 처리하지 못했습니다.", {
+      cause: turns.error ?? questions.error,
+    });
+  }
+
+  return {
+    turns: turns.data,
+    questions: questions.data,
+    turnsById: new Map(turns.data.map((turn) => [turn.id, turn])),
+    questionIds: new Set(questions.data.map((question) => question.id)),
+  };
+}
+
+/**
+ * **평가자는 정화하지 않습니다** (`02_ai_contracts.md` 7절).
+ *
+ * 인용 검증이 `turns.transcript_text` 원본과 문자 단위로 일치해야 하므로 `<`→`＜` 치환도,
+ * 제어 문자 제거도, 개행 정규화도 할 수 없습니다 — 하나라도 하면 모델이 복사한 인용이
+ * `indexOf`에서 탈락하거나 오프셋이 어긋납니다. 평가자의 태그 위조 방어는 정화가 아니라
+ * **요청마다 달라지는 난수 태그명**(`newUntrustedTagName`)입니다.
+ *
+ * 코치는 오프셋을 쓰지 않으므로 계약 7절의 공통 정화 3종을 전부 적용합니다.
+ * 플래너·면접관도 오프셋을 요구하지 않으므로 **이 함수를 그대로 공용으로 씁니다**
+ * (각자 로컬 복사본을 두지 않습니다 — 계약 7절 표와 구현이 한 곳에서만 갈라지게 하기 위함입니다).
+ */
+export function sanitizeUntrusted(text: string): string {
+  return (
+    text
+      // ① 태그 위조 차단 — 길이 불변 1:1 치환
+      .replace(/</gu, "＜")
+      .replace(/>/gu, "＞")
+      // ② 제어 문자 제거 (탭·개행은 남깁니다)
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/gu, "")
+      // ③ 3개 이상 연속 개행을 2개로 정규화 (CR/CRLF를 LF로 모은 뒤)
+      .replace(/\r\n?/gu, "\n")
+      .replace(/\n{3,}/gu, "\n\n")
+  );
+}
+
+function clip(text: string): string {
+  return text.length <= MAX_TURN_CHARS
+    ? text
+    : `${text.slice(0, MAX_TURN_CHARS)}\n[…이하 생략됨]`;
+}
+
+/**
+ * 문자 수를 **코드포인트 기준**으로 셉니다.
+ *
+ * DB의 길이 CHECK(`citations_quote_text_len`·`scores_improvement_len`)가 Postgres
+ * `char_length`(코드포인트)이므로, JS `String.length`(UTF-16 코드 유닛)로 재면 이모지 등
+ * 서로게이트 쌍이 섞인 경계 길이에서 애플리케이션 검증을 통과한 값이 INSERT에서 깨집니다.
+ *
+ * **오프셋(`quote_start`/`quote_end`)은 UTF-16 그대로 둡니다** — 계약이 그렇게 확정돼 있고
+ * 여기서 바꾸면 `indexOf` 산출값과 어긋납니다. 이 함수는 **길이 임계값 검사 전용**입니다.
+ */
+export function codePointLength(text: string): number {
+  return Array.from(text).length;
+}
+
+/**
+ * 비신뢰 블록의 태그명을 **요청마다 새로** 만듭니다 (`02_ai_contracts.md` 7절).
+ *
+ * 태그명이 고정이면 후보가 답변 본문에 `</untrusted_candidate_answer>`를 그대로 타이핑해
+ * 블록을 조기에 닫고, 그 뒤 문장을 모델에게 "블록 밖 지시"로 보이게 만들 수 있습니다.
+ * 접미사가 매 호출 달라지면 후보는 닫는 태그를 미리 알 수 없습니다. **본문은 한 글자도
+ * 바뀌지 않으므로** 평가자의 `indexOf` 인용 검증과 오프셋이 그대로 유효합니다.
+ */
+export function newUntrustedTagName(): string {
+  return `untrusted_candidate_answer_${crypto.randomUUID().replace(/-/gu, "").slice(0, 8)}`;
+}
+
+/**
+ * 대화 전문. 면접관 발화는 평문, **후보 발화만** 비신뢰 블록으로 감쌉니다.
+ *
+ * @param sanitize `true`면 계약 7절의 공통 정화 3종을 적용합니다(코치 전용). 평가자는 `false`입니다.
+ * @param tagName `newUntrustedTagName()`이 만든 **이번 요청 전용** 태그명. 같은 호출의 시스템
+ *   프롬프트에도 같은 값을 박아 넣어야 모델이 블록의 경계를 알 수 있습니다.
+ */
+export function renderTranscript(
+  turns: readonly TurnRow[],
+  sanitize: boolean,
+  tagName: string,
+): string {
+  return turns
+    .map((turn) => {
+      const body = clip(sanitize ? sanitizeUntrusted(turn.transcript_text) : turn.transcript_text);
+      if (turn.role === "interviewer") {
+        return `[seq ${turn.seq}][면접관] ${body}`;
+      }
+      return [
+        `[seq ${turn.seq}][후보 / ${turn.modality} / 정정됨: ${turn.is_corrected ? "예" : "아니오"}]`,
+        `<${tagName} turn_id="${turn.id}">`,
+        body,
+        `</${tagName}>`,
+      ].join("\n");
+    })
+    .join("\n");
+}
+
+/** 질문 트리 — 어느 주질문에서 몇 단계까지 파고들었는지 (`02_prompts/evaluator.md` 6.2절). */
+export function renderQuestions(questions: readonly QuestionRow[]): string {
+  if (questions.length === 0) return "(질문이 없습니다)";
+
+  return questions
+    .map((question) => {
+      const indent = "  ".repeat(question.depth);
+      const label =
+        question.question_kind === "main"
+          ? `[main #${question.order_index}]`
+          : `[follow_up depth${question.depth}]`;
+      const axis = question.target_axis ? `(${question.target_axis}) ` : "";
+      return `${indent}${label} ${axis}${question.question_text} (question_id=${question.id})`;
+    })
+    .join("\n");
+}
+
+/** 모델이 되돌려 준 JSON에서 코드 펜스를 벗깁니다(`planner.ts`와 같은 규칙). */
+export function stripCodeFence(raw: string): string {
+  if (!raw.startsWith("```")) return raw;
+  return raw
+    .replace(/^```[a-zA-Z]*\s*/u, "")
+    .replace(/```\s*$/u, "")
+    .trim();
+}
+
+/** 모델 출력 파싱 — 실패하면 **점수를 지어내지 않고** 던집니다. */
+export function parseJsonOutput(raw: string, errorCode: string): unknown {
+  try {
+    return JSON.parse(stripCodeFence(raw.trim()));
+  } catch {
+    throw new Error(errorCode);
+  }
+}

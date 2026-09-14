@@ -3,6 +3,7 @@ import "server-only";
 import type { CompletionRequest } from "@/lib/ai/provider";
 import type { InterviewerAction, InterviewerMeta } from "@/lib/ai/meta-stream";
 import type { agentModel } from "@/lib/ai/roles";
+import { sanitizeUntrusted } from "@/lib/ai/transcript";
 import type { Axis, QuestionKind, QuestionRow, SessionRow, TurnRow } from "@/lib/api/serialize";
 
 /**
@@ -134,11 +135,6 @@ function buildUserMessage(input: InterviewerInput): string {
   ]
     .filter((line) => line !== "")
     .join("\n");
-}
-
-/** `<`를 전각으로 바꿔 사용자 입력이 태그 경계를 닫지 못하게 합니다(프롬프트 인젝션 방어). */
-function sanitizeUntrusted(text: string): string {
-  return text.replace(/</gu, "＜");
 }
 
 export type ResolvedMeta = {
