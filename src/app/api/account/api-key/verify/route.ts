@@ -18,7 +18,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
  * 있었다"는 **정상적인 검증 결과**이고, 그 사실이 `keyStatus='invalid'`와 `lastFailureCode`로
  * 나갑니다. 409로 던지면 프론트가 그 두 값을 읽을 방법이 사라집니다.
  *
- * **복호화는 이 라우트가 직접 하지 않습니다.** `get_user_api_key()`를 부르는 코드는
+ * **복호화는 이 라우트가 직접 하지 않습니다.** Vault 접근자를 부르는 코드는
  * `src/lib/ai/credentials.ts` 하나여야 하므로(05_deploy.md CI 검사 3), 여기서는 그 파일의
  * `readStoredUserKey()`를 통해 평문을 받아 **검증 호출에 한 번 쓰고 버립니다.**
  */
@@ -32,7 +32,7 @@ export function POST() {
     const { user } = await requireUser();
 
     // RLS 우회가 필요한 이유: `user_api_keys`는 RLS를 켜고 정책이 0개이며,
-    // `get_user_api_key()`는 `service_role`에만 실행 권한이 있습니다(04_data_layer.md 3.15절).
+    // Vault 접근자 함수는 `service_role`에만 실행 권한이 있습니다(04_data_layer.md 3.15절).
     const admin = createAdminClient();
     const current = await loadApiKeyStatus(admin, user.id);
 
