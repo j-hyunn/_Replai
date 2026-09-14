@@ -760,3 +760,95 @@ Q1~Q4·Q6 **종결**, Q5 **논리 계층만 종결**(잔여 Q5-R), Q3 **부분 �
 - **실제 LLM 호출과 실제 DB INSERT를 한 번도 실행하지 않았습니다.** 스테이징에 키를 꽂고
   평가 1건을 끝까지 돌려 보는 것이 머지 후 첫 작업이어야 합니다 — 특히 Q2(코드포인트 길이)와
   Q1(난수 태그)은 실행해야만 최종 확인되는 항목입니다.
+
+### 8.8 최종 재검증 (2026-09-14, `qa-inspector`)
+
+> 8.7절이 **미해결로 종료**했던 low 5건(Q5-R·Q7·Q8·Q9·Q10)에 대해 `ai-interview-architect`(Q5-R·Q7·Q8·Q10)와
+> `vercel-platform-engineer`(Q9)가 조치했다고 자기 보고했습니다. **자기 보고를 믿지 않고 파일 현재 상태를
+> 직접 읽어** 판정했습니다. 읽은 파일: `src/lib/ai/{transcript,evaluator,interviewer,planner}.ts` ·
+> `src/app/api/internal/jobs/evaluate/route.ts` · `src/app/api/sessions/[sessionId]/turns/route.ts` ·
+> `supabase/migrations/20260910000100_ai_quota.sql` ·
+> `_workspace/{01_state_machine,02_ai_architecture,02_ai_contracts,05_api_contract}.md` ·
+> `_workspace/02_prompts/{interviewer,evaluator}.md` · `.github/workflows/ci.yml`.
+> **이 라운드도 코드를 한 줄도 수정하지 않았습니다.**
+>
+> **범위 밖(재검증하지 않음).** 프런트엔드 훅↔API 경계 · 음성 파이프라인 · SSE 실행 검증 ·
+> #12 모달리티 전환 · RLS 라이브. 8.3절의 미검증 목록은 그대로 유효합니다.
+
+#### 8.7절 잔여 5건의 재검증
+
+| # | 판정 | 근거 |
+|---|---|---|
+| **Q5-R** | **종결 (통과)** | 문서 문구가 `02_ai_architecture.md` 8.3.1절 내역 표(34행) **바로 아래**에 실재합니다 — "위 6/4/2(그리고 표의 34 전체)는 **논리 호출 수**다 (2026-09-14, QA Q5-R)". 변경 로그에도 같은 날짜 항목이 있습니다. **주장한 근거를 마이그레이션 SQL과 직접 대조했고 사실입니다**: `consume_session_quota`(`20260910000100_ai_quota.sql:270-321`)는 ① 예약 행이 있으면 `consumed_calls = consumed_calls + p_n`으로 **`reserved_calls` 위로 그대로 올리고**(상한 검사·예외 없음, `294-302`), ② 예약 행이 없으면 `status='overflow'` 행을 `reserved_calls=0, consumed_calls=p_n`으로 만들고 원장 `held_calls`를 `+p_n` 합니다(`310-318`). **원장이 음수로 깨지지 않는 것도 확인**: `release_session_quota`가 반납분을 `greatest(reserved_calls - consumed_calls, 0)`로 계산하므로(`244`) 초과 소비 시 반납이 0이 될 뿐 음수가 되지 않고, 삭제 트리거(`release_quota_before_delete:349`)도 같은 `greatest(...,0)`입니다. **코드 변경이 없다는 보고도 사실**입니다 — `gate.ts`·`provider.ts`는 이번 diff에 없습니다. 판정: 결함을 "고친" 것이 아니라 **의도된 설계임을 문서에 명시해 종결**한 것이며, 그 명시가 실제 SQL 동작과 일치합니다 |
+| **Q7** | **종결 (통과) — 단, 같은 유형의 잔여 1건이 다른 문서에서 발견됨(아래 Q11)** | **중복 함수 없음을 전수 grep으로 확인**: `sanitize`라는 이름의 함수는 리포지토리 전체에서 사라졌고, `sanitizeUntrusted`는 `transcript.ts:70`의 **정의 1개**와 호출 4곳(`transcript.ts:130`·`interviewer.ts:133`·`planner.ts:70`·`74`)뿐입니다. `interviewer.ts:6`·`planner.ts:6`이 `@/lib/ai/transcript`에서 import합니다. **동작 회귀 없음**: (1) 두 호출 모두 문자 오프셋을 쓰지 않으므로 ②③ 추가가 무해하고, (2) 신뢰 경계는 오히려 강화됐습니다(이전 `<`만 → 이제 `<`·`>` 양쪽 + 제어 문자 제거 + 개행 정규화), (3) 프롬프트 조립 순서가 그대로입니다 — `planner.ts:70·74`는 **정화 후 `slice(0, MAX_SNAPSHOT_CHARS)`** 로 이전과 같은 순서이고(길이 불변 치환이라 결과도 동일), `interviewer.ts:127-136`의 `buildUserMessage` 배열 구성·`<untrusted_answer>` 태그·`filter(line => line !== "")`가 그대로입니다. (4) **번들 경계 회귀 없음** — `transcript.ts:1`이 `import "server-only"`로 시작하고, `interviewer.ts`·`planner.ts`를 import하는 곳은 `turns/route.ts`·`internal/jobs/plan/route.ts` **서버 라우트 2개뿐**(둘 다 `runtime = "nodejs"`)입니다. `transcript.ts`가 새로 끌어오는 값 import는 `ApiError` 하나이고 나머지는 타입 전용입니다. **`02_ai_contracts.md` 7절 표는 코드와 일치**합니다 — 정화 표가 `planner / interviewer / coach`(①②③ 전부, 공용 함수 1개) · `summarizer`(미구현) · `evaluator`(전부 안 함)로 쪼개졌고, 태그 표에 **구현 상태 칸**이 생겨 interviewer = `<untrusted_answer>`(turn_id 없음) · summarizer와 `<untrusted_derived_summary>` = **미구현**으로 적혔습니다. 셋 다 코드와 대조해 사실입니다 |
+| **Q8** | **종결 (통과)** | **바이트 단위로 직접 확인했습니다.** 제어 바이트 클래스(NUL~BS, VT, FF, SO~US, DEL) 검색을 `transcript.ts`·`evaluator.ts`·`interviewer.ts`·`planner.ts` 4개에 돌려 **매치 0건**입니다(HEAD 블롭에는 1건이 남아 있어 `git diff`가 `transcript.ts`를 아직 `Binary`로 표시하지만, 그것은 **구버전 쪽** 바이트입니다 — 작업 트리는 깨끗합니다). `file(1)`도 4개 전부 `UTF-8 text`로 판정합니다(이전엔 `data`). **의미 동일성 확인**: 구 정규식의 원시 바이트는 NUL~BS · VT · FF · SO~US · DEL이었고 신 리터럴은 `[ --]`로 **문자 집합이 정확히 같습니다**(탭 `	`·LF `
+`·CR `` 보존도 그대로). `evaluator.ts:696`의 중복 판정 키 구분자도 원시 NUL → ` `으로 **같은 코드포인트**입니다 |
+| **Q9** | **종결 (통과)** | `evaluate/route.ts:141-146` 주석에서 행 번호 4개가 전부 사라지고 함수명 참조로 바뀌었습니다. **가리키는 4곳이 실제로 존재하고 전부 `.eq("status","running")` 가드를 답니다**: 워커 진입부 선점 UPDATE(`88`) · `runEvaluatorWithRetries()`의 `attempt_count` UPDATE(`270-272`) · `exhaust()`(`303-308`) · `closeOrphanEvaluation()`(`191-196`). Q4 가드 본체(`147-153`)와 0행 early return(`155-164`)은 건드려지지 않았습니다 |
+| **Q10** | **종결 (통과) — 에이전트의 문서 위치 판단이 옳습니다** | **QA 8.7절 Q10이 지목한 위치가 틀렸음을 직접 확인했습니다.** `02_ai_contracts.md`에는 **4.6절이 아예 없습니다**(문자열 "4.6" 매치 0건). 이 문서의 4절은 `## 4. ❸ Context Summarizer — summarizer.roll_up`(600행)이고 하위 절은 4.1 입력·4.2 출력 스키마 **둘뿐**이며 이벤트 목록이 없습니다. 8.6절 Q6이 말한 "계약 4.6절"이 가리킬 수 있는 유일한 절은 `05_api_contract.md:392` `### 4.6 전이 표 35행 ↔ 엔드포인트 전수 대응`이며, **에이전트가 고른 위치가 정확합니다**. 반영도 실재합니다(`05_api_contract.md:411` 11행). **`01_state_machine.md` 11행 정의와 값 단위로 일치**: `event_name='answer_turn_completed'` · `trigger='user_action'` · `from_status = to_status = 'in_progress'` 세 값이 `01_state_machine.md:141`·`167-184`(`※답변 턴` 절)와 같고, **실제 코드**(`turns/route.ts:628-633`의 `applyTransition({from:"in_progress", to:"in_progress", trigger:"user_action", eventName:"answer_turn_completed"})`)와도 인자 단위로 같습니다. 05 문서가 1차 출처를 `01_state_machine.md`로 명시해 값의 중복 정의를 만들지 않은 것도 적절합니다 |
+
+#### 이번 라운드에서 **새로 발견된** 항목
+
+| # | 심각도 | 경계 | 위치 | 현재 | 기대 | 소유자 |
+|---|---|---|---|---|---|---|
+| **Q11** | low | 런타임 프롬프트 문서 ↔ 면접관 구현 (Q7 조치의 **미도달 범위**) | `_workspace/02_prompts/interviewer.md:69`·`187-189`·`220-222`·`323` ↔ `src/lib/ai/interviewer.ts:95-97`·`131-134` | Q7 조치가 `02_ai_contracts.md` 7절 표는 실제 구현(`<untrusted_answer>`, turn_id 없음)에 맞췄지만, **같은 태그를 규정하는 프롬프트 문서는 갱신되지 않았습니다.** `02_prompts/interviewer.md`는 여전히 사용자 메시지 템플릿을 `<untrusted_candidate_answer turn_id="{{last_answer.turn_id}}">`로, 신뢰 경계 문단을 "`<untrusted_candidate_answer>`와 `<untrusted_derived_summary>` 태그로 감싼 블록"으로 적습니다. 실제 코드가 내보내는 태그는 `<untrusted_answer>` 하나이고 `<untrusted_derived_summary>`는 **미구현**입니다. **런타임 결함이 아닙니다** — `interviewer.ts`의 실제 SYSTEM_PROMPT(`95-97`)는 `<untrusted_answer>`를 올바로 지목하므로 모델이 보는 규칙과 데이터는 일치합니다. 불일치는 **문서 ↔ 코드**에만 있습니다. 다만 이 문서가 프롬프트의 1차 출처로 쓰이고 있어, 다음 사람이 문서를 근거로 프롬프트를 재생성하면 **코드가 내보내지 않는 태그를 지목하는 시스템 프롬프트**가 만들어져 신뢰 경계 규칙이 무력화됩니다 | `02_prompts/interviewer.md`의 태그 4곳을 `<untrusted_answer>`(turn_id 속성 없음)로 맞추고, `<untrusted_derived_summary>`는 `02_ai_contracts.md` 7절이 한 것과 같이 **"미구현 — summarizer 도입 시 함께"** 로 표시합니다. 또는 반대로 코드를 문서에 맞춰 `<untrusted_candidate_answer turn_id="…">`로 올립니다(이 경우 `interviewer.ts:95-97`·`131-134` 두 곳을 같이 고쳐야 합니다) | `ai-interview-architect` |
+
+#### 회귀 확인 (R1~R11 · Q1~Q4·Q6 · 8.6~8.7절 판정)
+
+- **R1~R11 회귀 없음.** 이번 diff는 파일 8개이고 그중 서버 동작을 건드리는 것은 `evaluate/route.ts`(**주석만**) · `evaluator.ts`(**구분자 리터럴 1개**) · `interviewer.ts`·`planner.ts`(로컬 `sanitize` 제거 + import) · `transcript.ts`(정규식 리터럴 이스케이프)뿐입니다. **R3·R4(스트림 오류 분류)의 소유 파일인 `turns/route.ts`는 이번 diff에 없습니다** — `git status`로 확인했고, 따라서 `handleStreamFailure`의 `stream_error` 5종 분류·재시도 규칙·`session_notice` 선행 발신은 손대지 않았습니다. Q7 리팩터링이 인터뷰어 호출 경로에 닿는 지점은 `buildUserMessage` 안의 함수 호출 1줄뿐이며, 스트림·META 파싱·abort 분기와 **호출 그래프가 겹치지 않습니다**. R9의 `in_progress→in_progress` 전이(`turns/route.ts:628-633`)도 abort 분기 뒤 그대로입니다.
+- **Q1~Q4·Q6 회귀 없음.** Q1 난수 태그: `newUntrustedTagName()`(`transcript.ts:113`)와 스레딩 경로가 그대로이고, **평가자는 여전히 `sanitize=false`** 이므로(`renderTranscript`의 분기 `transcript.ts:130`이 그대로) Q7이 강화한 정화가 평가자 오프셋에 닿지 않습니다 — 이번 라운드의 **가장 위험했던 회귀 경로이며, 닫혀 있음을 확인했습니다.** Q2 `codePointLength` 그대로. Q4 조건부 UPDATE 본체 그대로(주석만 변경). Q6은 Q10에서 확장 확인.
+- **전이 표 회귀 없음.** `interview_sessions.status`를 직접 쓰는 코드는 여전히 없고 `applyTransition` 단일 관문입니다. 코드에 없는 행은 여전히 **12행(모달리티 전환 · #12)** 하나(프런트·음성 범위), 31행은 의도된 `mvp:false`.
+- **보안 회귀 없음.** `NEXT_PUBLIC_` 접두사 키는 `NEXT_PUBLIC_SUPABASE_ANON_KEY` 하나뿐. `transcript.ts`·`interviewer.ts`·`planner.ts` 전부 `import "server-only"`로 시작하고, 새 import 체인(`interviewer/planner → transcript`)이 서버 전용 모듈을 클라이언트 번들로 끌어올 경로가 없음을 importer 2개(서버 라우트, 둘 다 `runtime = "nodejs"`)로 확인했습니다. 인젝션 방어는 **강화**됐습니다(planner·interviewer가 `<`만 → ①②③ 전부).
+- **언어 정책 회귀 없음.** 이번에 바뀐 `_workspace/` 문서 3개와 주석은 전부 한국어, 코드 식별자는 영어 그대로(`answer_turn_completed` · `running`/`succeeded`/`failed` · `sanitizeUntrusted` · `untrusted_answer` · 컬럼명 전부). 한국어로 번역된 enum 값·필드명 **없음**.
+
+#### 검증·빌드 (QA가 직접 실행)
+
+`npm run typecheck`(`next typegen && tsc --noEmit`) · `npm run lint`(`eslint`) · `npm run build`
+**3종 전부 통과**(각 exit 0, 경고 없음). 빌드 env는 CI(`.github/workflows/ci.yml:131-132`)와 같은
+플레이스홀더 2개를 셸 인라인으로만 넘겨 **파일을 만들지 않았습니다** — 검증 후 `git status`가
+이번 조치 대상 8개 파일만 보임을 확인했습니다(신규·잔여 파일 없음).
+
+#### 이번 라운드에서도 **미검증**인 항목 (통과가 **아닙니다**)
+
+- [ ] 평가자·코치·면접관의 **실제 LLM 호출 동작** — 프로바이더 키가 없어 한 번도 실행하지 않았습니다. Q7이 강화한 정화(제어 문자 제거·개행 정규화)가 **면접관 답변 품질에 주는 영향**도 실행해야만 확인됩니다. 정적으로는 태그 위조 차단이 강해졌다는 것까지입니다.
+- [ ] `consume_session_quota`의 overflow 경로 **실제 실행** — Q5-R 판정은 마이그레이션 SQL 독해이며 DB에 붙여 돌린 결과가 아닙니다. 프로바이더 재시도가 반복될 때 실측 소비가 어디까지 가는지는 측정된 적이 없습니다(문서도 "측정 후에 판단한다"고 적었습니다).
+- [ ] `evaluation_scores`·`evaluation_citations`에 대한 **실제 INSERT**, Q2의 코드포인트 길이 실측.
+- [ ] 리포트 화면·음성 UI가 없어 **API↔훅 경계 전체** — 8.3절 그대로.
+- [ ] `settleSucceededEvaluation` ↔ I2 정산의 **실제 경합**, Q4 가드의 실제 경합 — 코드 독해입니다.
+- [ ] 프런트엔드 · 음성 파이프라인 · RLS 라이브 · #12 모달리티 전환 — 8.3절 목록 그대로.
+
+#### 최종 집계 (전 라운드 누계, 2026-09-14 최종 재검증 종료 시점)
+
+| 심각도 | 잔존(미해결) | 잔존 항목 |
+|---|---|---|
+| critical | **0** | — |
+| high | **0** | — |
+| medium | **0** | — |
+| low | **1** | Q11(프롬프트 문서 `02_prompts/interviewer.md` ↔ `interviewer.ts` 태그명 불일치) |
+
+**8.7절이 남긴 low 5건은 전부 종결입니다** — Q5-R **종결**(문서 명시, 근거가 SQL과 일치) ·
+Q7 **종결**(구현 통일 + 표 정정, 중복 함수 0) · Q8 **종결**(제어 바이트 0, 문자 집합 동일) ·
+Q9 **종결**(행 번호 제거, 함수 4곳 실재) · Q10 **종결**(문서 위치 판단이 옳고 반영도 정확).
+전 라운드 누계로 R1~R11 · Q1~Q10 **전부 종결**이며, 신규 Q11 1건만 남습니다.
+
+#### 이 브랜치는 머지 가능한가 — **가능합니다 (승인)**
+
+**판정: 1순위·2순위 범위(상태 머신 · 세션/내부/크론 API 라우트 · 데이터 레이어 · 평가자·코치·면접관
+AI 배선)에 한해 이 브랜치는 머지할 수 있습니다.** 8.7절의 "조건부 승인"에서 **조건 없는 승인**으로
+올립니다 — 조건이었던 low 5건이 전부 닫혔기 때문입니다.
+
+근거:
+- **critical 0 · high 0 · medium 0.** 다섯 라운드 전부에서 세션을 영구 정지시키거나 사용자를 무한
+  대기시키는 경로를 찾지 못했고, 이번 조치가 새로 만들지도 않았습니다.
+- 잔존 **low 1건(Q11)** 은 문서↔코드 불일치이며 런타임 동작에 영향이 없습니다. 실제 시스템
+  프롬프트는 올바른 태그를 지목합니다.
+- 이번 조치의 **유일한 동작 변경**(planner·interviewer의 정화 강화)은 신뢰 경계를 **강화**하는
+  방향이고, 오프셋을 쓰는 평가자 경로와 **호출 그래프가 분리**돼 있음을 확인했습니다.
+- `typecheck` · `lint` · `build` 3종 통과, `git status` 청결.
+
+**PR 설명에 반드시 적을 것** — 아래 세 가지가 **이 PR의 범위가 아니라 후속 작업**이라는 사실:
+- 잔존 **Q11** 1건(`02_prompts/interviewer.md` 태그명 정정).
+- **프런트엔드 훅이 없어 API↔훅 경계가 통째로 미검증입니다.** 리포트 화면·음성 UI가 들어오는
+  PR에서 경계 검증을 **처음부터** 해야 합니다.
+- **실제 LLM 호출과 실제 DB INSERT를 한 번도 실행하지 않았습니다.** 스테이징에 키를 꽂고 평가
+  1건을 끝까지 돌려 보는 것이 머지 후 첫 작업이어야 합니다 — Q1(난수 태그) · Q2(코드포인트 길이) ·
+  Q5-R(프로바이더 재시도 실측 소비)은 실행해야만 최종 확인됩니다.
