@@ -347,7 +347,12 @@ function streamInterviewer(prepared: Prepared, signal: AbortSignal): Response {
             console.error("[turns] abort 정리에 실패했습니다", commitError);
           });
         } else {
-          send("stream_error", await handleStreamFailure(prepared, error));
+          const failure = await handleStreamFailure(prepared, error);
+          // 5.2절의 순서 원칙 — 알림이 **종료 이벤트보다 먼저** 나갑니다. 여기서는
+          // `stream_error`가 종료 이벤트입니다. 뒤에 보내면 UI가 이미 오류 처리를 끝낸 뒤라
+          // 알림을 띄울 자리가 없습니다.
+          if (failure.notice) send("session_notice", failure.notice);
+          send("stream_error", failure.error);
         }
       } finally {
         clearInterval(heartbeat);
@@ -611,7 +616,28 @@ async function resolveSessionStatus(
       budget,
     });
 
-  if (!complete) return "in_progress";
+  if (!complete) {
+    // 전이 표 11행(`in_progress → in_progress`, "답변 제출 → 다음 질문 생성") — QA R9.
+    // 상태 값이 그대로라고 전이를 건너뛰면 ① 표의 11행이 코드에 없는 죽은 행이 되고,
+    // ② 턴마다 `session_events`가 남지 않으며, ③ **`interview_sessions.updated_at`이 턴마다
+    // 갱신되지 않습니다.** 크론 워치독 2는 바로 그 `updated_at`으로 "방치된 진행 중 세션"을
+    // 재므로, 이 호출이 없으면 정상 진행 중인 세션이 `paused(connection_lost)`로 끊깁니다.
+    // 갱신은 `trg_interview_sessions_updated_at`이 UPDATE 자체로 처리합니다.
+    await applyTransition({
+      sessionId: session.id,
+      from: "in_progress",
+      to: "in_progress",
+      trigger: "user_action",
+      eventName: "answer_turn_completed",
+      patch: {},
+      admin,
+    }).catch((transitionError: unknown) => {
+      // 이 기록이 실패해도 턴 자체는 이미 확정됐습니다. 스트림을 오류로 끝내면
+      // 화면에 흐른 발화가 실패로 보여 사용자에게 더 나쁜 거짓말이 됩니다.
+      console.error("[turns] 턴 전이 기록에 실패했습니다", transitionError);
+    });
+    return "in_progress";
+  }
 
   await completeSession(session, "ai_completion", "session_completed", admin);
   // 세션의 실제 상태는 평가 등록까지 끝나 `evaluating`이지만, 이 스트림이 알려 주는 것은
@@ -630,14 +656,22 @@ function isPersona(value: string | null): value is Persona {
  *
  * **`messageKo`에 프로바이더 원문을 넣지 않습니다.** SDK 예외에는 요청 헤더가 붙어 있는 경우가
  * 있어 그대로 흘리면 키가 샙니다 — `normalizeProviderError`가 이미 3분류로 접어 두었습니다.
+ *
+ * `notice`는 **상태를 옮긴 실패**에만 붙습니다(전이 표 14행). `buildNotices()`와 엮지 않은
+ * 이유는 그쪽이 면접관 META 기반 가드 전용이라 호출 맥락이 다르기 때문입니다.
  */
-async function handleStreamFailure(prepared: Prepared, error: unknown): Promise<StreamError> {
+type StreamFailure = { error: StreamError; notice: SessionNotice | null };
+
+async function handleStreamFailure(prepared: Prepared, error: unknown): Promise<StreamFailure> {
   if (!isNormalizedProviderError(error)) {
     console.error("[turns] 스트림이 실패했습니다", error);
     return {
-      code: "llm_failed",
-      retryable: true,
-      messageKo: TRANSIENT_MESSAGE_KO.llm_failed,
+      error: {
+        code: "llm_failed",
+        retryable: true,
+        messageKo: TRANSIENT_MESSAGE_KO.llm_failed,
+      },
+      notice: null,
     };
   }
 
@@ -662,13 +696,16 @@ async function handleStreamFailure(prepared: Prepared, error: unknown): Promise<
     });
 
     return {
-      code: error.pauseReason === "byok_key_invalid" ? "byok_key_invalid" : "byok_quota_exhausted",
-      // `byok_*` 2종은 `retryable: false` 고정입니다. 복구 주체가 우리가 아니라 사용자입니다.
-      retryable: false,
-      messageKo:
-        error.pauseReason === "byok_key_invalid"
-          ? "연결하신 키로 접속할 수 없었어요. 키가 삭제되었거나 권한이 바뀌었을 수 있습니다."
-          : "연결하신 키의 사용량이 오늘 한도에 도달했어요. Google AI Studio에서 확인하실 수 있습니다.",
+      error: {
+        code: error.pauseReason === "byok_key_invalid" ? "byok_key_invalid" : "byok_quota_exhausted",
+        // `byok_*` 2종은 `retryable: false` 고정입니다. 복구 주체가 우리가 아니라 사용자입니다.
+        retryable: false,
+        messageKo:
+          error.pauseReason === "byok_key_invalid"
+            ? "연결하신 키로 접속할 수 없었어요. 키가 삭제되었거나 권한이 바뀌었을 수 있습니다."
+            : "연결하신 키의 사용량이 오늘 한도에 도달했어요. Google AI Studio에서 확인하실 수 있습니다.",
+      },
+      notice: null,
     };
   }
 
@@ -687,9 +724,12 @@ async function handleStreamFailure(prepared: Prepared, error: unknown): Promise<
     });
 
     return {
-      code: "llm_failed",
-      retryable: false,
-      messageKo: "면접을 계속 진행할 수 없는 오류가 발생해 세션을 종료했어요.",
+      error: {
+        code: "llm_failed",
+        retryable: false,
+        messageKo: "면접을 계속 진행할 수 없는 오류가 발생해 세션을 종료했어요.",
+      },
+      notice: null,
     };
   }
 
@@ -699,7 +739,10 @@ async function handleStreamFailure(prepared: Prepared, error: unknown): Promise<
   // 3단계 — 아직 백오프 예산이 남아 있습니다. 세션은 `in_progress` 그대로이고 UI는
   // 다시 제출할 수 있습니다. **상태를 옮기지 않는 것이 이 분기의 요지입니다.**
   if (!error.retriesExhausted) {
-    return { code, retryable: true, messageKo: TRANSIENT_MESSAGE_KO[code] };
+    return {
+      error: { code, retryable: true, messageKo: TRANSIENT_MESSAGE_KO[code] },
+      notice: null,
+    };
   }
 
   // ── 전이 표 14행 — 4단계(백오프 60초 초과) → `paused(rate_limited)` ────────
@@ -724,11 +767,20 @@ async function handleStreamFailure(prepared: Prepared, error: unknown): Promise<
     console.error("[turns] 일시정지 전이에 실패했습니다", transitionError);
   });
 
+  const messageKo = "요청이 몰려 잠시 멈췄어요. 안내된 시각 이후에 이어서 진행할 수 있습니다.";
+
   return {
-    code,
-    // 4단계는 `retryable: false`입니다 — 지금 다시 눌러도 같은 한도에 부딪힙니다.
-    retryable: false,
-    messageKo: "요청이 몰려 잠시 멈췄어요. 안내된 시각 이후에 이어서 진행할 수 있습니다.",
+    error: {
+      code,
+      // 4단계는 `retryable: false`입니다 — 지금 다시 눌러도 같은 한도에 부딪힙니다.
+      retryable: false,
+      messageKo,
+    },
+    // QA R5 — `rate_limit_fallback`은 유니온에만 있고 실제로 나간 적이 없었습니다.
+    // 세션이 `paused`로 옮겨 간 사건이므로 `stream_error`와 별개로 알립니다.
+    // **문구는 `stream_error`의 것을 그대로 씁니다** — 새 UI 문안을 여기서 지어내면
+    // 같은 사건이 두 문장으로 갈라집니다.
+    notice: { kind: "rate_limit_fallback", level: null, messageKo },
   };
 }
 

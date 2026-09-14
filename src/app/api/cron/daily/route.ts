@@ -10,6 +10,7 @@ import {
   enqueueEvaluation,
   failSession,
   releaseExpiredReservation,
+  settleEvaluatedSession,
 } from "@/lib/session/lifecycle";
 import { applyTransition, loadSessionDerived, type Admin } from "@/lib/session/store";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -24,7 +25,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
  * |---|---|---|
  * | 1 | `paused` 7일 | 답변한 주질문 ≥ 1이면 `completed`(24행, **평가 등록까지**), 0이면 `abandoned`(23행) |
  * | 2 | `in_progress` 방치 | `updated_at`이 `max_duration_min + 30분`보다 오래면 `paused(connection_lost)`(17행) |
- * | 3 | `evaluating` 지연 | `evaluations.started_at`이 10분보다 오래면 재시도 잔여 시 I2 재기동, 소진 시 `failed`(30행) |
+ * | 3 | `evaluating` 지연 | `evaluations.started_at`이 10분보다 오래면 재시도 잔여 시 I2 재기동, 소진 시 `failed`(30행). 평가가 이미 `succeeded`면 정산 전이(28행)만 대신 밟습니다 |
  * | 4 | `completed` 고아 | 평가가 등록됐는데(또는 등록조차 안 됐는데) 아무도 집지 않은 세션을 다시 굴립니다 |
  * | 5 | 만료 예약 | 어제 이전 날짜의 `held` 예약 행을 `expired`로 반납합니다(반납 6지점 #6) |
  *
@@ -157,6 +158,14 @@ async function sweepStaleInProgress(admin: Admin, report: WatchdogReport): Promi
 
 // ── 3 · `evaluating` 지연 (전이 표 30행 · 계약 6.5절 2겹) ────────────────────
 
+/**
+ * **세션 `updated_at`에도 시한 가드를 겁니다(워치독 4와 같은 형태 · QA R10).** I2는
+ * `evaluations`를 `succeeded`로 닫은 **직후** `settleEvaluatedSession()`으로 `evaluated`
+ * 전이를 하므로, 그 사이 수 ms 동안 "`evaluating` + `running` 없음"이 성립합니다. 이 창을
+ * 그대로 훑으면 **방금 평가에 성공한 세션이 `failed`로 떨어집니다.**
+ * 한 번의 I2 실행은 `maxDuration` 240초를 넘지 못하고 재시도 되돌림마다 `evaluating` 재진입이
+ * `updated_at`을 갱신하므로, 기본 10분 시한이면 정산 중인 세션은 이 쿼리에 잡히지 않습니다.
+ */
 async function sweepEvaluating(admin: Admin, report: WatchdogReport): Promise<void> {
   const cutoff = evaluationCutoffIso();
 
@@ -164,12 +173,19 @@ async function sweepEvaluating(admin: Admin, report: WatchdogReport): Promise<vo
     .from("interview_sessions")
     .select("*")
     .eq("status", "evaluating")
+    .lt("updated_at", cutoff)
     .limit(BATCH);
 
   for (const session of data ?? []) {
     const running = await loadRunningEvaluation(admin, session.id);
-    // 실행 중 평가가 없는데 `evaluating`이면 워커가 죽은 것입니다 — 재등록 대상입니다.
+
     if (!running) {
+      // 평가는 이미 성공했는데 정산 전이만 못 돈 세션입니다(I2가 그 사이에 죽음).
+      // 여기서 `failed`로 내리면 **이미 저장된 점수·인용을 버리는 셈**이므로, 빠진 한 걸음인
+      // 28행(`evaluating → evaluated`)만 대신 밟아 줍니다.
+      if (await settleSucceededEvaluation(admin, session, report)) continue;
+
+      // 성공 기록조차 없으면 워커가 실제로 죽은 것입니다 — 재등록할 행이 없어 `failed`입니다.
       await redriveOrFail(admin, session, null, report);
       continue;
     }
@@ -177,6 +193,32 @@ async function sweepEvaluating(admin: Admin, report: WatchdogReport): Promise<vo
 
     await redriveOrFail(admin, session, running, report);
   }
+}
+
+/** 최신 평가가 `succeeded`면 정산 전이를 대신 밟습니다. 밟았으면 `true`. */
+async function settleSucceededEvaluation(
+  admin: Admin,
+  session: SessionRow,
+  report: WatchdogReport,
+): Promise<boolean> {
+  const { data } = await admin
+    .from("evaluations")
+    .select("id")
+    .eq("session_id", session.id)
+    .eq("status", "succeeded")
+    .limit(1)
+    .maybeSingle();
+
+  if (!data) return false;
+
+  try {
+    await settleEvaluatedSession(session, admin);
+    report.evaluationRedriven += 1;
+  } catch (error) {
+    // I2가 같은 순간에 정산했으면 조건부 UPDATE가 0행이라 409입니다 — 정상입니다.
+    logSkip("evaluating", session.id, error);
+  }
+  return true;
 }
 
 // ── 4 · `completed` 고아 ─────────────────────────────────────────────────────

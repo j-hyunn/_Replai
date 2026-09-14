@@ -148,6 +148,8 @@
               예) { "turns": Turn[], "questions": Question[] }
 ■ 즉시 응답 : { "sessionId": uuid, "status": SessionStatus, ... }   (3절 — 최종 결과 타입과 별개 타입)
 ■ 부작용만  : { "ok": true }        (반환할 리소스가 없을 때만. 가능하면 갱신된 리소스를 돌려준다)
+              예외) 내부·크론 라우트(대응 훅이 없는 경로에 한함)는 { "ok": true }에 관측 카운터
+              같은 부가 필드를 덧붙일 수 있다. 예) { "ok": true, "watchdogs": {...} } (C1)
 ■ 오류      : { "error": { "code": string, "message": string, "details"?: object } }
               성공 바디와 오류 바디는 절대 섞이지 않는다. error 키가 있으면 다른 키는 없다.
 ```
