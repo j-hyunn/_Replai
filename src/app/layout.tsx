@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { Providers } from "@/app/providers";
 import { Toaster } from "@/components/ui/sonner";
 import "./globals.css";
 
@@ -27,7 +28,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         >
           본문으로 건너뛰기
         </a>
-        {children}
+        <Providers>{children}</Providers>
         {/* 06_ui_plan.md 13절 — Toaster는 루트에 하나만 둔다 */}
         <Toaster position="top-center" richColors closeButton />
       </body>
