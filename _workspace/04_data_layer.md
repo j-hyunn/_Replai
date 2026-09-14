@@ -60,6 +60,18 @@
   **구현 불변식 1건**: 예약 루프는 요청량 0인 버킷을 `continue`로 건너뛰어야 합니다 — 건너뛰지 않으면
   `limit_calls = 0`인 원장 행이 생겨 모든 예약이 `quota_exhausted:pro`로 죽습니다.
   적용된 마이그레이션 `20260910000100_ai_quota.sql`은 **이미 `continue when v_target <= 0;`으로 지키고 있습니다**(확인 완료).
+- 2026-09-11 **라이브 DB 검증(첫 실행 검증) 반영.** 적용된 마이그레이션 14개를 실제 Supabase 프로젝트에서
+  이 문서와 대조하고, RLS를 **실사용자 2명으로 실행 검증**했습니다(문서 대조가 아니라 동작 확인).
+  **스키마 대조 결과는 전 항목 일치**했고, 다음 **결함 2건**을 발견해 **새 마이그레이션 2개**로 고쳤습니다.
+  - **결함 1 — `consume_session_quota`의 `quota_date` 폴백이 UTC**(3.14.1절). `current_date`가
+    DB TimeZone(UTC)을 따라 `AI_QUOTA_RESET_TIMEZONE`(`America/Los_Angeles`)과 매일 7~8시간 어긋났습니다.
+    → `20260911000100_fix_consume_quota_date_timezone.sql`. 헬퍼 `quota_reset_today()` 신설. **시그니처 불변.**
+  - **결함 2 — `security definer` 트리거 함수 6종의 PUBLIC EXECUTE 미회수**(5.4절).
+    악용 가능성은 없었으나(트리거 함수는 직접 호출 불가 — 실측 확인) **5.4절 검사가 놓쳤습니다.**
+    → `20260911000200_revoke_trigger_function_execute.sql` + 5.4절 쿼리를 **이름 목록 → 카탈로그 전수 조회**로 일반화.
+  - 문서 정정 1건: 3.15절 `set_user_api_key` 코드 예시가 초안의 `extract(epoch from now())`에 머물러 있었습니다.
+    **적용된 마이그레이션 쪽이 옳습니다**(`clock_timestamp()` + 난수 접미사 — 같은 초의 재시도 충돌을 막음). 문서를 코드에 맞췄습니다.
+  - **마이그레이션 파일 14개 → 16개.** 테이블 17개·인덱스 22행(물리 23개)·정책 19개는 **변경 없음.**
 
 ---
 
@@ -1002,7 +1014,27 @@ create index idx_quota_res_held on public.ai_quota_reservations (quota_date) whe
 |---|---|---|
 | `reserve_session_quota` | `(p_session_id uuid, p_quota_date date, p_request jsonb, p_limits jsonb) returns table(model_bucket text, granted int, held_after int, limit_calls int)` | 진입부에서 **① 재원 가드**(BYOK 거절) → **② 동시 예약 가드**(D30, 사용자당 `held` 세션 1개) → 그다음 **버킷 처리 순서 `pro → flash → flash_lite` 고정**(희소한 것 먼저 + 데드락 회피). **버킷마다 맨 먼저 요청량을 보고 `<= 0`이면 `continue`로 건너뜁니다**(D34 — 8.3.1·8.3.5절. 건너뛰지 않으면 휴면 버킷에 `limit_calls = 0` 원장 행이 생겨 매번 `quota_exhausted:pro`로 전체 롤백됩니다). 요청량이 있는 버킷마다 ① 원장 행을 `p_limits`의 값으로 `on conflict do nothing` 생성 → ② 기존 예약이 있으면 목표치와의 **차이만** 산출(멱등) → ③ 조건부 UPDATE(`held_calls + n <= limit_calls`) → 0행이면 `raise exception 'quota_exhausted:<bucket>'`으로 **전체 롤백** → ④ 예약 행 upsert(unique 충돌 시 top-up, `status='released'`였으면 `held`로 되돌림) |
 | `release_session_quota` | `(p_session_id uuid, p_buckets text[] default null, p_reason text default 'settled') returns table(model_bucket text, released int)` | `status='held'` 행마다 `released := greatest(reserved_calls - consumed_calls, 0)`, 원장 `held_calls := greatest(held_calls - released, 0)`, 행을 `released`로. `p_buckets`가 null이면 전체 |
-| `consume_session_quota` | `(p_session_id uuid, p_bucket text, p_n int default 1) returns int` | 예약 행의 `consumed_calls += n`. **행이 없으면** `reserved_calls=0, consumed_calls=n, status='overflow'`로 삽입하고 원장 `held_calls`를 **조건 없이** `+n`(한도 초과를 허용해야 다음 예약이 정확히 막힙니다) |
+| `consume_session_quota` | `(p_session_id uuid, p_bucket text, p_n int default 1) returns int` | 예약 행의 `consumed_calls += n`. **행이 없으면** `reserved_calls=0, consumed_calls=n, status='overflow'`로 삽입하고 원장 `held_calls`를 **조건 없이** `+n`(한도 초과를 허용해야 다음 예약이 정확히 막힙니다). overflow 경로의 `quota_date` 폴백은 **리셋 타임존 기준**입니다(아래) |
+
+**overflow 경로의 `quota_date` 폴백 — UTC를 쓰면 안 됩니다** (2026-09-11 라이브 검증에서 발견·수정)
+
+`consume_session_quota`는 예약 행이 없을 때 `quota_date`를 스스로 정해야 합니다.
+최초 구현(`20260910000100_ai_quota.sql`)은 `current_date`를 썼는데, **이 프로젝트의 DB TimeZone은 UTC**입니다(실측).
+그러나 `quota_date`의 정의는 3.13절대로 **프로바이더 리셋 시각 기준 날짜**이고
+`AI_QUOTA_RESET_TIMEZONE = America/Los_Angeles`로 확정돼 있습니다(`05_deploy.md` 1.2절).
+
+LA는 UTC보다 7~8시간 뒤이므로 **매일 UTC 00:00~07:00/08:00 구간에서 두 날짜가 어긋납니다.**
+그 구간에 overflow가 발생하면 원장 UPDATE의 `where quota_date = v_qdate`가 **아직 없는 다음 날 행**을
+겨냥해 0행을 갱신하고, 그날 실제 소비가 `held_calls`에 반영되지 않습니다 —
+**그날 정원이 실제보다 크게 계산되어** D27이 막으려던 실패가 그대로 재발합니다.
+
+- 조치: `20260911000100_fix_consume_quota_date_timezone.sql`.
+  헬퍼 `public.quota_reset_today()`를 신설해 폴백을 그 함수로 바꿨습니다.
+  타임존은 GUC `app.quota_reset_timezone`으로 덮어쓸 수 있고, 비어 있으면 확정값
+  `America/Los_Angeles`로 떨어집니다 — **어떤 경로로도 UTC로 떨어지지 않습니다.**
+- **시그니처는 바뀌지 않았습니다.** `05_api_contract.md`의 호출 계약과 라우트는 그대로입니다.
+- **정상 경로에는 영향이 없습니다.** 예약 행이 있으면 `max(r.quota_date)`(= 라우트가 넘긴 값)를 쓰므로
+  날짜의 원본은 여전히 애플리케이션 환경변수 한 곳입니다. 이 폴백은 **비정상 경로의 마지막 방어선**입니다.
 
 **`reserve_session_quota`의 재원 가드 (D28로 추가되는 유일한 델타)**
 
@@ -1154,8 +1186,15 @@ create function public.set_user_api_key(p_user_id uuid, p_key text, p_last4 text
 declare v_old uuid; v_new uuid;
 begin
   select vault_secret_id into v_old from public.user_api_keys where user_id = p_user_id;
-  v_new := vault.create_secret(p_key, 'user_api_key:' || p_user_id::text || ':' || extract(epoch from now())::bigint,
-                               'Gemini API key (BYOK)');
+  -- vault.secrets.name은 unique입니다. 초 단위 접미사만으로는 같은 초의 재시도·연속 교체가
+  -- 충돌해 키 저장이 실패하므로 clock_timestamp() + 난수 접미사를 함께 붙입니다.
+  -- (2026-09-11 정정 — 초안의 `extract(epoch from now())`는 같은 트랜잭션 안에서 값이 고정돼
+  --  같은 초의 재시도를 막지 못했습니다. 적용된 마이그레이션이 이미 아래 형태입니다.)
+  v_new := vault.create_secret(
+    p_key,
+    'user_api_key:' || p_user_id::text || ':' || extract(epoch from clock_timestamp())::bigint
+      || ':' || replace(gen_random_uuid()::text, '-', ''),
+    'Gemini API key (BYOK)');
   insert into public.user_api_keys (user_id, vault_secret_id, key_last4, status,
                                     last_verified_at, last_failure_code, last_failure_at)
   values (p_user_id, v_new, p_last4, 'connected', now(), null, null)
@@ -1532,16 +1571,34 @@ where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity = true
 **신규 검사 1개 — `security definer` 함수의 실행 권한** (D28. 정책 0개만으로는 부족합니다)
 
 ```sql
--- 아래는 0행이어야 합니다: 키 접근자 함수를 anon/authenticated가 실행할 수 있으면 RLS 차단이 무의미해집니다
+-- 아래는 0행이어야 합니다: public 스키마의 어떤 함수도 anon/authenticated가 실행할 수 없어야 합니다.
+-- 2026-09-11 정정 — 이전 판은 함수 이름을 5개 하드코딩했고, 그래서 트리거 함수 6종이
+-- 기본 PUBLIC EXECUTE를 단 채 이 검사를 통과했습니다(아래 "왜 전수 조회인가").
 select p.proname, r.rolname
 from pg_proc p
 join pg_namespace n on n.oid = p.pronamespace
 cross join (values ('anon'), ('authenticated')) as r(rolname)
 where n.nspname = 'public'
-  and p.proname in ('get_user_api_key', 'set_user_api_key',
-                    'reserve_session_quota', 'release_session_quota', 'consume_session_quota')
+  and p.prokind = 'f'
   and has_function_privilege(r.rolname, p.oid, 'EXECUTE');
 ```
+
+**왜 이름 목록이 아니라 전수 조회인가** (2026-09-11 라이브 검증에서 실제로 뚫린 지점).
+
+이전 판은 `p.proname in (...)`로 **키·쿼터 함수 5개만** 검사했습니다. 그 목록에 없던
+트리거 함수 6종(`handle_new_user` · `enqueue_storage_cleanup` · `enforce_session_funding_rules` ·
+`release_quota_before_delete` · `purge_user_api_key_secret` · `set_updated_at`)은
+`create function`의 **기본 PUBLIC EXECUTE를 그대로 달고** 있었고, 이 쿼리는 0행을 반환하며
+"통과"라고 말했습니다. Supabase security advisor(0028·0029)가 대신 잡아냈습니다.
+
+- **실제 악용 가능성은 없었습니다** — `returns trigger` 함수는 Postgres가 트리거 문맥 밖 호출을
+  거부합니다(`authenticated`로 직접 호출해 확인). 그러나 **검사가 놓쳤다는 사실 자체가 결함**입니다.
+- **회수해도 트리거는 정상 동작합니다.** 트리거는 테이블 소유자 권한으로 실행되며
+  함수 EXECUTE 권한을 요구하지 않습니다(5종 전부 발화 확인).
+- 조치: `20260911000200_revoke_trigger_function_execute.sql`.
+- **`prokind = 'f'`로 좁힌 이유**: 집계·윈도 함수는 이 규칙의 대상이 아닙니다.
+  새 함수를 추가하면서 `revoke`를 잊으면 이제 **즉시 1행이 나옵니다** — 5.4절 (1)번 쿼리를
+  이름 목록이 아니라 카탈로그 전수 조회로 쓴 것과 같은 이유입니다.
 
 `qa-inspector`에게 이 **세 쿼리**를 회귀 검사 항목으로 넘깁니다.
 
@@ -1931,7 +1988,12 @@ Storage 객체 하나를 지울 뿐이고, 예약·키·동의 어느 것과도 
 | **13** | `20260910000200_trial_consents_and_funding_rules.sql` | **D29.** `trial_consents` + RLS + select 정책 + unique 인덱스, 그리고 `enforce_session_funding_rules()` + `trg_sessions_funding_rules`(대상 테이블은 `interview_sessions`) |
 | **14** | `20260910000300_user_api_keys_and_account_events.sql` | **D28.** Vault 확장 확인, `user_api_keys` + CHECK + RLS(정책 0개) + `set_user_api_key()`·`get_user_api_key()`(+`revoke/grant`) + `trg_user_api_keys_purge_secret`, `account_events` + RLS(정책 0개) + 인덱스 |
 
-**파일 개수는 11개 → 14개입니다.** 2026-09-10 D27·D28·D29가 **새 테이블 5개를 부르므로 새 파일이 맞습니다**
+| **15** | `20260911000100_fix_consume_quota_date_timezone.sql` | **2026-09-11 라이브 검증 결함 1.** `quota_reset_today()` 신설 + `consume_session_quota()`의 overflow 폴백을 `current_date`(UTC) → 리셋 타임존 기준으로 교체(+`revoke/grant`). **시그니처·테이블·인덱스 변경 없음** |
+| **16** | `20260911000200_revoke_trigger_function_execute.sql` | **2026-09-11 라이브 검증 결함 2.** `security definer` 트리거 함수 5종 + `set_updated_at()`의 PUBLIC/anon/authenticated EXECUTE 회수. **DDL 없음 — 권한만** |
+
+**파일 개수는 11개 → 14개 → 16개입니다** (2026-09-11 라이브 검증으로 #15·#16 추가).
+**#15·#16은 이미 적용된 14개를 한 글자도 고치지 않습니다** — 아래 "흡수 규칙"이 끝난 뒤의 변경이므로
+`create or replace`와 `revoke`만 쓰는 **새 파일**입니다. 2026-09-10 D27·D28·D29가 **새 테이블 5개를 부르므로 새 파일이 맞습니다**
 (아래 "흡수 규칙"은 **기존 테이블의 컬럼 추가**에 대한 것이고, 새 테이블에는 적용되지 않습니다 —
 `02_ai_architecture.md` 13.6.1절도 같은 판단입니다). 기존 11개 파일 중 손대는 것은 **#4 하나뿐**입니다.
 

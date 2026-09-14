@@ -909,8 +909,14 @@ export type Database = {
         Returns: number
       }
       get_user_api_key: { Args: { p_user_id: string }; Returns: string }
+      quota_reset_today: { Args: never; Returns: string }
       release_session_quota: {
-        Args: { p_buckets?: string[]; p_reason?: string; p_session_id: string }
+        Args: {
+          p_buckets?: string[]
+          p_keep?: number
+          p_reason?: string
+          p_session_id: string
+        }
         Returns: {
           model_bucket: string
           released: number

@@ -8,6 +8,57 @@
 > 짝 문서: `05_deploy.md`(환경변수·런타임·무료 플랜 한도)
 
 ## 변경 로그
+- 2026-09-12 (2차) **QA 8절 R1·R2·R3 대응 + R4~R8 (`vercel-platform-engineer`).**
+  **엔드포인트 목록도 응답 모양도 바뀌지 않았습니다**(41개 그대로). 바뀐 것은 **누가 무엇을
+  구동하는가**입니다.
+  - **R1(critical) — 평가 재시도의 구동자를 명시합니다.** 6.4절이 정한 "I2가 직접 재시도한다"가
+    코드에 없어 세션이 `completed`에 영구 정지했습니다. 이제 I2가 **① 같은 호출 안의 재개**
+    (백오프 ≤ 15초 · 소프트 데드라인 여유 있음), **② 자기 재호출**(`after()` + `JOB_SECRET`,
+    `delayMs`를 실어 보냄), **③ 그마저 실패하면 `failed`** 의 3단으로 스스로 굴러갑니다.
+    되돌림(29행) 뒤 구동자가 없는 경로는 **존재하지 않습니다**. `completed → evaluating`
+    재진입은 `enqueueEvaluation`이 **아니라** I2 내부의 `resumeEvaluating()`이며, 새 `evaluations`
+    행도 `attempt_count` 리셋도 없습니다(6.2절 주의 문단 그대로).
+  - **C1 크론(워치독 5종) 구현.** 501 스텁이 사라졌습니다 — `paused` 7일(23·24행, **평가 등록
+    포함**), `in_progress` 방치 → `paused(connection_lost)`(17행), `evaluating` 10분 지연,
+    **`completed` 고아**, 만료 예약 스윕(반납 6지점 #6). 3·4번이 R1의 마지막 안전망입니다.
+    응답은 `{ ok: true, watchdogs: { … } }`(부작용 응답 + 관측 카운터).
+  - **R2(high) — #8 `start`는 `ready`에서만 시작합니다.** 전이 표 21행 때문에 `assertTransition`이
+    `paused → in_progress`를 통과시키므로, 라우트가 **자기 담당 행을 한 번 더 확인**합니다.
+    `from !== "ready"`면 409 `invalid_transition`(`details: { from, to: "in_progress" }`).
+    `paused`의 진입점은 **#14뿐**입니다(재개 가드 3종이 거기 있습니다).
+  - **R3(high) — `transient`를 원인별로 가릅니다.** `normalizeProviderError`에 `transientCause`
+    (`timeout`/`rate_limited`/`failed`)와 `retryAfterSec`·`retriesExhausted`가 생겼고, 4번째 분류
+    **`permanent`** 를 추가했습니다. 이로써 5.2절 `stream_error.code` 5종이 전부 나오고,
+    전이 표 **14행**(백오프 예산 60초 소진 → `paused(rate_limited)` + `resumable_after`)과
+    **20행**(`permanent` → `failed(provider_permanent_error)`)에 실제 코드 경로가 생겼습니다.
+    **공용 키의 401/403은 `byok_key_invalid`가 아니라 `permanent`** 입니다(10.1절 마지막 행).
+  - **R4(medium)** — 스트림 경로가 **첫 토큰 이전에 한해** 재시도합니다(10절 3단계: 1s→2s→4s,
+    지터 ±20%, 예산 60초). `attempt`를 정직하게 넘기므로 401 한 번으로 `byok_key_invalid`가
+    확정되던 10.2절 규칙 2 위반이 사라졌습니다. 토큰이 나간 뒤에는 재시도하지 않습니다.
+  - **R5(medium)** — `session_notice`(5.2절 3행)를 실제로 전송합니다. G4 발동 시
+    `distress_guard`, G6 발동 시 `pressure_capped`이며 **`utterance_done`보다 먼저** 나갑니다.
+  - **R6(medium)** — 반납 5지점 전부가 `session_events(event_name='quota_released')`를
+    `detail: { reason, released }`로 남깁니다(4.7.3절 관측). BYOK는 no-op이라 기록도 없습니다.
+  - **R7(medium)** — `interviewer_stream_aborted`와 `interviewer_meta_missing`을 **분리**했습니다.
+    5.4절 3e는 META 도착 여부와 무관하게 abort를 기록합니다.
+  - **R8(low)** — `GET /api/sessions`(#2) 미구현 응답이 404 → **501**입니다. 계약에 있는 경로의
+    404는 훅 라운드에서 "경로 오타"와 구분되지 않습니다.
+- 2026-09-12 **구현 반영 — 세션 상태 머신 + 핵심 라우트 (`vercel-platform-engineer`).**
+  계약 문안은 **바뀌지 않았습니다.** 이 항목은 "지금 무엇이 구현되어 있는가"의 기록입니다.
+  - **구현됨:** #3 #4 #5 #6 #7 #8 #9 #13 #14 #15 #23 #33 #35 #41 · I1 · I2(상태 머신 부분).
+    전부 이 문서의 요청/응답 모양과 오류 코드 그대로이며 임의 추가 필드가 없습니다.
+  - **전이 표는 `src/lib/session/transitions.ts`가 유일한 코드 사본**이며 34행이 기계 대조로
+    일치함을 확인했습니다(`07_qa_report.md` 6절·7.4절). 모든 상태 변경이 `applyTransition()`을
+    통과하고, 조건부 UPDATE(`where status = from`)가 읽고-쓰는 사이의 경합을 409로 흡수합니다.
+  - **반납 6지점은 `src/lib/session/lifecycle.ts` 한 파일**에 모였습니다. 4.7.3절 1번(부분)과
+    2번(정산)이 **둘 다** 코드에 있고, 삭제 경로(#23)에는 반납 호출이 **없습니다**(트리거 소유).
+  - **4.9.2절 R9 가드 구현** — #6이 `trial_consents`를 `CURRENT_TRIAL_CONSENT_VERSION`으로
+    대조합니다. 버전·문구 상수는 `src/lib/consent/trial-consent.ts` 한 파일입니다.
+  - 2절의 변환 지점 이름이 `src/lib/api/serialize.ts`로 문서와 같고, 매퍼는 **리소스별 명시적**
+    함수 4종입니다(범용 deep camelize 없음).
+  - **아직 없음:** #1 #2 #10~#12 #16~#32 #34 #36~#40, ~~C1~~(**2026-09-12 2차에서 구현**).
+    I2의 평가자·코치 AI 단계(상태 머신·재시도·반납 배선은 완성, 프롬프트 연결만 남음 —
+    `07_qa_report.md` 7.4절).
 - 2026-09-09 최초 작성. 엔드포인트 32개, 응답 래핑 규칙, SSE 계약, 비동기 평가 체이닝, admin 경유 라우트 표 확정.
 - 2026-09-09 (2차) **QA 리포트 F1·F2·F3·F4·F6·F8 대응.** 확정 결정 D18~D21을 계약에 전파했습니다.
   - **F1 / D18** — 평가 시작 주체를 클라이언트에서 **서버**로 정정(6.2·6.3절). `POST .../evaluate`(#16)는
@@ -405,11 +456,25 @@ MVP에서 이 전이가 일어나는 경로는 존재하지 않아야 하고, #1
 ```ts
 // src/lib/quota/gate.ts — 원장을 만지는 유일한 모듈. 라우트는 여기만 부른다.
 // 네 함수 전부 진입부 첫 줄이 같다:  if (fundingSource !== 'trial_shared') return NO_OP;
-peekCapacity(userId)                                  // #3 문 앞 조회 (비원자적, 홀드 없음)
+peekCapacity(userId, fundingSource)                   // #3 문 앞 조회 (비원자적, 홀드 없음)
 reserveSessionQuota(sessionId, fundingSource)         // #6 / #16 / #18 확정 예약 (원자적)
 consumeSessionQuota(sessionId, fundingSource, bucket) // 프로바이더 호출 직전
 releaseSessionQuota(sessionId, fundingSource, buckets, reason)  // 반납 6지점
 ```
+
+> **2026-09-11 구현 반영 (`vercel-platform-engineer`).** `src/lib/quota/gate.ts`가 위 4종을 그대로
+> 구현했고, 문서와 두 가지가 달라졌습니다 — 둘 다 **진입부 가드를 성립시키기 위한 변경**입니다.
+>
+> 1. **`peekCapacity`가 `fundingSource`를 인자로 받습니다.** 초안 시그니처(`peekCapacity(userId)`)로는
+>    "네 함수 전부 진입부 첫 줄이 같다"를 만족시킬 수 없습니다 — 판정할 재원 값이 함수 안에 없으니
+>    분기가 다시 라우트(#3)로 흩어집니다. #3은 사용자 키 유무로 재원을 이미 정한 뒤 이 함수를
+>    부르므로(4.7.1절 ①②) 호출 측에 없는 값을 요구하는 것도 아닙니다.
+> 2. **네 함수의 반환값에 `applicable: boolean`이 붙습니다.** `NO_OP`이 "여력이 없다"로 읽히면
+>    BYOK 세션이 막힙니다 — `peekCapacity`의 NO_OP은 `{ applicable: false, hasCapacity: true }`이며,
+>    **BYOK 사용자는 여력과 무관하게 항상 통과**한다는 4.7.5절 규칙이 이 값으로 표현됩니다.
+>
+> 한도 미설정(fail-open)도 `applicable: false`로 돌아옵니다 — 게이트가 꺼진 것과 BYOK라서 해당이
+> 없는 것은 라우트 입장에서 같은 처분(그냥 통과)이기 때문입니다.
 
 > **분기를 라우트에 흩으면 한 군데를 빠뜨리는 순간 BYOK 세션이 공용 원장을 갉아먹습니다.**
 > 증상은 "체험 정원이 왜인지 부족하다"로만 보여 원인을 찾기 어렵습니다.
@@ -467,6 +532,16 @@ released := greatest(reserved_calls - consumed_calls - 6, 0)
 # 2~6번 — 전량 반납(정산·취소·포기·실패·만료)
 released := greatest(reserved_calls - consumed_calls, 0)
 ```
+
+> **2026-09-11 결함 정정 — DB 함수가 부분 반납을 표현할 수 없었습니다.**
+> 위 1번은 문서에만 있었고 `release_session_quota(uuid, text[], text)`에는 **남길 양을 받는 인자가
+> 없었습니다.** 그대로 `'completed'`로 불렀다면 면접이 끝나는 순간 평가자 4 + 코치 2의 여력까지
+> 반납돼 **완주한 세션이 리포트를 받지 못했을 것**이고, 반대로 부르지 않았다면 세션당 34가 하루 종일
+> 묶였을 것입니다. 마이그레이션 `20260911000300_release_session_quota_keep.sql`이
+> **`p_keep int default 0`** 을 더해 해소했습니다(기본값이 0이라 2~6번의 동작은 그대로입니다).
+> `p_keep > 0`이면 행을 **`held`로 남기고** `reserved_calls`만 `consumed + keep`으로 줄입니다 —
+> 여기서 `status`를 `released`로 바꾸면 뒤이은 전량 반납이 대상을 못 찾아 세션당 6이 영구히 샙니다.
+> 남길 양(6)은 애플리케이션 상수 `COMPLETED_KEEP_CALLS`이며 **DB는 정책을 모릅니다.**
 
 - **세션당 예약은 `flash_lite` 34 한 건입니다**(`02_ai_architecture.md` 8.3.1절). `pro`·`flash` 버킷은
   **휴면(요청량 0)** 이라 원장 행 자체가 만들어지지 않으므로, 반납 호출에 이 두 버킷을 넣을 일이 없습니다.
@@ -980,6 +1055,22 @@ attempt 1 실패 → 2s 후 재시도 → attempt 2 실패 → 8s 후 재시도 
   **함수 안에서 분 단위로 잠자는 것은 실행 시간을 그대로 태우는 짓이며 금지합니다.**
 - `evaluations.attempt_count`는 **평가자 시도만** 셉니다(최초 포함, 최대 3 — `04_data_layer.md` 3.7절).
   **코치 단계는 이 컬럼을 절대 UPDATE하지 않습니다.** 코치 시도는 `session_events`로만 관측합니다(D10).
+
+**되돌림(29행) 뒤의 구동자 — 3단 (2026-09-12, QA R1).** "I2가 직접 재시도한다"는 규칙에는
+**되돌린 세션을 누가 다시 집는가**가 빠져 있었고, 그 공백에서 세션이 `completed`에 영구 정지했습니다.
+구동자는 다음 순서로 **항상 하나가 남습니다.**
+
+| 조건 | 구동자 | 재진입 방법 |
+|---|---|---|
+| 백오프 ≤ 15초 **그리고** 남은 실행 시간이 재시도 1회(최악 60초)를 감당 | **같은 호출** | `sleep` 후 `completed → evaluating`(26행)을 I2가 직접 수행 |
+| 그 외(대기가 길거나 소프트 데드라인이 가까움) | **자기 재호출** | `after()` + `JOB_SECRET` `fetch`. 본문에 `delayMs`(≤ 15초)를 실어 새 호출이 그 대기를 소화 |
+| 자기 재호출을 3회 시도해도 못 띄움 | **없음 → `failed`** | `evaluations.status='failed'` + `failure_reason='evaluation_failed'`(30행). 예약은 전량 반납 |
+| 함수가 통째로 죽어 위 셋 중 어느 것도 못 돎 | **C1 크론** | `evaluating` 10분 지연 / `completed` 고아를 같은 규칙으로 다시 굴림(6.5절 2겹) |
+
+- **재진입은 `enqueueEvaluation`이 아닙니다.** I2 내부의 `resumeEvaluating()`이며 새 `evaluations`
+  행을 만들지 않고 `attempt_count`도 건드리지 않습니다 — 그 둘이 리셋되면 재시도 상한이 의미를
+  잃고 무한 루프가 됩니다(6.2절 주의 문단).
+- **`completed`에 방치하고 끝나는 경로는 존재하지 않습니다.** 되돌림과 구동자는 한 쌍입니다.
 
 ### 6.5 워치독 — 10분 규칙을 무료 플랜에서 지키는 방법
 
