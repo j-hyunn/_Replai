@@ -8,6 +8,12 @@
 > 짝 문서: `05_deploy.md`(환경변수·런타임·무료 플랜 한도)
 
 ## 변경 로그
+- 2026-09-14 **QA 8.7절 Q10 대응(`ai-interview-architect`).** 4.6절 전이 표 **11행**에
+  `session_events(event_name='answer_turn_completed')` 기록을 명시했습니다. 값과 근거의 1차 출처는
+  `01_state_machine.md` 2절 11행·`※답변 턴` 절이며, 이 표는 참조만 합니다.
+  **엔드포인트 목록·응답 모양·스키마 변경은 없습니다.**
+  (QA 보고서 Q10은 이 절을 `02_ai_contracts.md` 4.6절로 적었으나, 해당 문서의 4절은 Context Summarizer이고
+  이벤트 목록이 없습니다. 8.6절 Q6의 원 요구가 가리킨 "계약 4.6절"은 이 표입니다.)
 - 2026-09-12 (2차) **QA 8절 R1·R2·R3 대응 + R4~R8 (`vercel-platform-engineer`).**
   **엔드포인트 목록도 응답 모양도 바뀌지 않았습니다**(41개 그대로). 바뀐 것은 **누가 무엇을
   구동하는가**입니다.
@@ -402,7 +408,7 @@ BYOK 사유 2행을 추가해 전이 표가 33행 → 35행이 되었고, 이 �
 | 8 | `ready` → `in_progress` | #8 |
 | 9 | `ready` → `configuring` | #7 |
 | 10 | `ready` → `canceled` | #33 |
-| 11 | `in_progress` → `in_progress` (답변→다음 질문) | #9 |
+| 11 | `in_progress` → `in_progress` (답변→다음 질문) | #9. `session_events`에 **`event_name = 'answer_turn_completed'`**(`trigger='user_action'`, `from_status = to_status = 'in_progress'`)를 남깁니다 — 값과 그 이유의 1차 출처는 `01_state_machine.md` 2절 11행과 `※답변 턴` 절입니다 |
 | 12 | `in_progress` → `in_progress` (모달리티 전환) | #12 |
 | 13 | `in_progress` → `paused` (사용자) | #13 |
 | 14 | `in_progress` → `paused` (레이트 리밋) | #9 (10절 4단계) |

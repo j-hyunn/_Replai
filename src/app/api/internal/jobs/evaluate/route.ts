@@ -138,10 +138,11 @@ export function POST(request: Request) {
       });
     }
 
-    // **조건부 UPDATE입니다** (QA Q4). 다른 네 지점(선점 82행 · `attempt_count` 248행 ·
-    // `exhaust()` 284행 · `closeOrphanEvaluation()` 172행)과 같은 `.eq("status","running")`
-    // 가드를 답니다. 이 가드가 없으면 크론 워치독이 이미 소진 판정으로 `failed`로 닫아 둔 행을
-    // 뒤늦게 살아 있던 이 워커가 `succeeded`로 되집어, **`failed` 세션에 `succeeded` 평가**가
+    // **조건부 UPDATE입니다** (QA Q4). 이 파일의 다른 네 지점 — 워커 진입부의 선점 UPDATE ·
+    // `runEvaluatorWithRetries()`의 `attempt_count` UPDATE · `exhaust()` ·
+    // `closeOrphanEvaluation()` — 도 모두 같은 `.eq("status","running")` 가드를 답니다.
+    // 이 가드가 없으면 크론 워치독이 이미 소진 판정으로 `failed`로 닫아 둔 행을 뒤늦게
+    // 살아 있던 이 워커가 `succeeded`로 되집어, **`failed` 세션에 `succeeded` 평가**가
     // 남습니다. 정상 경로에서는 이 행이 `running`이므로 1행이 갱신되고 그대로 정산합니다.
     const { data: settled } = await admin
       .from("evaluations")

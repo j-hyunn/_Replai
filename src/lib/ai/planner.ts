@@ -3,6 +3,7 @@ import "server-only";
 import { z } from "zod";
 
 import { runCompletion } from "@/lib/ai/provider";
+import { sanitizeUntrusted } from "@/lib/ai/transcript";
 import { AXES } from "@/lib/api/serialize";
 import type { SessionRow } from "@/lib/api/serialize";
 
@@ -66,18 +67,13 @@ function buildUserMessage(input: PlannerInput): string {
     `직군: ${input.session.job_role ?? "미지정"} / 페르소나: ${input.session.persona ?? "미지정"}`,
     "",
     "<untrusted_resume>",
-    sanitize(input.resumeText).slice(0, MAX_SNAPSHOT_CHARS),
+    sanitizeUntrusted(input.resumeText).slice(0, MAX_SNAPSHOT_CHARS),
     "</untrusted_resume>",
     "",
     "<untrusted_jd>",
-    sanitize(input.jdText).slice(0, MAX_SNAPSHOT_CHARS),
+    sanitizeUntrusted(input.jdText).slice(0, MAX_SNAPSHOT_CHARS),
     "</untrusted_jd>",
   ].join("\n");
-}
-
-/** `<`를 전각으로 바꿔 사용자 입력이 태그 경계를 닫지 못하게 합니다. */
-function sanitize(text: string): string {
-  return text.replace(/</gu, "＜");
 }
 
 function stripCodeFence(raw: string): string {

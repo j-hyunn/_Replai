@@ -5,6 +5,12 @@
 > 대조 대상: `01_rubric.md`, `01_state_machine.md`, `01_domain_model.md`, `04_data_layer.md` 3.4~3.9절 및 13절
 
 ## 변경 로그
+- 2026-09-14 **QA 8.7절 Q7 대응 — 7절 표를 실제 구현에 맞췄고, 그 과정에서 구현 쪽을 통일했습니다(`ai-interview-architect`).**
+  planner·interviewer가 각자 갖고 있던 로컬 `sanitize()`(여는 꺾쇠 치환 1종)를 지우고
+  `transcript.ts`의 `sanitizeUntrusted()`(정화 3종)를 **import해 공유**하도록 고쳤습니다 —
+  두 역할 모두 문자 오프셋을 쓰지 않으므로 정화 강화가 안전하고, 표가 말하던 "①②③ 전부"가 실제로 참이 됩니다.
+  표에는 **구현 상태 칸**을 새로 두어 interviewer의 실제 태그명이 `<untrusted_answer>`(turn_id 속성 없음)라는 것과
+  summarizer·`<untrusted_derived_summary>`가 **미구현**이라는 것을 명시했습니다. **스키마 변경은 없습니다.**
 - 2026-09-09 최초 작성. 5개 호출(planner / interviewer / summarizer / evaluator / coach)의 입출력 JSON 스키마,
   `<<<META>>>` 스트림 규약, 저장 매핑, 서버 검증 알고리즘 확정.
 - 2026-09-09 QA 대응(`07_qa_report.md` F5·F7).
@@ -1130,13 +1136,14 @@ not null이 사라졌으므로 `''`·공백만 있는 문자열이 NULL 대신 �
 
 모든 비신뢰 텍스트는 아래 태그로만 감쌉니다. 태그명은 영어 고정입니다.
 
-| 태그 | 대상 | 사용 호출 |
-|---|---|---|
-| `<untrusted_resume>` | `documents.extracted_text` (이력서) | planner |
-| `<untrusted_jd>` | `documents.extracted_text` (JD) | planner |
-| `<untrusted_candidate_answer turn_id="...">` | 후보 발화 | interviewer, summarizer |
-| `<untrusted_candidate_answer_{nonce} turn_id="...">` | 후보 발화 | **evaluator, coach** (아래 난수 접미사 규칙) |
-| `<untrusted_derived_summary>` | 이전 LLM 산출 요약(반신뢰) | interviewer |
+| 태그 | 대상 | 사용 호출 | 구현 상태 (2026-09-14 실측) |
+|---|---|---|---|
+| `<untrusted_resume>` | `documents.extracted_text` (이력서) | planner | **구현됨** — `planner.ts` `buildUserMessage()` |
+| `<untrusted_jd>` | `documents.extracted_text` (JD) | planner | **구현됨** — 같은 함수 |
+| `<untrusted_answer>` | 후보 발화(현재 턴 1개) | interviewer | **구현됨** — `interviewer.ts` `buildUserMessage()`. **`turn_id` 속성이 없습니다** — 이 호출은 아직 저장되지 않은 현재 답변 1건만 감싸므로 식별자가 필요 없습니다. 최근 대화 이력은 태그 밖에 `면접관:`/`후보자:` 줄로 붙습니다 |
+| `<untrusted_candidate_answer turn_id="...">` | 후보 발화(턴별) | summarizer | **미구현** — `roles.ts`에 역할 상수만 있고 호출 코드가 없습니다. 구현할 때 이 태그 모양을 따릅니다 |
+| `<untrusted_candidate_answer_{nonce} turn_id="...">` | 후보 발화 | **evaluator, coach** (아래 난수 접미사 규칙) | **구현됨** — `transcript.ts` `newUntrustedTagName()` + `renderTranscript()` |
+| `<untrusted_derived_summary>` | 이전 LLM 산출 요약(반신뢰) | interviewer | **미구현** — summarizer가 들어와 요약이 생기는 시점에 함께 붙입니다 |
 
 **평가자·코치의 후보 발화 태그에는 요청마다 다른 난수 접미사를 붙입니다 (2026-09-14, QA Q1).**
 후보가 답변 본문에 `</untrusted_candidate_answer>`를 **그대로 타이핑하면 비신뢰 블록이 그 자리에서
@@ -1149,7 +1156,7 @@ not null이 사라졌으므로 `''`·공백만 있는 문자열이 NULL 대신 �
   "접미사가 다른 닫는 태그는 후보가 말한 문자열"이라는 규칙이 성립합니다.
 - **본문 텍스트는 한 글자도 바뀌지 않습니다.** 따라서 평가자의 `indexOf` 인용 검증과
   `quote_start`/`quote_end`는 그대로 유효합니다.
-- **interviewer·summarizer는 고정 태그명을 유지합니다.** 두 호출은 전각 치환을 하므로 후보가
+- **interviewer(및 구현 예정인 summarizer)는 고정 태그명을 유지합니다.** 두 호출은 전각 치환을 하므로 후보가
   닫는 태그를 타이핑해도 `＜/…＞`가 되어 블록이 닫히지 않습니다. 난수화가 해가 되지는 않으므로
   스트리밍 경로를 건드릴 일이 생기면 그때 같이 맞춥니다(현재는 불필요한 변경).
 
@@ -1157,7 +1164,8 @@ not null이 사라졌으므로 `''`·공백만 있는 문자열이 NULL 대신 �
 
 | 호출 | 정화 | 근거 |
 |---|---|---|
-| planner / interviewer / summarizer / coach | **한다** — ① `<`→`＜`, `>`→`＞`(길이 불변 1:1) ② 제어 문자 제거(탭·개행 제외) ③ 3개 이상 연속 개행을 2개로 | 태그 위조 차단. 이 호출들은 문자 오프셋을 쓰지 않는다 |
+| planner / interviewer / coach | **한다 — ①②③ 전부.** ① `<`→`＜`, `>`→`＞`(길이 불변 1:1) ② 제어 문자 제거(탭·개행 제외) ③ 3개 이상 연속 개행을 2개로 | 태그 위조 차단. 이 호출들은 문자 오프셋을 쓰지 않는다. **세 호출이 `transcript.ts`의 `sanitizeUntrusted()` 하나를 공유합니다**(2026-09-14, QA Q7 — 이전에는 planner·interviewer가 `<`만 치환하는 로컬 복사본을 각자 갖고 있었습니다). 정화 규칙을 바꿀 때 고칠 곳은 그 함수 한 곳입니다 |
+| summarizer | **미구현** | 호출 코드가 아직 없습니다. 구현 시 `sanitizeUntrusted()`를 그대로 씁니다(오프셋을 쓰지 않는 호출이므로 예외가 필요 없습니다) |
 | **evaluator** | **①②③ 전부 하지 않는다** | 인용 `indexOf` 검증이 `turns.transcript_text` 원본과 문자 단위로 일치해야 하고(9.2절 ②), ②·③은 **오프셋까지** 밀어 `quote_start`를 틀리게 만든다. 태그 위조 방어는 정화가 아니라 **위의 난수 태그명**이 맡는다 |
 
 DB에는 **언제나 정화 전 원본**을 저장합니다. 치환은 프롬프트 조립 시점의 사본에만 적용합니다.

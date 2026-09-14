@@ -693,7 +693,7 @@ function verifyQuotes(
       continue;
     }
 
-    const key = `${quote.turn_id} ${quote.quote_text}`;
+    const key = `${quote.turn_id}\u0000${quote.quote_text}`;
     if (seen.has(key)) continue; // 완전 중복은 조용히 버립니다(모델의 잘못이 아닙니다).
     seen.add(key);
 
