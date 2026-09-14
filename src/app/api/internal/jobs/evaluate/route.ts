@@ -1,6 +1,8 @@
 import { after } from "next/server";
 import { z } from "zod";
 
+import { runCoach } from "@/lib/ai/coach";
+import { runEvaluator } from "@/lib/ai/evaluator";
 import { ApiError } from "@/lib/api/errors";
 import { ok } from "@/lib/api/respond";
 import { handle, readJson, requireJobSecret } from "@/lib/api/route";
@@ -98,7 +100,14 @@ export function POST(request: Request) {
     // 세션을 여기서 다시 집습니다. `enqueueEvaluation`을 부르지 않으므로 `evaluations` 행도
     // `attempt_count`도 그대로입니다(6.2절 주의 문단).
     session = await resumeEvaluating(session, admin);
-    if (sessionStatusOf(session) !== "evaluating") return ok();
+    if (sessionStatusOf(session) !== "evaluating") {
+      // QA R11 — 선점 UPDATE가 `started_at`을 이미 찍었으므로 그냥 빠지면 `evaluations` 행이
+      // `running`으로 남습니다. 세션이 이미 종료 상태(예: 크론이 먼저 `failed`로 내림)라면
+      // 워치독 3(`evaluating`만)도 4(`completed`만)도 이 행을 훑지 않아 정리할 주체가
+      // 없습니다. `canceled`는 `evaluations_status_check`에 없으므로 `failed`로 닫습니다.
+      await closeOrphanEvaluation(admin, body.evaluationId);
+      return ok();
+    }
 
     // ── 1단계: 평가 (stage='coach_only'이면 건너뜁니다) ─────────────────────
     if (body.stage === "full") {
@@ -121,7 +130,7 @@ export function POST(request: Request) {
     // ── 2단계: 코치 ─────────────────────────────────────────────────────────
     // **성공·실패 어느 쪽이든** 세션은 `evaluated`가 됩니다. 코치 실패는 리포트 실패가 아닙니다.
     try {
-      await runCoachPass();
+      await runCoachPass({ session, evaluationId: body.evaluationId, admin });
     } catch (coachError) {
       console.error("[evaluate] 코치 단계가 실패했습니다", {
         sessionId: session.id,
@@ -129,10 +138,29 @@ export function POST(request: Request) {
       });
     }
 
-    await admin
+    // **조건부 UPDATE입니다** (QA Q4). 다른 네 지점(선점 82행 · `attempt_count` 248행 ·
+    // `exhaust()` 284행 · `closeOrphanEvaluation()` 172행)과 같은 `.eq("status","running")`
+    // 가드를 답니다. 이 가드가 없으면 크론 워치독이 이미 소진 판정으로 `failed`로 닫아 둔 행을
+    // 뒤늦게 살아 있던 이 워커가 `succeeded`로 되집어, **`failed` 세션에 `succeeded` 평가**가
+    // 남습니다. 정상 경로에서는 이 행이 `running`이므로 1행이 갱신되고 그대로 정산합니다.
+    const { data: settled } = await admin
       .from("evaluations")
       .update({ status: "succeeded", finished_at: new Date().toISOString() })
-      .eq("id", body.evaluationId);
+      .eq("id", body.evaluationId)
+      .eq("status", "running")
+      .select("id")
+      .maybeSingle();
+
+    if (!settled) {
+      // 0행 = 다른 경로(크론 워치독 등)가 이미 이 행과 세션을 종결시켰다는 뜻입니다.
+      // **정산을 부르지 않습니다** — 그 경로가 이미 예약을 반납했고, 여기서 다시 부르면
+      // 종료 상태의 세션에 정산 전이를 시도해 의미 없는 오류만 남습니다.
+      console.warn("[evaluate] 평가 행이 이미 다른 경로에서 종결됐습니다 — 정산을 건너뜁니다", {
+        sessionId: session.id,
+        evaluationId: body.evaluationId,
+      });
+      return ok();
+    }
 
     // **반납 6지점 #2 — 정산 반납.** `→ completed`의 부분 반납이 남긴 6을 여기서 가져갑니다.
     // 이 호출을 건너뛰면 세션당 6이 그날 내내 묶이고, 크론의 만료 스윕에서야 회수됩니다.
@@ -151,6 +179,20 @@ async function loadSession(admin: Admin, sessionId: string): Promise<SessionRow>
 
   if (error || !data) throw new ApiError("not_found", "세션을 찾을 수 없습니다.");
   return data;
+}
+
+/**
+ * 이 워커가 집었지만 돌릴 수 없게 된 `running` 평가 행을 닫습니다 (QA R11).
+ *
+ * 세션 쪽은 건드리지 않습니다 — 이미 다른 경로가 종결시킨 세션이며, 여기서 상태를 되짚으면
+ * 그 경로의 판정을 덮어쓰게 됩니다. 이 워커가 남길 것은 원장 정리뿐입니다.
+ */
+async function closeOrphanEvaluation(admin: Admin, evaluationId: string): Promise<void> {
+  await admin
+    .from("evaluations")
+    .update({ status: "failed", finished_at: new Date().toISOString() })
+    .eq("id", evaluationId)
+    .eq("status", "running");
 }
 
 function sleep(ms: number): Promise<void> {
@@ -205,7 +247,7 @@ async function runEvaluatorWithRetries(input: {
 
   for (;;) {
     try {
-      await runEvaluatorPasses();
+      await runEvaluatorPasses({ session, evaluationId, admin });
       return { kind: "succeeded", session };
     } catch (evaluatorError) {
       console.error("[evaluate] 평가 단계가 실패했습니다", {
@@ -327,22 +369,29 @@ async function startEvaluationRetry(
   return false;
 }
 
-// ── AI 단계 (다음 라운드 연결 지점) ──────────────────────────────────────────
+// ── AI 단계 ──────────────────────────────────────────────────────────────────
 
 /**
  * 평가자 패스 A + 패스 B → `evaluations`·`evaluation_scores`·`evaluation_citations` 저장.
  *
- * 아직 프롬프트가 연결되지 않았습니다. **여기서 던지면 위의 재시도·`failed` 경로가 그대로
- * 돌아가므로 예약이 방치되지 않습니다** — 점수를 지어내 저장하는 것보다 정확한 실패가 낫습니다.
- * 인용 오프셋은 **JS UTF-16 기준**이며, 저장 전 `quote_start`를 Postgres 문자 함수에 넣지 마세요.
+ * 프롬프트와 검증·저장은 `@/lib/ai/evaluator`에 있습니다. **여기서 던지면 위의 재시도·`failed`
+ * 경로가 그대로 돌아가므로 예약이 방치되지 않습니다** — 점수를 지어내 저장하는 것보다 정확한
+ * 실패가 낫습니다. 인용 오프셋은 **JS UTF-16 기준**이며, 저장 전 `quote_start`를 Postgres 문자
+ * 함수에 넣지 마세요.
  */
-async function runEvaluatorPasses(): Promise<void> {
-  await Promise.resolve();
-  throw new Error("evaluator_not_wired");
+function runEvaluatorPasses(input: {
+  session: SessionRow;
+  evaluationId: string;
+  admin: Admin;
+}): Promise<void> {
+  return runEvaluator(input);
 }
 
 /** 코치 → `summary`/`improvements`/`coach_payload` + 축별 `improvement` UPDATE. */
-async function runCoachPass(): Promise<void> {
-  await Promise.resolve();
-  throw new Error("coach_not_wired");
+function runCoachPass(input: {
+  session: SessionRow;
+  evaluationId: string;
+  admin: Admin;
+}): Promise<void> {
+  return runCoach(input);
 }

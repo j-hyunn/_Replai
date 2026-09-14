@@ -19,6 +19,11 @@
     근거 서술을 BYOK 2종까지 포함하도록 넓힘(가능값은 `in_progress`/`completed` 2개로 변동 없음).
   - SSE 이벤트 4종을 D28 기준으로 다시 전수 대조하고 결과를 **11.1절**로 신설. `utterance_chunk`·
     `utterance_done`·`session_notice`는 변경 없음(`session_notice.kind`에 `byok_*`를 넣지 않기로 확정).
+- 2026-09-14 **평가자·코치 구현 연결분 반영**(`src/lib/ai/evaluator.ts`·`coach.ts`). 스키마 변경 없음.
+  - 6.4절에 **코치가 쓰지 않는 컬럼**(`model_name`·`provider`·`ai_contract_version`·`overall_score`·
+    `rubric_version`은 평가자 소유)과 **쓰기 순서**(`evaluation_scores` upsert → `evaluations`)를 명문화.
+  - `02_prompts/evaluator.md` 6.2절 `{{questions_rendered}}`에 `question_id`를 포함하도록 확정(코치의
+    `model_answers[].question_id`의 유일한 출처). 같은 문서 7.2절에서 `citation_index`는 **서버 재부여**로 확정.
 
 ---
 
@@ -1110,6 +1115,15 @@ not null이 사라졌으므로 `''`·공백만 있는 문자열이 NULL 대신 �
 | `axis_improvements[].improvement` | `evaluation_scores.improvement` (**NULL 허용** 컬럼에 축별 UPDATE. INSERT가 아니다 — 5.6절) |
 | `model_answers`, `next_actions` | `evaluations.coach_payload` (jsonb) — `{"model_answers":[...],"next_actions":[...]}` |
 
+**코치는 위 네 곳만 씁니다.** `evaluations.model_name`·`provider`·`ai_contract_version`·`overall_score`·
+`rubric_version`은 **평가자가 소유**하며(5.5절) 코치 단계는 덮어쓰지 않습니다 — 덮어쓰면 그 평가를
+어느 모델이 채점했는지가 코치의 모델로 바뀌어 재현성 추적(3.7절의 두 컬럼을 둔 이유)이 무너집니다.
+두 역할이 같은 모델을 쓰는 현재 구성에서는 값이 같지만, 그것은 우연이지 계약이 아닙니다.
+
+**쓰기 순서 — `evaluation_scores` 먼저, `evaluations` 나중.** 판정 기준이 `evaluations.summary IS NULL`
+하나이므로(5.6절), 마지막 쓰기가 실패했을 때 남는 상태가 "코치 미완료"로 정확히 읽혀야 합니다.
+축별 `improvement` 5행은 **한 문장(`upsert`)으로** 올려 일부 축만 채워진 상태를 만들지 않습니다.
+
 ---
 
 ## 7. 인젝션 방어 — 프롬프트 조립 계약
@@ -1120,20 +1134,42 @@ not null이 사라졌으므로 `''`·공백만 있는 문자열이 NULL 대신 �
 |---|---|---|
 | `<untrusted_resume>` | `documents.extracted_text` (이력서) | planner |
 | `<untrusted_jd>` | `documents.extracted_text` (JD) | planner |
-| `<untrusted_candidate_answer turn_id="...">` | 후보 발화 | interviewer, summarizer, evaluator, coach |
+| `<untrusted_candidate_answer turn_id="...">` | 후보 발화 | interviewer, summarizer |
+| `<untrusted_candidate_answer_{nonce} turn_id="...">` | 후보 발화 | **evaluator, coach** (아래 난수 접미사 규칙) |
 | `<untrusted_derived_summary>` | 이전 LLM 산출 요약(반신뢰) | interviewer |
+
+**평가자·코치의 후보 발화 태그에는 요청마다 다른 난수 접미사를 붙입니다 (2026-09-14, QA Q1).**
+후보가 답변 본문에 `</untrusted_candidate_answer>`를 **그대로 타이핑하면 비신뢰 블록이 그 자리에서
+닫히고**, 뒤에 이어붙인 문장이 모델에게 "블록 밖 지시"로 보입니다. 정화하는 호출은 전각 치환이
+이를 막지만 **평가자는 정화하지 않으므로** 방어가 비어 있었습니다.
+
+- 접미사는 **호출 단위로** 생성합니다(`crypto.randomUUID()` 앞 8자리 — `newUntrustedTagName()`).
+  한 평가의 패스 A·패스 B·재시도는 **같은 태그명**을 공유합니다(모델이 같은 전문을 보아야 합니다).
+- 같은 호출의 **시스템 프롬프트에도 그 태그명을 박아 넣습니다.** 그래야 모델이 블록의 끝을 알고,
+  "접미사가 다른 닫는 태그는 후보가 말한 문자열"이라는 규칙이 성립합니다.
+- **본문 텍스트는 한 글자도 바뀌지 않습니다.** 따라서 평가자의 `indexOf` 인용 검증과
+  `quote_start`/`quote_end`는 그대로 유효합니다.
+- **interviewer·summarizer는 고정 태그명을 유지합니다.** 두 호출은 전각 치환을 하므로 후보가
+  닫는 태그를 타이핑해도 `＜/…＞`가 되어 블록이 닫히지 않습니다. 난수화가 해가 되지는 않으므로
+  스트리밍 경로를 건드릴 일이 생기면 그때 같이 맞춥니다(현재는 불필요한 변경).
 
 **정화(sanitize) 규칙과 그 예외 — 인용 정합성이 걸려 있으므로 정확히 지킵니다.**
 
-| 호출 | `<` `>` 전각 치환 | 근거 |
+| 호출 | 정화 | 근거 |
 |---|---|---|
-| planner / interviewer / summarizer / coach | **한다** (`<`→`＜`, `>`→`＞`, 길이 불변 1:1) | 태그 위조 차단. 이 호출들은 문자 오프셋을 쓰지 않는다 |
-| **evaluator** | **하지 않는다** | 인용 `indexOf` 검증이 `turns.transcript_text` 원본과 문자 단위로 일치해야 한다(9.2절 ②). 대신 시스템 프롬프트의 격리 규칙을 더 강하게 건다 |
+| planner / interviewer / summarizer / coach | **한다** — ① `<`→`＜`, `>`→`＞`(길이 불변 1:1) ② 제어 문자 제거(탭·개행 제외) ③ 3개 이상 연속 개행을 2개로 | 태그 위조 차단. 이 호출들은 문자 오프셋을 쓰지 않는다 |
+| **evaluator** | **①②③ 전부 하지 않는다** | 인용 `indexOf` 검증이 `turns.transcript_text` 원본과 문자 단위로 일치해야 하고(9.2절 ②), ②·③은 **오프셋까지** 밀어 `quote_start`를 틀리게 만든다. 태그 위조 방어는 정화가 아니라 **위의 난수 태그명**이 맡는다 |
 
 DB에는 **언제나 정화 전 원본**을 저장합니다. 치환은 프롬프트 조립 시점의 사본에만 적용합니다.
 
-그 밖의 공통 정화: 길이 절단(이력서 12,000 / JD 6,000 / 발화 4,000자, 절단 시 `[…이하 생략됨]` 표시),
-제어 문자 제거, 3개 이상 연속 개행을 2개로 정규화.
+**길이 절단은 두 경로 공통입니다**(이력서 12,000 / JD 6,000 / 발화 4,000자, 절단 시
+`[…이하 생략됨]` 표시). 절단은 앞에서부터 자르므로 남은 구간의 오프셋을 바꾸지 않습니다.
+
+**길이 판정의 단위 — 코드포인트입니다 (2026-09-14, QA Q2).** DB의 길이 CHECK는 Postgres
+`char_length`(코드포인트)이므로, 저장 전 애플리케이션 검증도 `Array.from(text).length`로 셉니다
+(`citations_quote_text_len` 20~160 · `scores_improvement_len` 20~400). JS `String.length`
+(UTF-16 코드 유닛)로 재면 이모지가 섞인 경계 길이에서 검증을 통과한 값이 INSERT에서 깨집니다.
+**`quote_start`/`quote_end` 오프셋은 UTF-16 그대로**입니다 — 오프셋과 길이 판정은 별개 관심사입니다.
 
 ---
 
