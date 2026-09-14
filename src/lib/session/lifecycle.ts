@@ -272,6 +272,32 @@ export async function settleEvaluatedSession(
   return evaluated;
 }
 
+/**
+ * #18 `coach/retry`의 뒷정리 — **전이 없이 반납만** 합니다.
+ *
+ * 코치 재시도는 세션이 이미 `evaluated`인 상태에서 도는 경로라(계약 4절 #18 — "**없음**
+ * (`evaluated` 유지)") `settleEvaluatedSession()`을 부를 수 없습니다. 전이 표에
+ * `evaluated → evaluated`가 없으므로 `applyTransition`이 409로 거절합니다.
+ *
+ * 그런데 #18은 `flash_lite` 2를 **다시 예약**하므로(4.7.4절) 반납할 대상이 생깁니다.
+ * 이 함수가 없으면 코치 재시도를 누를 때마다 2씩 그날 내내 묶이고, 크론의 만료 스윕에서야
+ * 회수됩니다.
+ */
+export async function settleCoachRetry(
+  session: SessionRow,
+  admin: Admin = createAdminClient(),
+): Promise<void> {
+  await releaseAndRecord(
+    session.id,
+    fundingSourceOf(session),
+    null,
+    "settled",
+    statusOf(session),
+    "ai_completion",
+    admin,
+  );
+}
+
 // ── 3번 · 취소 ───────────────────────────────────────────────────────────────
 
 /**

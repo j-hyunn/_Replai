@@ -15,8 +15,8 @@ import {
 } from "@/lib/ai/meta-stream";
 import { runStream } from "@/lib/ai/provider";
 import { ApiError } from "@/lib/api/errors";
-import { fail } from "@/lib/api/respond";
-import { loadOwnedSession } from "@/lib/api/route";
+import { compound, fail } from "@/lib/api/respond";
+import { handle, loadOwnedSession } from "@/lib/api/route";
 import {
   sessionStatusOf,
   type Axis,
@@ -29,6 +29,7 @@ import { completeSession, failSession, fundingSourceOf } from "@/lib/session/lif
 import { MODALITIES, PERSONA_BUDGET, shouldComplete, type Persona } from "@/lib/session/persona";
 import type { SessionStatus } from "@/lib/session/status";
 import { applyTransition, recordObservationEvent, type Admin } from "@/lib/session/store";
+import { loadTranscript } from "@/lib/session/transcript";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
@@ -108,6 +109,43 @@ type SessionNotice = {
   level: number | null;
   messageKo: string;
 };
+
+/**
+ * #10 `GET /api/sessions/[sessionId]/turns` — **재동기화**입니다 (계약 5.5절).
+ *
+ * SSE 재개(resume)를 지원하지 않으므로, 스트림이 끊긴 클라이언트는 #9를 **재요청하지 않고**
+ * 이 경로로 복구합니다. 이유는 셋입니다 — 부분 발화를 이어 붙이려면 서버가 호출 간 상태를
+ * 들고 있어야 하고, 다시 호출하면 무료 티어 쿼터를 두 번 쓰며, **확정분은 이미 `turns`에
+ * 저장돼 있기 때문**입니다(M7·5.4절).
+ *
+ * **LLM을 호출하지 않습니다.** "다시 듣기"도 이 응답의 텍스트를 TTS에 다시 넣을 뿐입니다.
+ * 이 응답에 면접관 발화가 없으면(=0자 확정) 그때만 같은 `answerSeq`로 #9를 재시도합니다.
+ */
+export function GET(
+  request: Request,
+  context: RouteContext<"/api/sessions/[sessionId]/turns">,
+) {
+  return handle(async () => {
+    const { sessionId } = await context.params;
+    const { session, supabase } = await loadOwnedSession(sessionId);
+
+    const raw = new URL(request.url).searchParams.get("afterSeq");
+    const afterSeq = raw === null ? undefined : readAfterSeq(raw);
+
+    return compound(await loadTranscript(supabase, session.id, { afterSeq }));
+  });
+}
+
+/** 음수·소수·문자는 400입니다. 조용히 0으로 떨어뜨리면 전체를 다시 그려 화면이 중복됩니다. */
+function readAfterSeq(raw: string): number {
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new ApiError("validation_failed", "요청 내용을 확인해 주세요.", {
+      details: { fields: { afterSeq: "0 이상의 정수여야 합니다." } },
+    });
+  }
+  return parsed;
+}
 
 export async function POST(
   request: Request,

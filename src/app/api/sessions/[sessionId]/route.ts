@@ -2,6 +2,7 @@ import { ApiError } from "@/lib/api/errors";
 import { ok, single } from "@/lib/api/respond";
 import { handle, loadOwnedSession } from "@/lib/api/route";
 import { sessionStatusOf, toSessionDto } from "@/lib/api/serialize";
+import { applyLazyWatchdog } from "@/lib/evaluation/watchdog";
 import { loadSessionDerived } from "@/lib/session/store";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -22,10 +23,15 @@ export function GET(
     const { sessionId } = await context.params;
     const { session } = await loadOwnedSession(sessionId);
 
-    const status = sessionStatusOf(session);
-    const derived = await loadSessionDerived(session.id, status);
+    // **게으른 워치독**(계약 6.5절 1겹) — `evaluating`에 10분 넘게 머문 세션을 여기서 판정합니다.
+    // 대기 화면의 폴링·재조회가 이 검사를 자동으로 돌리므로, 정확히 필요한 사람에게만 정확한
+    // 시점에 동작합니다. `evaluating`이 아니면 첫 줄에서 그대로 돌아옵니다.
+    const current = await applyLazyWatchdog(session);
 
-    return single("session", toSessionDto(session, derived));
+    const status = sessionStatusOf(current);
+    const derived = await loadSessionDerived(current.id, status);
+
+    return single("session", toSessionDto(current, derived));
   });
 }
 
