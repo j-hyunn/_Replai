@@ -140,6 +140,33 @@ export async function resolveCallCredentials(
   return createCallContext(base, sharedKey);
 }
 
+/**
+ * #40 `POST /api/account/api-key/verify` 전용 — 저장된 사용자 키의 평문을 꺼냅니다 (D28).
+ *
+ * **이 함수가 여기 있는 이유가 곧 이 파일의 규칙입니다.** `get_user_api_key()`를 부르는 코드는
+ * 이 파일 하나여야 하고(05_deploy.md CI 검사 3), 재검증 라우트도 예외가 아닙니다. 라우트가
+ * 직접 RPC를 부르면 복호화 지점이 둘이 되고, CI가 그것을 잡습니다.
+ *
+ * 돌려주는 값은 **라우트가 프로바이더 검증 호출에 한 번 쓰고 버리는 평문**입니다.
+ * 로그·응답·예외 어디에도 싣지 마세요 — 화면에 쓸 수 있는 값은 `keyLast4` 하나뿐입니다.
+ *
+ * 키가 없거나 `status='invalid'`면 함수가 아무 행도 돌려주지 않으므로 `null`입니다.
+ * **여기서 공용 키로 대체하지 않습니다** — 재검증의 대상은 사용자 키뿐입니다.
+ */
+export async function readStoredUserKey(
+  userId: string,
+  admin: Admin = createAdminClient(),
+): Promise<string | null> {
+  const { data, error } = await admin.rpc("get_user_api_key", { p_user_id: userId });
+
+  if (error) {
+    // 원시 오류를 그대로 올리지 않습니다 — 메시지에 인자가 섞여 들어오는 경로가 있습니다.
+    throw new ApiError("internal_error", "키를 확인하지 못했습니다.", { cause: error.message });
+  }
+
+  return data ?? null;
+}
+
 /** 공용 키는 배포 단위 상수입니다 — 사용자 키(Vault)와 그릇 자체가 다릅니다(05_deploy.md 1.4절). */
 function sharedProviderKey(): string | undefined {
   const env = serverEnv();
