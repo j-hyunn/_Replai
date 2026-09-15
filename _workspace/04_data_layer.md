@@ -75,6 +75,11 @@
 
 ---
 
+- 2026-09-15 **D35 반영 — 데모 체험. 설계가 아니라 구현입니다** (마이그레이션 4개 작성·원격 적용 완료). 신규 테이블 `demo_documents`(시드 10행),
+  `funding_source` CHECK 3종 / `model_bucket` CHECK 4종 확장, `profiles`에 `account_type`·`demo_consumed_at`,
+  `reserve_session_quota`·`consume_session_quota`의 재원↔버킷 짝 강제, `enforce_session_funding_rules`의 계정↔재원 짝,
+  익명 계정 24시간 TTL 스윕 함수. **상세는 15절.** 1~14절은 2026-09-11까지의 설계이며 15절이 그 위의 델타입니다.
+
 ## 0. 설계 요약 (한 눈에)
 
 | 항목 | 결정 |
@@ -2376,3 +2381,173 @@ indexOf ≥ 0  →  quote_start = idx, quote_end = idx + len(quote_text)
 
 이와 별개로 `00_input/decisions.md` 말미의 전사 `[확인 필요]` 2건(모델별 무료 티어 RPM/RPD/TPM,
 JSON Schema 강제 범위)은 **데이터 레이어에 영향이 없습니다** — 둘 다 AI 호출 예산과 계약 검증에 관한 값입니다.
+
+---
+
+## 15. D35 반영 — 데모 체험 (2026-09-15, **구현 완료·원격 적용됨**)
+
+> 이 절은 `00_input/decisions.md` **D35-1~4**, `01_state_machine.md` 1·2·5·10절,
+> `01_domain_model.md` 3.1·3.1-a·4절의 결정을 데이터 레이어에 반영한 **실제 구현 기록**입니다.
+> 1~14절은 2026-09-11까지의 설계이며, 이 절이 그 위의 **델타**입니다. 충돌하면 이 절이 최신입니다.
+
+### 15.1 추가된 마이그레이션 4개
+
+| 파일 | 역할 |
+|---|---|
+| `supabase/migrations/20260915000100_demo_funding_and_quota_bucket.sql` | `funding_source` CHECK 3종 확장, `model_bucket` CHECK 4종 확장(원장·예약 둘 다), `reserve_session_quota`의 **재원↔버킷 짝 강제**와 버킷 순서 확장, `consume_session_quota`의 데모 소비 누락 결함 정정 |
+| `supabase/migrations/20260915000200_profiles_account_type_and_demo_consumed.sql` | `profiles.account_type`·`demo_consumed_at` 추가, `handle_new_user`가 `is_anonymous`에서 `account_type`을 채우고 `display_name` NULL 방지, `enforce_session_funding_rules`에 **계정 유형↔재원 짝**과 데모 동의 가드 추가 |
+| `supabase/migrations/20260915000300_demo_documents.sql` | 신규 테이블 `demo_documents` + RLS + `select` 정책 + **직군 5 × 문서 2 = 10행 시드** |
+| `supabase/migrations/20260915000400_demo_account_ttl_sweep.sql` | 익명 계정 24시간 TTL 스윕 함수 `sweep_expired_demo_accounts(p_ttl_hours, p_limit)` (크론 C1 워치독 **6종째**가 호출) |
+
+**기존 마이그레이션은 한 줄도 고치지 않았습니다.** 전부 신규 파일의 ALTER / `create or replace`입니다.
+
+### 15.2 CHECK 확장 3종 (순수 추가)
+
+| 대상 | 이전 | 이후 |
+|---|---|---|
+| `interview_sessions.funding_source` | `('trial_shared','byok')` | `('trial_shared','byok','demo')` |
+| `ai_quota_ledger.model_bucket` | `('flash_lite','flash','pro')` | `('flash_lite','flash','pro','flash_lite_demo')` |
+| `ai_quota_reservations.model_bucket` | 위와 동일 | 위와 동일 |
+
+`reserve_session_quota`의 고정 버킷 처리 순서는 `pro → flash → flash_lite → **flash_lite_demo**`이며,
+새 값을 **맨 끝에** 붙였습니다. 순서를 바꾸면 데드락 회피 근거(8.3.5절)가 깨집니다.
+
+### 15.3 재원 ↔ 버킷 짝 (D35-1 ③) — DB가 강제합니다
+
+| `funding_source` | 허용 버킷 | 예약 시 위반 | 소비 시 위반 |
+|---|---|---|---|
+| `trial_shared` | `flash_lite`만 | `quota_bucket_mismatch:trial_shared` (예외) | `0` 반환 (기록 안 함) |
+| `demo` | `flash_lite_demo`만 | `quota_bucket_mismatch:demo` (예외) | `0` 반환 (기록 안 함) |
+| `byok` | 없음(예약 자체를 하지 않음) | `quota_not_applicable:byok` (기존) | `0` 반환 (기존) |
+
+예약은 **예외로 막고**, 소비는 **0을 반환하며 흘려보냅니다.** 소비에서 예외를 던지면 분기 실수가 곧
+면접 중단이 되기 때문이며, 이것은 기존 함수의 원칙(사전에 막고 사후에 흘린다)을 그대로 따른 것입니다.
+
+**격리는 코드가 아니라 데이터로 보장됩니다.** 데모 세션은
+`p_request = {"pro":0,"flash":0,"flash_lite":0,"flash_lite_demo":17}`로 부르고,
+기존의 `continue when v_target <= 0` 한 줄 덕분에 **`flash_lite` 원장 행을 읽지도·만들지도·잠그지도 않습니다.**
+이 성질이 실제로 유지되는지는 15.7의 실행 검증 [6]·[10]에서 확인했습니다.
+
+### 15.4 계정 유형 ↔ 재원 짝 (D35-2) — 프록시와 **DB 양쪽**에 둡니다
+
+`enforce_session_funding_rules`가 INSERT에서만 검사합니다(재원은 불변이고 `account_type`도 가입 시 확정).
+
+| 계정 | 만들 수 있는 세션 | 위반 시 |
+|---|---|---|
+| `account_type = 'demo'` (익명) | `funding_source = 'demo'`만 | `account_funding_mismatch:demo` |
+| `account_type = 'registered'` | `trial_shared` · `byok` | `account_funding_mismatch:registered` |
+
+라우트에만 두면 분기 하나를 빠뜨리는 순간 익명 계정이 체험 정원 12세션을 갉아먹고,
+증상은 "체험 정원이 왜인지 부족하다"로만 보여 원인을 찾을 수 없습니다 — D30·D35-1 ③과 같은 근거입니다.
+
+동의 가드는 `trial_shared`에서 `('trial_shared','demo')`로 넓혔습니다. 트리거가 검사하는 것은
+"동의 행이 있는가"까지이고, **버전 검사(`demo-1.0.0`)는 서버 가드의 책임**이라는 분담은 그대로입니다.
+
+### 15.5 `profiles` 신규 컬럼 2개 (3.1절 델타)
+
+| 컬럼 | 타입 | 설명 |
+|---|---|---|
+| `account_type` | `text not null default 'registered'`, `check in ('registered','demo')` | `handle_new_user`가 `auth.users.is_anonymous`에서 채웁니다. 게이트·프록시가 `public` 스키마만 읽고 익명 여부를 판정하게 하려는 것입니다 |
+| `demo_consumed_at` | `timestamptz` null | 데모 1회 소진 시각. `trial_consumed_at`과 **별개 컬럼**. 채우는 규칙은 동일합니다 — 데모 세션의 첫 주질문 응답 턴 저장 트랜잭션에서 `... and demo_consumed_at is null` |
+
+`handle_new_user`는 `coalesce(nullif(split_part(coalesce(new.email,''),'@',1),''), '데모 방문자')`로 고쳤습니다.
+익명 사용자는 `email`이 NULL이라 기존 식이 NULL을 만들고, 화면에 빈 이름이 나왔습니다.
+
+**인덱스 #22 추가** — `idx_profiles_demo on public.profiles (created_at) where account_type = 'demo'`.
+부분 인덱스라 `registered` 계정에는 비용이 없습니다.
+
+### 15.6 `demo_documents` — 신규 테이블 (3.1-a절의 구현)
+
+```
+demo_documents
+  id           uuid primary key default gen_random_uuid()
+  job_role     text not null check (job_role in ('pm','pd','security','ai','engineer'))
+  doc_type     text not null check (doc_type in ('resume','job_description'))
+  title        text not null check (char_length(title) between 1 and 120)
+  body_text    text not null check (char_length(body_text) between 1 and 200000)
+  seed_version text not null check (char_length(seed_version) between 1 and 20)
+  created_at   timestamptz not null default now()
+  unique (job_role, doc_type)          -- 이 제약이 곧 "총 10행"의 보증
+```
+
+`body_text`의 길이 CHECK는 `interview_sessions.*_text_snapshot`과 **같은 범위**입니다 —
+스냅샷으로 복사되므로 여기서 넘치면 복사 시점에 터집니다.
+
+**스냅샷 복사 경로에 새 컬럼이 필요 없습니다.** 데모 세션 생성 시 서버가 `body_text`를 읽어
+`resume_text_snapshot` / `jd_text_snapshot`에 넣고 `resume_document_id` / `jd_document_id`는 **NULL**로 둡니다.
+둘 다 이미 nullable이므로 DDL 변경이 없고, 이것은 예외 처리가 아니라 **D6 설계를 그대로 쓰는 것**입니다.
+
+시드 10건은 마이그레이션에 실제 한국어 문안으로 들어가 있습니다(`seed_version = 'demo-1'`).
+인물·회사·수치는 전부 가공입니다.
+
+### 15.7 RLS 정책 — 5.2절 델타
+
+| 테이블 | 작업 | 대상 역할 | USING | WITH CHECK | 근거 |
+|---|---|---|---|---|---|
+| `demo_documents` | select | `authenticated` | `true` | — | 우리가 쓴 픽스처이지 사용자 데이터가 아닙니다. 익명 사용자도 `authenticated` 역할이므로 이 정책 하나로 데모 방문자가 읽습니다. 민감 정보가 없어 좁힐 이유가 없습니다 |
+| `demo_documents` | insert / update / delete | — | **정책 없음** | — | 쓰기는 마이그레이션과 `service_role`뿐입니다. 클라이언트 쓰기를 허용하면 모든 방문자가 보는 이력서를 아무나 바꿀 수 있습니다 |
+
+**기존 정책은 한 줄도 바꾸지 않았습니다.** 익명 사용자는 `auth.users`에 `is_anonymous = true`인
+진짜 행이고 `auth.uid()`를 발급받으므로, `(select auth.uid()) = user_id` 패턴이 그대로 적용됩니다.
+15.8 [R1~R7]에서 실제 JWT 클레임을 흉내내어 이것을 확인했습니다.
+
+`ai_quota_ledger`·`ai_quota_reservations`는 기존대로 **RLS 켜고 정책 0개**(서버 전용)이며,
+`flash_lite_demo` 추가는 정책 면에서 아무것도 바꾸지 않습니다.
+
+### 15.8 TTL 스윕 — 9절 삭제 정책의 **의도된 예외**
+
+```sql
+select * from public.sweep_expired_demo_accounts(24, 200);
+-- 삭제 기준: auth.users.is_anonymous = true and created_at < now() - interval '24 hours'
+-- 반환:      삭제된 (user_id, created_at) 목록
+```
+
+- `security definer`, `search_path = public`, **`service_role`에만 `execute`**.
+- `for update skip locked` + `limit`으로 배치화했습니다. 크론의 240초 예산 때문이며,
+  기준이 "생성 후 24시간"이라 못 끝낸 잔여는 다음 날 그대로 다시 걸립니다(**멱등**).
+- 연쇄: `auth.users` → `profiles`(cascade) → `interview_sessions` → `questions`/`turns`/`evaluations`/
+  `evaluation_scores`/`evaluation_citations`/`report_feedback`/`score_disputes`, `trial_consents`,
+  `session_events`, `ai_quota_reservations`(**`before delete` 트리거가 원장에 미소비분 반납**).
+- **Storage 객체는 생기지 않습니다**(데모는 업로드를 제공하지 않고 시드 문서만 씁니다).
+  `storage_cleanup_queue`에 들어갈 것이 없어 삭제 경로가 DB 연쇄 하나로 끝납니다.
+
+**크론 라우트(`src/app/api/cron/daily/route.ts`)에 6종째 단계를 붙이는 것은
+`vercel-platform-engineer`의 몫입니다.** 이 문서는 그가 부를 DB 함수까지만 제공합니다.
+
+### 15.9 실행 검증 (원격 프로젝트에서 실제 실행)
+
+익명 사용자·등록 사용자·데모 세션 2건·체험 세션 1건을 실제로 만들고 16개 지점을 단언했습니다.
+전부 통과했고, 검증에 쓴 프로브 데이터는 전량 삭제했습니다.
+
+| # | 확인한 것 | 결과 |
+|---|---|---|
+| 1 | `handle_new_user`가 `account_type`·`display_name`을 채우는가 | 익명 → `demo` / `데모 방문자`, 등록 → `registered` / 메일 local-part |
+| 2 | 익명 계정이 `trial_shared` 세션을 만들 수 있는가 | `account_funding_mismatch:demo`로 거부 |
+| 3 | 등록 계정이 `demo` 세션을 만들 수 있는가 | `account_funding_mismatch:registered`로 거부 |
+| 4 | `funding_source` 불변 트리거가 `demo` 추가로 깨졌는가 | 깨지지 않음 — `funding_source is immutable` |
+| 5 | 체험 기준선 | `flash_lite` held 34 / limit 425 |
+| 6 | **데모 예약이 `flash_lite` 원장을 건드리는가** | **건드리지 않음.** `flash_lite` held 34 그대로, `flash_lite_demo` held 17 / limit 170의 **별도 행** 생성 |
+| 7 | D30(사용자당 held 1건)이 데모에 코드 변경 없이 걸리는가 | 걸림 — 두 번째 데모 예약이 `trial_reservation_exists` |
+| 8 | `demo` 세션이 `flash_lite`를 예약하는 경로 | `quota_bucket_mismatch:demo` |
+| 9 | `trial_shared` 세션이 `flash_lite_demo`를 예약하는 경로 | `quota_bucket_mismatch:trial_shared` |
+| 10 | 소비 기록의 격리 | `flash_lite_demo` 3 기록됨 / 같은 세션의 `flash_lite` 요청은 0 반환, 체험 원장 무변화(34) |
+| 11 | 부분 반납(`p_keep = 6`)이 데모 버킷에서 동작하는가 | `flash_lite_demo` held 17 → 9 (17−3−6=8 반납, 행은 `held` 유지) |
+| 12 | TTL 스윕 | 익명 계정 삭제 + 연쇄 정리. `flash_lite_demo` held 9 → **3**(미소비분 6만 반납, **실제 소비분 3은 유지** — 이중 반납 금지가 맞습니다). `flash_lite` 34 그대로. 등록 계정 무사 |
+| 12b | 스윕 멱등성 | 두 번째 호출 0건 |
+| 13 | 시드 | 10행 (직군 5 × 문서 2) |
+| R1~R5 | 익명 사용자 A의 RLS | 자기 세션·프로필 읽힘 / `demo_documents` 10건 읽힘 / `demo_documents` 쓰기 거부 / `ai_quota_ledger` 0건 |
+| R6~R7 | 익명 사용자 B가 A의 데이터를 볼 수 있는가 | 세션 0건, 프로필 0건 — **정책 수정 없이 격리됨** |
+
+### 15.10 대시보드에서 사람이 해야 하는 일 (이 작업 범위 밖)
+
+MCP에는 Auth 설정을 바꾸는 도구가 없습니다. 현재 원격 프로젝트(`xzeudnlklftfdlkpegtb`)의
+`/auth/v1/settings`는 다음과 같습니다.
+
+| 항목 | 현재 | 필요 |
+|---|---|---|
+| `external.anonymous_users` | **`false`** | **`true`** — 켜지 않으면 데모 진입 자체가 불가능합니다 |
+| `external.google` | **`false`** | **`true`** (D35-4. Google Cloud OAuth 클라이언트 자격 증명도 외부 설정) |
+
+추가로 D35-2 장치 ③(익명 로그인 IP 레이트 리밋 / 필요 시 CAPTCHA)도 대시보드 설정입니다.
+`GEMINI_API_KEY_DEMO` 발급과 **두 키의 RPD가 서로 독립인지 AI Studio 대시보드에서 실측 확인**하는 것은
+D35-1이 데모 배포의 완료 조건으로 명시한 항목입니다. 독립이 아니면 데모를 켜지 않습니다.
