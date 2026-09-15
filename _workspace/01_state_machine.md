@@ -16,6 +16,12 @@
   평가·코치 몫을 남기고 `reserved − consumed − (평가·코치 몫)`"** 으로 고쳤습니다
   (`02_ai_architecture.md` 8.3.1·8.3.4절). `pro`·`flash`는 휴면 버킷이라 보유할 것이 없습니다.
   **상태 값·전이 목록 자체는 변경 없습니다.** 남길 몫의 수치는 아래 표 각주의 `[결정 필요]` 참조.
+- 2026-09-15 **D35 대응 — 데모 체험(로그인 없는 익명 세션) 도입.**
+  1절 `funding_source`에 **`demo` 추가**(2종 → **3종**, CHECK 전파 필요).
+  2절 전이 표의 `(없음) → created` 재원 분기를 **3분기**로, `configuring → ready` 가드에
+  **데모 분기**(동의는 `demo-1.0.0`, 예약 버킷은 `flash_lite_demo` 17, 문서 대신 스냅샷 판정)를 추가.
+  9절에 enum 변경 1건 추가, 7.5절 크론 워치독에 **익명 계정 TTL 24시간 스윕** 1종 추가.
+  **상태 값 11개·`pause_reason` 5종은 변경 없습니다.**
 
 ---
 
@@ -85,12 +91,25 @@ engineer
 ```
 trial_shared
 byok
+demo
 ```
 
-| 값 | 의미 | 예약 게이트(D27) | 동의(D29) |
-|---|---|---|---|
-| `trial_shared` | 체험 세션. 서비스 공용 키로 진행 | **적용됨** | **필요함** |
-| `byok` | 사용자가 연결한 본인 키로 진행 | 적용되지 않음 | 불필요 |
+| 값 | 의미 | 쓰는 키 | 예약 버킷 | 세션당 예약 | 동의(D29) | 계정 |
+|---|---|---|---|---|---|---|
+| `trial_shared` | 체험 세션. 서비스 공용 키로 진행 | `GEMINI_API_KEY` | `flash_lite` | 34 | **필요함** (`1.0.0`) | 실계정 |
+| `byok` | 사용자가 연결한 본인 키로 진행 | 사용자 키 | **없음**(예약 안 함) | — | 불필요 | 실계정 |
+| `demo` | **2026-09-15 신규(D35).** 로그인 없는 데모 체험 | `GEMINI_API_KEY_DEMO` | **`flash_lite_demo`** | **17** | **필요함** (`demo-1.0.0`) | **익명**(`is_anonymous`) |
+
+> **`demo`는 2026-09-15 신규 값입니다(D35).** CHECK가 `in ('trial_shared','byok','demo')`로 넓어집니다.
+> **`demo`와 `trial_shared`의 예약 버킷은 서로 다른 키 풀을 가리키며 절대 교차하지 않습니다** —
+> `reserve_session_quota()`가 재원↔버킷 짝을 강제하고, 위반하면
+> `quota_bucket_mismatch:<funding_source>` 예외를 던집니다(`02_ai_architecture.md` 8.3.5절).
+> 이것이 **하루 체험 정원 12세션을 데모로부터 지키는 유일한 장치**이므로 라우트 수준의 검사로
+> 대체하지 마세요(D30을 DB 함수에 둔 것과 같은 이유).
+>
+> **데모 세션의 파라미터는 낮게 고정됩니다** — `persona = 'deep_pressure'`,
+> `main_question_budget = 2`, `max_follow_up_depth = 2`, `max_turns = 6`, `max_duration_min = 12`.
+> 전부 기존 CHECK 범위 안이므로 **DDL 변경이 없습니다.** 예약량 17은 이 파라미터에서 유도됩니다.
 
 > `04_data_layer.md`에 **신규 컬럼 + CHECK 제약 추가가 필요합니다.**
 > 이 값이 세션 시작 경로의 분기를 결정하므로(2절), 계약상 상태 값 다음으로 중요한 enum입니다.
@@ -121,18 +140,29 @@ byok
 
 ## 2. 전이 표
 
-> **읽는 법 — 재원 분기(D28).** 세션 시작 경로의 두 전이(`(없음) → created`, `configuring → ready`)에만
+> **읽는 법 — 재원 분기(D28·D35).** 세션 시작 경로의 세 전이(`(없음) → created`,
+> `(없음) → configuring`, `configuring → ready`)에만
 > `funding_source` 분기가 있습니다. 그 이후의 전이는 재원과 무관하게 동일합니다.
-> **예약 반납 부작용은 전부 `funding_source = 'trial_shared'` 세션에만 해당**하며,
+> **예약 반납 부작용은 전부 예약을 가진 세션(`trial_shared` · `demo`)에만 해당**하며,
 > `byok` 세션에는 예약 행 자체가 없으므로 no-op입니다(`02_ai_architecture.md` 8.3절).
+>
+> **재원 3분기(D35, 2026-09-15).** 아래 표에서 **"(체험 세션만)"이라고 적힌 부작용은 전부
+> "예약을 가진 세션만" — 즉 `trial_shared`와 `demo` 둘 다** 로 읽습니다. 다른 점은 **버킷 이름과
+> 예약량뿐**입니다(`flash_lite` 34 / `flash_lite_demo` 17). 반납 공식·`POST_INTERVIEW_HOLD = 6`·
+> 이중 반납 금지 규칙은 **두 재원에 동일하게** 적용됩니다.
+> **데모는 진입 전이가 `(없음) → created`가 아니라 `(없음) → configuring`입니다** — 설정 화면이
+> 없고 직군 선택 즉시 모든 설정이 확정되므로 `created`에 머무를 구간이 존재하지 않습니다.
+> 그리고 **같은 요청 안에서 `configuring → ready`까지 이어서 수행하므로 응답 시점의 상태는
+> 항상 `ready`** 입니다(2절 ※데모).
 
 | 현재 상태 | 다음 상태 | 트리거 | 가드(전제 조건) | 부작용 |
 |---|---|---|---|---|
-| (없음) | `created` | 사용자가 "새 면접 시작" 클릭 | 인증됨 **+ 재원 분기(D28)**: ① 유효한 사용자 키가 연결돼 있으면 `funding_source = 'byok'`로 **무조건 통과**(공용 여력과 무관). ② 아니면 체험 경로 — **체험 미소진** *이고* **여력 사전 조회 통과**(비원자적, `02_ai_architecture.md` 8.3.3절)여야 `funding_source = 'trial_shared'`. 둘 다 아니면 **행을 만들지 않고 503 `capacity_unavailable`** | `interview_sessions` 행 삽입, **`funding_source` 확정 기록(이후 변경 금지)**, `session_events` 기록 |
+| (없음) | `created` | 사용자가 "새 면접 시작" 클릭 (`POST /api/sessions` #3) | **`account_type = 'registered'`인 인증 사용자만**(익명이면 403 — D35) **+ 재원 분기(D28)**: ① 유효한 사용자 키가 연결돼 있으면 `funding_source = 'byok'`로 **무조건 통과**(공용 여력과 무관). ② 아니면 체험 경로 — **체험 미소진** *이고* **여력 사전 조회 통과**(비원자적, `02_ai_architecture.md` 8.3.3절)여야 `funding_source = 'trial_shared'`. 둘 다 아니면 **행을 만들지 않고 503 `capacity_unavailable`** | `interview_sessions` 행 삽입, **`funding_source` 확정 기록(이후 변경 금지)**, `session_events` 기록 |
+| (없음) | `configuring` | **데모 방문자가 `/demo`에서 직군을 고르고 "면접 시작" 클릭** (`POST /api/demo/sessions` #42 — D35) | `NEXT_PUBLIC_DEMO_ENABLED`가 켜져 있고, 호출자가 **익명 사용자**(`account_type = 'demo'`)이며, **`profiles.demo_consumed_at is null`**(아니면 409 `demo_already_consumed` + 기존 세션 id) *이고* **`flash_lite_demo` 여력 사전 조회 통과**(없으면 503 `capacity_unavailable`). **동의 체크박스 선행 필수** | `interview_sessions` 행 삽입, `funding_source = 'demo'` 확정, **`demo_documents`의 직군별 이력서·JD를 `resume_text_snapshot`·`jd_text_snapshot`에 복사**(`*_document_id`는 NULL), 데모 파라미터 고정(1절), `trial_consents`에 `consent_version = 'demo-1.0.0'` 기록, `session_events` 기록. **같은 요청이 곧바로 `configuring → ready` 전이를 이어서 수행합니다**(아래 각주 ※데모) |
 | `created` | `configuring` | 설정 화면에서 첫 입력 저장 | — | 부분 설정 저장 |
 | `created` | `canceled` | 사용자가 설정을 떠나며 폐기 | — | `ended_at` 기록. **행은 유지**(삭제하지 않음). **예약 전량 반납**(체험 세션만) |
 | `configuring` | `configuring` | 설정 항목 변경 | — | 부분 설정 갱신 |
-| `configuring` | `ready` | 사용자가 "면접 준비" 클릭 → 컨텍스트 준비 완료 | 직군·페르소나·모달리티·이력서·JD가 모두 있고 이력서/JD의 `extraction_status = 'succeeded'` **+ 재원별 가드(D28·D29·D27)**: `byok`면 **사용자 키 복호화·유효성 확인 성공**(실패 시 전이하지 않고 키 오류 응답, 세션은 `configuring` 유지). `trial_shared`면 **D29 동의 기록 존재**(없으면 409) *그리고* **일당 여력 예약 성공**(`02_ai_architecture.md` 8.3.3절 — 실패 시 전이하지 않고 503 `capacity_unavailable`, 세션은 `configuring`에 남아 설정 보존) | 이력서·JD 요약 컨텍스트 생성, 오프닝 주질문 1개 생성 후 `questions` 삽입, `question_budget` 확정. `trial_shared`면 `quota_reserved` 이벤트 기록 |
+| `configuring` | `ready` | 사용자가 "면접 준비" 클릭 → 컨텍스트 준비 완료 | 직군·페르소나·모달리티·이력서·JD가 모두 있고 이력서/JD의 `extraction_status = 'succeeded'` — **단 `demo`는 `documents` 행이 없으므로 `resume_text_snapshot`·`jd_text_snapshot` 2개가 채워져 있는지로 판정합니다(D35)** **+ 재원별 가드(D28·D29·D27·D35)**: `demo`면 **`demo-1.0.0` 동의 기록 존재**(없으면 409) *그리고* **`flash_lite_demo` 버킷 17 예약 성공**(실패 시 503 `capacity_unavailable`이고, **데모는 세션 행을 남기지 않고 전체 롤백**합니다 — 보존할 설정 입력이 없기 때문입니다. ※데모 참조). `byok`면 **사용자 키 복호화·유효성 확인 성공**(실패 시 전이하지 않고 키 오류 응답, 세션은 `configuring` 유지). `trial_shared`면 **D29 동의 기록 존재**(없으면 409) *그리고* **일당 여력 예약 성공**(`02_ai_architecture.md` 8.3.3절 — 실패 시 전이하지 않고 503 `capacity_unavailable`, 세션은 `configuring`에 남아 설정 보존) | 이력서·JD 요약 컨텍스트 생성, 오프닝 주질문 1개 생성 후 `questions` 삽입, `question_budget` 확정. **`trial_shared`·`demo`면 `quota_reserved` 이벤트 기록**(버킷 이름이 다릅니다) |
 | `configuring` | `failed` | 이력서 텍스트 추출 실패(스캔 PDF 등) 후 사용자가 재시도 포기 (진입점: `POST .../abandon-preparation`, `05_api_contract.md` #35) | — | `failure_reason = 'document_extraction_failed'` 기록. 사용자에게 텍스트 직접 입력 경로 안내. **예약 전량 반납**(체험 세션만 — 예약이 잡혀 있었다면) |
 | `configuring` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. 첨부 관계 유지. **행은 유지**. **예약 전량 반납**(체험 세션만) |
 | `ready` | `in_progress` | 사용자가 "면접 시작" 클릭 | 음성 모드면 마이크 권한 확인 완료 | `started_at` 기록, 오프닝 질문 발화 |
@@ -163,6 +193,22 @@ byok
 | `failed` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지**. 예약은 `→ failed` 시점에 이미 반납됨(중복 반납 금지) |
 | `abandoned` | `canceled` | 사용자가 폐기 | — | `ended_at` 기록. **행은 유지**. 예약은 `→ abandoned` 시점에 이미 반납됨(중복 반납 금지) |
 | 모든 상태 | (행 삭제) | 사용자가 세션 삭제 / 계정 삭제 | — | DB 행과 Storage 객체 **실제 삭제**(소프트 삭제 아님) |
+
+### ※데모 — 두 전이를 한 요청 안에서 연달아 수행한다 (D35)
+
+`POST /api/demo/sessions`(#42)는 **`(없음) → configuring`과 `configuring → ready`를 한 요청에서
+순서대로** 수행합니다. **두 전이를 합치는 것이 아니라 연달아 수행하는 것**이며,
+가드·부작용은 각각 표에 적힌 그대로입니다(동의 확인 → 예약 17 → 플래너 → 오프닝 질문).
+
+**왜 나누지 않는가.** 데모에는 설정 화면이 없어 `created`·`configuring`에 머무를 구간이
+존재하지 않습니다. 그런데 `06_ui_plan.md` 1절의 `route-for-status`는 `configuring`을
+`/sessions/new?sessionId=…`(설정 화면)로 보내므로, `configuring`인 채로 응답을 돌려주면
+**데모 방문자가 쓰지 않는 설정 화면으로 떨어집니다.** 따라서 응답 시점의 상태는 반드시 **`ready`** 이고,
+클라이언트는 `/sessions/{id}/ready`로 이동합니다.
+
+**예약 실패(503)·동의 누락(409)이면 세션 행을 남기지 않고 전체를 롤백합니다.** 체험 경로는
+설정 입력을 보존하려고 `configuring`에 남겼지만(D27), 데모에는 보존할 입력이 없습니다 —
+남겨 두면 재입장 때 `demo_consumed_at`도 아닌데 쓸모없는 행만 쌓입니다.
 
 ### ※답변 턴 — `in_progress → in_progress`(11행)가 남기는 관측 이벤트
 
@@ -383,7 +429,16 @@ LLM이 막히면 면접 자체가 진행 불가입니다. 이 둘을 한 상태�
 | 4 | 삭제 대기 Storage 객체 정리 | 브리프 7절 실제 삭제 |
 | **5** | **만료 예약 스윕 — `quota_date < today AND status = 'held'` 행을 정리한다** | **D27 신규.** 이게 없으면 어제 잡힌 예약이 원장에 남아 오늘 정원을 갉아먹고, 며칠이면 서비스가 스스로 문을 닫습니다 |
 
-5번은 **체험 세션 예약에만** 해당합니다(BYOK 세션은 예약 행이 없습니다).
+| **6** | **익명 계정 TTL 스윕 — `auth.users.is_anonymous = true AND created_at < now() - interval '24 hours'` 행을 삭제한다** | **D35 신규.** 데모 방문자의 계정과 그 데이터(세션·질문·턴·평가·동의)를 연쇄 삭제합니다. 삭제는 `profiles`의 `on delete cascade`를 타고 내려가며, `ai_quota_reservations`의 `before delete` 트리거가 **원장에 여력을 반납**합니다. 데모는 Storage 객체를 만들지 않으므로 4번과 겹치지 않습니다 |
+
+5번은 **예약을 가진 세션(`trial_shared` · `demo`)에만** 해당합니다(BYOK 세션은 예약 행이 없습니다).
+버킷은 각각 `flash_lite`·`flash_lite_demo`이며 **스윕 조건은 동일**합니다.
+
+6번의 24시간은 **보존 정책(무기한)의 의도된 예외**입니다 — 익명 계정은 복구 수단이 없어 무기한
+보관해도 누구에게도 돌아가지 않으므로, 지우는 쪽이 개인정보 결정과 일관됩니다(D35-2).
+**리포트를 보러 돌아올 시간을 주려고 즉시 삭제하지 않는다**는 것이 이 값의 전부이므로,
+줄이려면 리포트 도달률(지표 2)을 함께 봐야 합니다.
+
 반납 호출이 하나라도 빠지면 여력이 새고, 크론 5번이 그 마지막 안전망입니다 —
 **안전망이지 정상 경로가 아니므로, 여기서 정리되는 행이 꾸준히 나오면 반납 지점이 빠졌다는 신호입니다.**
 
@@ -448,6 +503,16 @@ LLM이 막히면 면접 자체가 진행 불가입니다. 이 둘을 한 상태�
 |---|---|---|---|
 | `interview_sessions.pause_reason` | `byok_key_invalid`, `byok_quota_exhausted` **추가** | 순수 추가. 기존 3개 값의 의미 불변 | `04_data_layer.md`(CHECK), `05_api_contract.md`(오류·응답), `06_ui_plan.md`(재개 패널 문구) |
 | `interview_sessions.funding_source` | **신규 컬럼 + CHECK** `in ('trial_shared','byok')` | 신규. not null, 세션 생성 시 확정, 이후 변경 금지 | `04_data_layer.md`, `05_api_contract.md`, `06_ui_plan.md`, `01_domain_model.md` |
+| `interview_sessions.funding_source` | **`demo` 추가** → `in ('trial_shared','byok','demo')` (2026-09-15 D35) | 순수 추가. 기존 2개 값의 의미 불변 | `04_data_layer.md`(CHECK), `05_api_contract.md`(`Session.fundingSource` 유니온 3종), `06_ui_plan.md`(데모 배지), `01_domain_model.md` |
+| `ai_quota_ledger.model_bucket` · `ai_quota_reservations.model_bucket` | **`flash_lite_demo` 추가** → `in ('flash_lite','flash','pro','flash_lite_demo')` (2026-09-15 D35) | 순수 추가. **처리 순서는 맨 끝에 붙입니다** — `pro → flash → flash_lite → flash_lite_demo`(데드락 회피 근거 유지) | `04_data_layer.md`(CHECK·함수), `02_ai_architecture.md` 8.3절 |
+
+**데모가 추가로 요구하는 것(D35 — 상태 값이 아니므로 여기 모아 둡니다)**
+
+| 대상 | 변경 |
+|---|---|
+| `profiles` | `account_type text not null default 'registered' check (account_type in ('registered','demo'))` + `demo_consumed_at timestamptz` 신설. `handle_new_user`가 `new.is_anonymous`에서 `account_type`을 채우고, `display_name`은 `coalesce(split_part(new.email,'@',1), '데모 방문자')` |
+| `demo_documents` | **신규 테이블**(사용자 데이터 아님 — 우리가 쓴 픽스처). `unique (job_role, doc_type)`, 직군 5 × 2 = **10행 시드**. RLS 켜고 `select`만 `authenticated` 전면 허용, 쓰기 정책 없음 |
+| `reserve_session_quota` | 진입부 가드를 **재원↔버킷 짝 강제**로 확장. 위반 시 `quota_bucket_mismatch:<funding_source>` |
 
 ---
 
@@ -469,6 +534,20 @@ LLM이 막히면 면접 자체가 진행 불가입니다. 이 둘을 한 상태�
   `byok_quota_exhausted`에는 **재개 가능 시각을 표시하지 마세요**(4.5절 규칙 2).
 - **`qa-inspector`** — 1절 코드 블록의 상태 11개와 `04_data_layer.md`의 `status` CHECK가 여전히
   문자 단위로 일치하는지, 그리고 `pause_reason` CHECK가 5개로 갱신되었는지 함께 봐 주세요.
+
+### D35 추가분 (2026-09-15 — 데모 체험)
+
+- **`supabase-engineer`** — 9절 표의 enum 변경 2건(`funding_source` 3종, `model_bucket` 4종),
+  `profiles` 컬럼 2개, 신규 테이블 `demo_documents`, `reserve_session_quota`의 **재원↔버킷 짝 강제**,
+  크론 스윕 6종째. 전체 목록은 `01_product_spec.md` **11절**.
+- **`vercel-platform-engineer`** — 2절에 전이가 **하나 늘었습니다**(`(없음) → configuring`).
+  `POST /api/demo/sessions`는 이 전이와 `configuring → ready`를 **한 요청에서 연달아** 수행하고
+  **응답 상태는 `ready`** 입니다. 실패하면 **행을 남기지 않고 롤백**합니다(체험과 다른 점).
+- **`shadcn-ui-engineer`** — `route-for-status`는 그대로 씁니다. 데모 전용 분기를 넣지 마세요 —
+  응답이 `ready`이므로 기존 매핑이 정확히 동작합니다.
+- **`qa-inspector`** — `funding_source` CHECK가 **3개**, `model_bucket` CHECK가 **4개**로
+  갱신되었는지, 그리고 `demo` 세션이 `flash_lite`(체험 버킷)를 예약하는 경로가 **하나도 없는지**
+  확인해 주세요. 후자가 이 설계 전체의 안전 조건입니다.
 
 ---
 
