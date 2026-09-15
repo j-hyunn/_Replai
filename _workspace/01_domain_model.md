@@ -6,6 +6,7 @@
 
 ## 변경 로그
 - 2026-09-09 최초 작성. 지표 6(꼬리질문 깊이)용 `questions.parent_question_id`, 지표 4·5용 피드백·이의 엔티티, 전사 정정용 `transcript_raw` 포함.
+- 2026-09-15 **D35 반영 — 데모 체험.** `funding_source`에 `demo` 추가(2종 → 3종), `profiles`에 `account_type`·`demo_consumed_at` 추가, **신규 엔티티 `demo_documents`**(사용자 데이터가 아닌 픽스처) 추가. 삭제 규칙에 **익명 계정 24시간 TTL** 추가.
 - 2026-09-11 **QA 2차 G5 대응.** `pause_reason` 5개 값(D27 재원 분류·D28 BYOK 오류 2종 포함), `funding_source`, D27~D30 신설 5개 테이블(`ai_quota_ledger`·`ai_quota_reservations`·`trial_consents`·`user_api_keys`·`account_events`)을 개념 모델에 반영. 내용은 이미 갱신돼 있었고 이 로그 갱신만 누락돼 있었음.
 
 ---
@@ -29,8 +30,10 @@ API 응답        : camelCase    예) sessionId, createdAt, mainQuestionBudget
 ## 2. 엔티티 관계 (카디널리티)
 
 ```
-auth.users 1 ─ 1 profiles
+auth.users 1 ─ 1 profiles            (auth.users.is_anonymous → profiles.account_type)
 profiles   1 ─ N documents
+demo_documents  (소유자 없음 — 우리가 쓴 픽스처. 직군 5 × {resume, job_description} = 10행)
+      └─ 참조가 아니라 **복사**된다 → interview_sessions.resume_text_snapshot / jd_text_snapshot (D6·D35)
 profiles   1 ─ N interview_sessions
 documents  1 ─ N interview_sessions   (resume_document_id / jd_document_id 각각)
 interview_sessions 1 ─ N questions
@@ -47,7 +50,11 @@ evaluation_scores  1 ─ N score_disputes
 ```
 
 모든 테이블은 사용자 데이터를 담으므로 **예외 없이 RLS 활성화**하며, 소유자는
-`profiles.id`(= `auth.users.id`)를 따라 판별합니다. 조인 테이블도 `user_id`를 비정규화해
+`profiles.id`(= `auth.users.id`)를 따라 판별합니다. **데모 방문자도 예외가 아닙니다** —
+익명 인증이 `auth.users`에 `is_anonymous = true`인 진짜 행을 만들므로 `auth.uid()`가 존재하고,
+기존 정책이 한 줄도 바뀌지 않은 채 그대로 적용됩니다(D35). **"로그인 없음"은 "RLS 없음"이 아닙니다.**
+`demo_documents`만 예외적으로 `user_id`가 없는데, 이것은 사용자 데이터가 아니라 우리가 작성한
+픽스처이기 때문입니다 — RLS는 켜되 `select`를 `authenticated`에 전면 허용하고 쓰기 정책은 두지 않습니다. 조인 테이블도 `user_id`를 비정규화해
 정책을 단순하게 유지할지는 `supabase-engineer`가 정합니다.
 
 ---
@@ -60,9 +67,33 @@ evaluation_scores  1 ─ N score_disputes
 | `id` | uuid PK | `auth.users.id`와 동일 |
 | `display_name` | text | 표시 이름 |
 | `default_job_role` | text | 마지막으로 고른 직군. 설정 화면 기본값 |
+| `trial_consumed_at` | timestamptz | 체험 1회 소진 시각 (D28). NULL이면 미소진 |
+| `account_type` | text | `registered` \| `demo` — **D35 신규.** 가입 트리거가 `auth.users.is_anonymous`에서 채운다 |
+| `demo_consumed_at` | timestamptz | **D35 신규.** 데모 1회 소진 시각. `trial_consumed_at`과 **별개 컬럼**이다 — 의미가 다르고, 한 계정이 둘 다 갖는 일은 없다 |
 | `created_at` / `updated_at` | timestamptz | |
 
 계정 삭제 시 이 행과 하위 전부, Storage 객체까지 **실제 삭제**합니다(소프트 삭제 아님).
+
+### 3.1-a `demo_documents` — 데모용 시드 이력서·JD (D35, 사용자 데이터 아님)
+
+| 컬럼 | 타입 | 설명 |
+|---|---|---|
+| `id` | uuid PK | |
+| `job_role` | text | `pm` \| `pd` \| `security` \| `ai` \| `engineer` |
+| `doc_type` | text | `resume` \| `job_description` |
+| `title` | text | 화면에 보이는 이름 (예: "백엔드 개발자 · 7년차") |
+| `body_text` | text | 본문. 데모 세션 생성 시 **스냅샷으로 복사**된다 |
+| `seed_version` | text | 문안을 고치면 올린다 |
+| `created_at` | timestamptz | |
+
+`unique (job_role, doc_type)` — 직군당 이력서 1 + JD 1, **총 10행**을 마이그레이션으로 시드합니다.
+
+- **`user_id`가 없습니다.** 우리가 쓴 픽스처이지 사용자 데이터가 아닙니다.
+- **데모 세션은 이 행을 참조하지 않고 복사합니다.** `interview_sessions.resume_text_snapshot` ·
+  `jd_text_snapshot`에 텍스트를 넣고 `resume_document_id` · `jd_document_id`는 **NULL**로 둡니다.
+  이것은 예외 처리가 아니라 **D6(문서는 스냅샷) 설계를 그대로 쓰는 것**이며, 그 덕에 면접관·플래너·
+  평가자는 자기가 데모를 돌고 있다는 사실을 **알 필요가 없습니다**(프롬프트·계약 변경 없음).
+- 시드 문안의 인물·회사는 **전부 가공**입니다. 실재 인물의 이력서를 넣지 않습니다.
 
 ### 3.2 `documents` — 이력서·JD
 | 컬럼 | 타입 | 설명 |
@@ -97,7 +128,7 @@ evaluation_scores  1 ─ N score_disputes
 | `max_turns` | int | 20 / 18 |
 | `max_duration_min` | int | 30 |
 | `pause_reason` | text NULL | `user_requested` \| `rate_limited` \| `connection_lost` \| `byok_key_invalid` \| `byok_quota_exhausted` (5종, D28) |
-| `funding_source` | text | `trial_shared` \| `byok` — 이 세션이 누구의 토큰을 쓰는가 (D28) |
+| `funding_source` | text | `trial_shared` \| `byok` \| `demo` — 이 세션이 누구의 토큰을 쓰는가 (D28, `demo`는 D35). 세션 생성 시 확정되고 이후 변경 금지 |
 | `resumable_after` | timestamptz NULL | `pause_reason = 'rate_limited'`일 때 재개 가능 시각. **`byok_quota_exhausted`에는 채우지 않는다** — 사용자 키의 재개 시각은 우리가 모르는 정보다 |
 | `failure_reason` | text NULL | `failed`일 때만 |
 | `context_summary` | text NULL | 이력서·JD를 압축한 면접관 컨텍스트 |
@@ -232,11 +263,15 @@ evaluation_scores  1 ─ N score_disputes
 | `ai_quota_reservations` | 세션이 잡아 둔 예약 | 세션 × 버킷. 체험 사용자는 **동시 1건**(D30) |
 | `account_events` | 키 연결·교체·해제 감사 | `session_events`를 오염시키지 않기 위해 분리 |
 
-**모델링상 중요한 성질 두 가지**
+**모델링상 중요한 성질 세 가지**
 
 1. **`funding_source`가 세션의 성격을 가른다.** `byok` 세션은 예약 원장에 행을 만들지 않는다 —
    자기 토큰을 쓰므로 공용 여력과 무관하다. 이 불변식은 DB 함수가 강제한다.
-2. **키는 사용자에 붙고 예약은 세션에 붙는다.** 사용자당 키는 하나(교체는 전체 대체),
+2. **데모는 새 테이블이 아니라 새 `funding_source` 값이다 (D35).** 면접 루프·평가 워커·상태 머신을
+   두 벌로 만들지 않기 위해서다. 대가는 **모든 지표 집계 쿼리가 `funding_source <> 'demo'`를
+   반드시 포함해야 한다**는 것이며(`01_product_spec.md` 6.6.4절), 이 조건이 빠지면
+   북극성 지표(재시도율)가 구조적으로 깎인다 — 익명 계정은 7일 뒤 존재하지 않는다.
+3. **키는 사용자에 붙고 예약은 세션에 붙는다.** 사용자당 키는 하나(교체는 전체 대체),
    세션당 예약은 버킷별로 하나다.
 
 ---
@@ -249,6 +284,13 @@ evaluation_scores  1 ─ N score_disputes
 - 문서 삭제: 참조 중인 세션이 있으면 경고 후, 진행자가 확인하면 `documents` 행과 Storage 객체를 삭제하고
   참조 컬럼은 NULL로 둡니다(과거 리포트는 남되 원본 문서는 사라짐).
 - 계정 삭제: `profiles` 이하 전부와 Storage 사용자 폴더 전체를 삭제하고 `auth.users`를 제거합니다.
+- **익명(데모) 계정: 생성 24시간 뒤 크론이 `auth.users` 행을 삭제하고, 연쇄로 `profiles` 이하 전부가
+  사라집니다 (D35).** 보존 정책(무기한)의 **의도된 예외**입니다 — 익명 계정은 복구 수단이 없어
+  무기한 보관해도 누구에게도 돌아가지 않으므로, 지우는 쪽이 개인정보 결정과 일관됩니다.
+  데모는 Storage 객체를 만들지 않으므로 삭제 경로가 DB 연쇄 하나로 끝납니다.
+  `ai_quota_reservations`의 `before delete` 트리거가 원장에 여력을 반납합니다.
+- `demo_documents`는 **어떤 삭제 경로에도 포함되지 않습니다.** 사용자 데이터가 아니므로
+  계정 삭제·세션 삭제와 무관하며, 문안 변경은 마이그레이션으로만 합니다.
 - 어디에도 `deleted_at` 소프트 삭제 컬럼을 두지 않습니다(브리프 7절 확정 사항).
 
 ---

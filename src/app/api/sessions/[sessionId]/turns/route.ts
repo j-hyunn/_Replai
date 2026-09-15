@@ -15,8 +15,8 @@ import {
 } from "@/lib/ai/meta-stream";
 import { runStream } from "@/lib/ai/provider";
 import { ApiError } from "@/lib/api/errors";
-import { fail } from "@/lib/api/respond";
-import { loadOwnedSession } from "@/lib/api/route";
+import { compound, fail } from "@/lib/api/respond";
+import { handle, loadOwnedSession } from "@/lib/api/route";
 import {
   sessionStatusOf,
   type Axis,
@@ -29,6 +29,7 @@ import { completeSession, failSession, fundingSourceOf } from "@/lib/session/lif
 import { MODALITIES, PERSONA_BUDGET, shouldComplete, type Persona } from "@/lib/session/persona";
 import type { SessionStatus } from "@/lib/session/status";
 import { applyTransition, recordObservationEvent, type Admin } from "@/lib/session/store";
+import { loadTranscript } from "@/lib/session/transcript";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
@@ -108,6 +109,43 @@ type SessionNotice = {
   level: number | null;
   messageKo: string;
 };
+
+/**
+ * #10 `GET /api/sessions/[sessionId]/turns` — **재동기화**입니다 (계약 5.5절).
+ *
+ * SSE 재개(resume)를 지원하지 않으므로, 스트림이 끊긴 클라이언트는 #9를 **재요청하지 않고**
+ * 이 경로로 복구합니다. 이유는 셋입니다 — 부분 발화를 이어 붙이려면 서버가 호출 간 상태를
+ * 들고 있어야 하고, 다시 호출하면 무료 티어 쿼터를 두 번 쓰며, **확정분은 이미 `turns`에
+ * 저장돼 있기 때문**입니다(M7·5.4절).
+ *
+ * **LLM을 호출하지 않습니다.** "다시 듣기"도 이 응답의 텍스트를 TTS에 다시 넣을 뿐입니다.
+ * 이 응답에 면접관 발화가 없으면(=0자 확정) 그때만 같은 `answerSeq`로 #9를 재시도합니다.
+ */
+export function GET(
+  request: Request,
+  context: RouteContext<"/api/sessions/[sessionId]/turns">,
+) {
+  return handle(async () => {
+    const { sessionId } = await context.params;
+    const { session, supabase } = await loadOwnedSession(sessionId);
+
+    const raw = new URL(request.url).searchParams.get("afterSeq");
+    const afterSeq = raw === null ? undefined : readAfterSeq(raw);
+
+    return compound(await loadTranscript(supabase, session.id, { afterSeq }));
+  });
+}
+
+/** 음수·소수·문자는 400입니다. 조용히 0으로 떨어뜨리면 전체를 다시 그려 화면이 중복됩니다. */
+function readAfterSeq(raw: string): number {
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new ApiError("validation_failed", "요청 내용을 확인해 주세요.", {
+      details: { fields: { afterSeq: "0 이상의 정수여야 합니다." } },
+    });
+  }
+  return parsed;
+}
 
 export async function POST(
   request: Request,
@@ -226,23 +264,43 @@ async function prepareTurn(request: Request, sessionId: string): Promise<Prepare
 }
 
 /**
- * 체험 소진 기록은 **동의 시점이 아닙니다.** 후보가 **첫 주질문에 답한 턴을 저장하는 것과 같은
- * 경로에서** `where trial_consumed_at is null`로 기록합니다 — 준비만 하고 그만둔 세션은
- * 체험을 소진하지 않습니다(계약 4.9.2절).
+ * 체험·데모 소진 기록은 **동의 시점이 아닙니다.** 후보가 **첫 주질문에 답한 턴을 저장하는 것과
+ * 같은 경로에서** `where <컬럼> is null`로 기록합니다 — 준비만 하고 그만둔 세션은 소진하지
+ * 않습니다(계약 4.9.2절).
+ *
+ * **데모(`demo_consumed_at`)도 정확히 같은 규칙, 같은 위치입니다**(D35-2). 컬럼이 둘로 나뉜
+ * 이유는 의미가 다르고 한 계정이 둘 다 갖는 일이 없기 때문이며, **기록 시점은 하나입니다** —
+ * 시점을 나누면 한쪽이 빠져도 아무도 알아채지 못합니다.
  */
 async function consumeTrialIfFirstMainAnswer(
   admin: Admin,
   session: SessionRow,
   question: QuestionRow,
 ): Promise<void> {
-  if (fundingSourceOf(session) !== "trial_shared") return;
   if (question.question_kind !== "main") return;
 
-  await admin
-    .from("profiles")
-    .update({ trial_consumed_at: new Date().toISOString() })
-    .eq("id", session.user_id)
-    .is("trial_consumed_at", null);
+  const fundingSource = fundingSourceOf(session);
+  const now = new Date().toISOString();
+
+  // `byok`는 소진 개념이 없습니다 — 사용자 키는 횟수를 세지 않습니다.
+  // **두 분기를 계산된 키 하나로 합치지 않습니다** — 컬럼 이름이 문자열이 되면 오타가
+  // 타입 검사를 통과해 "소진이 기록되지 않는" 조용한 버그가 됩니다.
+  if (fundingSource === "trial_shared") {
+    await admin
+      .from("profiles")
+      .update({ trial_consumed_at: now })
+      .eq("id", session.user_id)
+      .is("trial_consumed_at", null);
+    return;
+  }
+
+  if (fundingSource === "demo") {
+    await admin
+      .from("profiles")
+      .update({ demo_consumed_at: now })
+      .eq("id", session.user_id)
+      .is("demo_consumed_at", null);
+  }
 }
 
 function buildGuards(

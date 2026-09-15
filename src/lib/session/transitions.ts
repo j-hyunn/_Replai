@@ -40,6 +40,11 @@ export type TransitionRow = {
 
 export const SESSION_TRANSITIONS: readonly TransitionRow[] = [
   { row: 1, from: null, to: "created", label: '사용자가 "새 면접 시작" 클릭', handler: "#3", mvp: true },
+  // D35 신규 — 데모 진입. 전이 표에서 1행 바로 아래에 추가된 행이라 번호를 `1.1`로 둡니다
+  // (4.6절 전수 대응 표의 1~35 번호를 밀지 않기 위한 것입니다).
+  // **데모에는 `created` 구간이 없습니다** — 직군 선택 즉시 모든 설정이 확정되므로
+  // `(없음) → configuring`으로 바로 들어오고, 같은 요청이 곧바로 5행을 이어서 밟습니다.
+  { row: 1.1, from: null, to: "configuring", label: '데모 방문자가 "면접 시작" 클릭', handler: "#42", mvp: true },
   { row: 2, from: "created", to: "configuring", label: "설정 화면에서 첫 입력 저장", handler: "#5", mvp: true },
   { row: 3, from: "created", to: "canceled", label: "사용자가 설정을 떠나며 폐기", handler: "#33", mvp: true },
   { row: 4, from: "configuring", to: "configuring", label: "설정 항목 변경", handler: "#5", mvp: true },

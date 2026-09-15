@@ -20,6 +20,14 @@ const serverEnvSchema = z.object({
   AI_PROVIDER: z.enum(["google", "anthropic"]).default("google"),
   GOOGLE_AI_API_KEY: z.string().min(1).optional(),
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
+  /**
+   * 데모 전용 키 (D35-1) — **운영 공용 키와 다른 프로젝트에서 발급한 두 번째 무료 키**입니다.
+   * `NEXT_PUBLIC_` 금지. 없으면 데모 라우트가 503 `provider_unavailable`로 거절합니다
+   * (아직 발급 전일 수 있으므로 `optional`이지만, 없는 채로 데모를 켜면 데모만 실패합니다).
+   * **이 키를 `GOOGLE_AI_API_KEY`와 같은 값으로 두지 마세요** — 같은 프로젝트의 RPD를
+   * 두 원장 행으로 쪼개는 순간 원장이 거짓말을 시작하고 체험 정원 12세션이 깨집니다.
+   */
+  GEMINI_API_KEY_DEMO: z.string().min(1).optional(),
 
   // ── 역할별 모델 ID 오버라이드 (배포 없이 모델을 내리기 위한 레버) ────────
   AI_MODEL_INTERVIEWER: z.string().optional(),
@@ -56,6 +64,24 @@ const serverEnvSchema = z.object({
   AI_RESERVE_FLASH_LITE_PER_SESSION: z.coerce.number().int().nonnegative().default(34),
   AI_RESERVE_FLASH_PER_SESSION: z.coerce.number().int().nonnegative().default(0),
   AI_RESERVE_PRO_PER_SESSION: z.coerce.number().int().nonnegative().default(0),
+
+  // ── 데모 버킷 (D35-1) ───────────────────────────────────────────────────
+  /**
+   * 데모 세션당 예약량. 17의 내역은 D35-1 표에 있습니다(면접관 8 + 요약 1 + 플래너 2 +
+   * 평가 4 + 코치 2). **체험의 34와 다른 값이며 같은 변수를 공유하지 않습니다.**
+   */
+  AI_RESERVE_FLASH_LITE_PER_DEMO: z.coerce.number().int().nonnegative().default(17),
+  /**
+   * 하루 데모 정원. **원장 `limit_calls`는 이 값 × 세션당 예약량으로 계산합니다**(= 170).
+   * 봇이 익명 계정을 무한히 만들어도 데모가 넘을 수 없는 **구조적 상한**이며,
+   * 이것이 체험 정원 12세션을 지키는 본질적 방어입니다(D35-2 장치 ①).
+   */
+  AI_DEMO_DAILY_SESSIONS: z.coerce.number().int().nonnegative().default(10),
+  /**
+   * 데모 키의 실측 RPD. **미설정이 정상입니다** — 데모 한도는 위 두 값에서 계산되므로
+   * 게이트가 fail-open으로 떨어지지 않습니다. 설정하면 둘 중 **작은 쪽**이 한도가 됩니다.
+   */
+  AI_RPD_LIMIT_FLASH_LITE_DEMO: z.coerce.number().int().positive().optional(),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;

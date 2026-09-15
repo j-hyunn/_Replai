@@ -9,7 +9,7 @@ import { handle, readJson, requireJobSecret } from "@/lib/api/route";
 import { sessionStatusOf, type SessionRow } from "@/lib/api/serialize";
 import { publicEnv } from "@/lib/env.public";
 import { serverEnv } from "@/lib/env.server";
-import { failSession, settleEvaluatedSession } from "@/lib/session/lifecycle";
+import { failSession, settleCoachRetry, settleEvaluatedSession } from "@/lib/session/lifecycle";
 import { applyTransition, type Admin } from "@/lib/session/store";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -100,7 +100,12 @@ export function POST(request: Request) {
     // 세션을 여기서 다시 집습니다. `enqueueEvaluation`을 부르지 않으므로 `evaluations` 행도
     // `attempt_count`도 그대로입니다(6.2절 주의 문단).
     session = await resumeEvaluating(session, admin);
-    if (sessionStatusOf(session) !== "evaluating") {
+
+    // **`coach_only`는 `evaluated` 세션에서 들어옵니다** (#18 `coach/retry`, 계약 4절 #18 —
+    // "**없음**(`evaluated` 유지)"). 이 경로를 `evaluating`만 통과시키면 코치 재시도가 매번
+    // 고아 처리로 빠져 아무 일도 일어나지 않습니다.
+    const expectedStatus = body.stage === "coach_only" ? "evaluated" : "evaluating";
+    if (sessionStatusOf(session) !== expectedStatus) {
       // QA R11 — 선점 UPDATE가 `started_at`을 이미 찍었으므로 그냥 빠지면 `evaluations` 행이
       // `running`으로 남습니다. 세션이 이미 종료 상태(예: 크론이 먼저 `failed`로 내림)라면
       // 워치독 3(`evaluating`만)도 4(`completed`만)도 이 행을 훑지 않아 정리할 주체가
@@ -160,6 +165,13 @@ export function POST(request: Request) {
         sessionId: session.id,
         evaluationId: body.evaluationId,
       });
+      return ok();
+    }
+
+    if (body.stage === "coach_only") {
+      // 세션은 이미 `evaluated`입니다 — 전이 표에 `evaluated → evaluated`가 없으므로 정산
+      // **전이**를 부르면 409입니다. #18이 다시 잡은 `flash_lite` 2만 반납합니다.
+      await settleCoachRetry(session, admin);
       return ok();
     }
 

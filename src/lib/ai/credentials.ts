@@ -2,7 +2,7 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { ROLE_BUCKET, type AgentRole, type ModelBucket } from "@/lib/ai/roles";
+import { bucketFor, type AgentRole, type ModelBucket } from "@/lib/ai/roles";
 import { ApiError } from "@/lib/api/errors";
 import { serverEnv } from "@/lib/env.server";
 import type { FundingSource } from "@/lib/session/status";
@@ -110,7 +110,8 @@ export async function resolveCallCredentials(
   }
 
   const fundingSource = session.funding_source as FundingSource;
-  const base = { sessionId, role, bucket: ROLE_BUCKET[role], fundingSource };
+  // **버킷은 역할만으로 정해지지 않습니다** — 데모 세션은 전 역할이 `flash_lite_demo`입니다(D35-1).
+  const base = { sessionId, role, bucket: bucketFor(role, fundingSource), fundingSource };
 
   if (fundingSource === "byok") {
     const { data: key, error: keyError } = await admin.rpc("get_user_api_key", {
@@ -132,12 +133,63 @@ export async function resolveCallCredentials(
     return createCallContext(base, key);
   }
 
+  // 데모는 **다른 프로젝트의 두 번째 무료 키**를 씁니다 (D35-1).
+  // **운영 공용 키로 폴백하지 않습니다** — 폴백하면 데모가 체험 세션과 같은 RPD를 먹고,
+  // 원장의 두 행(`flash_lite` 425 / `flash_lite_demo` 170)이 합쳐서 실제 한도를 넘습니다.
+  // 그 순간 원장이 거짓말을 시작하고 하루 12세션 정원이 조용히 깨집니다.
+  if (fundingSource === "demo") {
+    const demoKey = serverEnv().GEMINI_API_KEY_DEMO;
+    if (!demoKey) {
+      throw new ApiError("provider_unavailable", "지금은 데모 면접을 진행할 수 없습니다.", {
+        cause: "GEMINI_API_KEY_DEMO_missing",
+      });
+    }
+    return createCallContext(base, demoKey);
+  }
+
   const sharedKey = sharedProviderKey();
   if (!sharedKey) {
     throw new ApiError("provider_unavailable", "지금은 면접을 진행할 수 없습니다.");
   }
 
   return createCallContext(base, sharedKey);
+}
+
+/**
+ * 데모 키가 준비되어 있는가 — 데모 진입 라우트(#42)가 **AI를 부르기 전에** 확인합니다.
+ *
+ * 키 없이 진입시키면 세션 행과 예약이 만들어진 뒤 플래너에서 터집니다. 그 상태의 롤백은
+ * 가능하지만, 원인이 "환경변수 누락"임을 로그에서만 알 수 있게 됩니다.
+ */
+export function isDemoProviderConfigured(): boolean {
+  return serverEnv().GEMINI_API_KEY_DEMO !== undefined;
+}
+
+/**
+ * #40 `POST /api/account/api-key/verify` 전용 — 저장된 사용자 키의 평문을 꺼냅니다 (D28).
+ *
+ * **이 함수가 여기 있는 이유가 곧 이 파일의 규칙입니다.** `get_user_api_key()`를 부르는 코드는
+ * 이 파일 하나여야 하고(05_deploy.md CI 검사 3), 재검증 라우트도 예외가 아닙니다. 라우트가
+ * 직접 RPC를 부르면 복호화 지점이 둘이 되고, CI가 그것을 잡습니다.
+ *
+ * 돌려주는 값은 **라우트가 프로바이더 검증 호출에 한 번 쓰고 버리는 평문**입니다.
+ * 로그·응답·예외 어디에도 싣지 마세요 — 화면에 쓸 수 있는 값은 `keyLast4` 하나뿐입니다.
+ *
+ * 키가 없거나 `status='invalid'`면 함수가 아무 행도 돌려주지 않으므로 `null`입니다.
+ * **여기서 공용 키로 대체하지 않습니다** — 재검증의 대상은 사용자 키뿐입니다.
+ */
+export async function readStoredUserKey(
+  userId: string,
+  admin: Admin = createAdminClient(),
+): Promise<string | null> {
+  const { data, error } = await admin.rpc("get_user_api_key", { p_user_id: userId });
+
+  if (error) {
+    // 원시 오류를 그대로 올리지 않습니다 — 메시지에 인자가 섞여 들어오는 경로가 있습니다.
+    throw new ApiError("internal_error", "키를 확인하지 못했습니다.", { cause: error.message });
+  }
+
+  return data ?? null;
 }
 
 /** 공용 키는 배포 단위 상수입니다 — 사용자 키(Vault)와 그릇 자체가 다릅니다(05_deploy.md 1.4절). */

@@ -100,11 +100,18 @@ export async function recordSessionCreated(
   sessionId: string,
   detail: Json,
   admin: Admin = createAdminClient(),
+  /**
+   * 생성 직후의 상태. 기본은 `created`(1행)이고, **데모만 `configuring`(1.1행)** 입니다 —
+   * 데모에는 설정 화면이 없어 `created`에 머무를 구간이 존재하지 않습니다(D35).
+   */
+  toStatus: Extract<SessionStatus, "created" | "configuring"> = "created",
 ): Promise<void> {
+  assertTransition(null, toStatus);
+
   await insertEvent(admin, {
     session_id: sessionId,
     from_status: null,
-    to_status: "created",
+    to_status: toStatus,
     trigger: "user_action",
     event_name: "session_created",
     detail,

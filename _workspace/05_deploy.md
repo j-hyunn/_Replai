@@ -5,6 +5,17 @@
 > 입력: `04_data_layer.md` 6·7·8·12절, `02_ai_architecture.md` 4·8절, `00_input/constraints.md`
 
 ## 변경 로그
+- 2026-09-15 **D35 반영 — Google OAuth + 데모 체험 (`vercel-platform-engineer`, 구현 완료).**
+  - **공개 변수 3 → 4** (`NEXT_PUBLIC_DEMO_ENABLED`). **키가 아니라 불리언**이라 접두사가 허용됩니다.
+  - **서버 전용 4종 추가** — `GEMINI_API_KEY_DEMO`(**운영 키와 다른 프로젝트의 키여야 합니다**),
+    `AI_RESERVE_FLASH_LITE_PER_DEMO=17`, `AI_DEMO_DAILY_SESSIONS=10`, `AI_RPD_LIMIT_FLASH_LITE_DEMO`(선택).
+  - **데모 버킷은 fail-open으로 떨어지지 않습니다** — 한도가 RPD가 아니라 정원(10 × 17 = 170)에서
+    계산되기 때문입니다. 체험 버킷과 다른 점이며, 이것이 데모 남용의 구조적 상한입니다.
+  - **크론 워치독 5종 → 6종**(익명 계정 24시간 TTL 스윕). 함수 호출 한 번이 전부입니다.
+  - **`vercel.json`에 `src/app/api/demo/sessions/route.ts` 120초 추가** — 이 라우트만 플래너를
+    기다립니다(응답 상태가 반드시 `ready`여야 하기 때문).
+  - **배포 전 완료 조건 3가지**(1.1절 인용) — 두 키의 RPD 독립 실측, 익명 로그인 활성화,
+    익명 로그인 레이트 리밋. **하나라도 미충족이면 `NEXT_PUBLIC_DEMO_ENABLED`를 켜지 않습니다.**
 - 2026-09-09 최초 작성. 환경변수 16종, 공개/비공개 구분, 크론 1종, 무료 플랜 `[확인 필요]` 자리 확보.
 - 2026-09-10 (2차) **D27·D28·D29 반영.** 기존 절만 고쳤습니다.
   - **D27** — 예약 게이트 환경변수 **9종 추가**(1.2절, 전부 서버 전용). **한도 3종 미설정 시 fail-open**이 확정 동작이며,
@@ -50,10 +61,19 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
 |---|---|---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | 프로젝트 URL | 브라우저 Supabase 클라이언트, Realtime, Storage 직업로드 | 공개 엔드포인트입니다 |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | anon 키 | 위와 동일 | **RLS가 전제입니다.** **17개** 테이블 전부 RLS가 켜져 있고 정책이 소유자만 허용하므로, 이 키만으로는 남의 데이터에 닿을 수 없습니다. RLS가 하나라도 꺼지면 이 키가 곧 전체 데이터 유출 경로가 됩니다. **2026-09-10 신규 5개 중 `ai_quota_ledger`·`ai_quota_reservations`·`user_api_keys`·`account_events` 4개는 RLS 켜고 정책 0개**(`service_role` 전용)이고, `trial_consents`만 본인 행 `select` 정책을 갖습니다 |
-| `NEXT_PUBLIC_SITE_URL` | 배포 URL | 절대 URL 생성(리다이렉트·메타데이터) | 공개 정보 |
+| `NEXT_PUBLIC_SITE_URL` | 배포 URL | 절대 URL 생성(리다이렉트·메타데이터·OAuth `redirectTo`) | 공개 정보 |
+| **`NEXT_PUBLIC_DEMO_ENABLED`** ★D35 | `"true"` \| 그 외(=꺼짐). **기본 꺼짐** | 데모 체험 잠금장치. 꺼져 있으면 `/login`에 데모 버튼이 렌더되지 않고 `/demo`·`#42`·`#43`이 **404** | **키가 아니라 불리언**입니다. 데모 키 자체(`GEMINI_API_KEY_DEMO`)는 서버 전용이며 브라우저에 닿지 않습니다 |
 
-**공개 변수는 이 3개가 전부입니다.** 새 `NEXT_PUBLIC_` 변수를 추가할 때는
+**공개 변수는 이 4개가 전부입니다.** 새 `NEXT_PUBLIC_` 변수를 추가할 때는
 "이 값이 배포된 JS에 평문으로 박혀도 되는가"를 먼저 답해야 합니다.
+
+> **`NEXT_PUBLIC_DEMO_ENABLED`는 편의 플래그가 아니라 잠금장치입니다** (D35-1).
+> 켜기 전 완료 조건 3가지 — ① `GEMINI_API_KEY_DEMO`가 **운영 키와 다른 프로젝트**의 키이고
+> AI Studio 레이트 리밋 대시보드에서 **두 키의 RPD가 서로 독립임을 실측 확인**했다(독립이 아니면
+> **켜지 않습니다** — 그 경우 체험 정원 12세션을 지킬 방법이 없습니다), ② Supabase Auth에서
+> **익명 로그인이 켜져 있다**, ③ 같은 대시보드에서 **익명 로그인 IP 레이트 리밋(필요 시 CAPTCHA)** 이
+> 켜져 있다. ②·③은 대시보드 설정이라 이 코드 범위 밖입니다(`04_data_layer.md` 15.10절).
+> 데모를 끄는 것도 이 변수 하나입니다 — 전환이 0에 수렴하면 끕니다.
 
 ### 1.2 서버 전용 (**절대 `NEXT_PUBLIC_` 금지**)
 
@@ -62,6 +82,7 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
 | `SUPABASE_SERVICE_ROLE_KEY` | RLS 우회 쓰기 | `src/lib/supabase/admin.ts` (첫 줄 `import 'server-only'`) | **RLS 전면 무력화. 전 사용자 데이터 읽기·쓰기·삭제 가능** |
 | `GOOGLE_AI_API_KEY` | Google AI Studio (플래너·면접관·요약·평가·코치 전부. D11 단독 프로바이더) | `src/lib/ai/providers/google.ts` | 무료 티어 쿼터 도난, 과금 위험 |
 | `ANTHROPIC_API_KEY` | 예산이 열릴 때의 전환용. **MVP에서는 설정하지 않습니다** | `src/lib/ai/providers/anthropic.ts`(껍데기) | 종량 과금 도난 |
+| **`GEMINI_API_KEY_DEMO`** ★D35 | **데모 전용 키.** `funding_source='demo'` 세션의 5개 역할 전부가 이 키를 씁니다. 없으면 데모 라우트가 **503 `provider_unavailable`** (체험은 영향 없음). **⚠️ `GOOGLE_AI_API_KEY`와 같은 값을 넣지 마세요** — 무료 티어 RPD는 (프로젝트 × 모델)마다 걸리므로 같은 키를 두 원장 행으로 쪼개면 `limit_calls` 합이 실제 한도를 넘어 **원장이 거짓말을 시작합니다**(D27이 없애려던 상황). 반드시 **다른 AI Studio 프로젝트**의 두 번째 무료 키 | `src/lib/ai/credentials.ts` (**복호화·키 선택 지점 하나**) | 데모 쿼터 도난. 체험 정원은 버킷이 달라 영향받지 않습니다 |
 | `JOB_SECRET` | 내부 워커 라우트(`/api/internal/**`) 인증. **라우트는 2개뿐입니다 — `jobs/plan` · `jobs/evaluate`**(D31) | 워커를 띄우는 `waitUntil(fetch)`의 `Authorization` 헤더, 워커 라우트의 검사 | 누구나 평가 워커를 무한 호출 → 무료 티어 쿼터 소진 |
 | `CRON_SECRET` | 크론 라우트(`/api/cron/**`) 인증 | `Authorization: Bearer ${CRON_SECRET}` 검사 | 워치독 임의 실행. 세션이 강제 종료될 수 있음 |
 | `AI_MODEL_INTERVIEWER` | 역할별 모델 ID 오버라이드. **D34 이후 5개 역할 기본값은 전부 `gemini-3.1-flash-lite`** (`02_ai_architecture.md` 4.2.1절) | `src/lib/ai/roles.ts` | 없음(비밀이 아님). 단 서버 전용으로 둡니다 |
@@ -81,6 +102,9 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
 | **`AI_RESERVE_FLASH_LITE_PER_SESSION`** | 세션당 예약량. 기본 **`34`** (8.3.1절 — **D34, 초안 26에서 상향**). 정상 27회 + 재시도 여유 7회 | 〃 | 없음 |
 | **`AI_RESERVE_FLASH_PER_SESSION`** | 〃 기본 **`0`** — **휴면 버킷**(D34, 초안 4 → 0) | 〃 | 없음 |
 | **`AI_RESERVE_PRO_PER_SESSION`** | 〃 기본 **`0`** — **휴면 버킷**(D34, 초안 3 → 0) | 〃 | 없음 |
+| **`AI_RESERVE_FLASH_LITE_PER_DEMO`** ★D35 | **데모** 세션당 예약량. 기본 **`17`**(면접관 8 + 요약 1 + 플래너 2 + 평가 4 + 코치 2). 데모 파라미터(주질문 2 / 깊이 2 / 최대 6턴 / 12분)에서 유도된 값이라 **한쪽만 고치면 원장과 실제 호출 수가 어긋납니다** | `src/lib/quota/limits.ts` | 없음 |
+| **`AI_DEMO_DAILY_SESSIONS`** ★D35 | 하루 데모 정원. 기본 **`10`**. 원장 `limit_calls = 10 × 17 = 170`. **익명 계정을 무한히 만들어도 최대 10세션이고 체험 12세션은 어떤 경우에도 줄지 않습니다** — 데모 남용의 **구조적 상한**입니다. 정원을 늘리려면 이 값만 올립니다(`flash_lite` 버킷은 그때도 건드리지 않습니다) | 〃 | 없음. 단 정원이 드러나므로 서버 전용 |
+| **`AI_RPD_LIMIT_FLASH_LITE_DEMO`** ★D35 | 데모 키의 실측 RPD. **비워 두는 것이 정상입니다** — 데모 한도는 위 두 값에서 계산되므로 미설정이어도 **fail-open으로 떨어지지 않습니다**(체험 버킷과 다른 점). 값을 넣으면 유효한도와 정원 중 **작은 쪽**이 이깁니다 | 〃 | 〃 |
 
 **예약 게이트 환경변수 9종은 전부 서버 전용입니다 — `NEXT_PUBLIC_` 금지.**
 한도 수치 자체는 비밀이 아니지만, **하루 체험 정원이 그대로 계산되는 값**이고 그 숫자가 브라우저에
@@ -210,6 +234,7 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
     "src/app/api/sessions/[sessionId]/turns/route.ts":  { "maxDuration": 90 },
     "src/app/api/documents/[documentId]/extract/route.ts": { "maxDuration": 120 },
     "src/app/api/internal/jobs/plan/route.ts":          { "maxDuration": 120 },
+    "src/app/api/demo/sessions/route.ts":               { "maxDuration": 120 },  // ★D35 플래너를 기다립니다
     "src/app/api/internal/jobs/evaluate/route.ts":      { "maxDuration": 240 },
     "src/app/api/cron/daily/route.ts":                  { "maxDuration": 240 },
     "src/app/api/account/route.ts":                     { "maxDuration": 120 },
@@ -492,7 +517,7 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
 
 ---
 
-## 5. 크론 라우트 `GET /api/cron/daily`가 하는 일 (**5가지**, 순서 고정, 전부 멱등)
+## 5. 크론 라우트 `GET /api/cron/daily`가 하는 일 (**6가지**, 순서 고정, 전부 멱등)
 
 ```
 0. Authorization: Bearer ${CRON_SECRET} 검사 → 불일치 시 401
@@ -515,7 +540,14 @@ AI 프로바이더 키와 Supabase `service_role` 키에 이 접두사를 붙이
 5. 만료 예약 스윕 (D27 신규 — 01_state_machine.md 7.5절 규칙 5)
    where quota_date < today(AI_QUOTA_RESET_TIMEZONE 기준) and status = 'held'
    → release_session_quota(..., reason='expired')로 정리
-   ※ idx_quota_res_held 부분 인덱스를 탑니다. 체험 세션 예약에만 해당합니다
+   ※ idx_quota_res_held 부분 인덱스를 탑니다. 예약을 가진 세션(trial_shared · demo)에만 해당합니다
+6. 익명 계정 TTL 스윕 (D35 신규 — 04_data_layer.md 15.8절)
+   select * from public.sweep_expired_demo_accounts(24, 200)   ← 호출 한 번이 전부
+   삭제 기준: auth.users.is_anonymous = true and created_at < now() - interval '24 hours'
+   ※ 삭제 연쇄(profiles → 세션 → 질문·턴·평가·동의·이벤트)와 예약 반납(before delete 트리거)은
+     전부 DB 안에서 일어납니다. 애플리케이션이 하는 일은 호출과 건수 기록뿐입니다
+   ※ service_role 전용 함수라 admin 클라이언트로 부릅니다
+   ※ Storage 정리(4단계)와 겹치지 않습니다 — 데모는 업로드를 제공하지 않아 객체가 생기지 않습니다
 ```
 
 - **각 단계는 배치 상한(200건)을 두고, 못 끝낸 분량은 다음 날 이어서 처리합니다.** 한 번의 실행이

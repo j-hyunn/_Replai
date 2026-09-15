@@ -121,6 +121,36 @@ export type Database = {
           },
         ]
       }
+      demo_documents: {
+        Row: {
+          body_text: string
+          created_at: string
+          doc_type: string
+          id: string
+          job_role: string
+          seed_version: string
+          title: string
+        }
+        Insert: {
+          body_text: string
+          created_at?: string
+          doc_type: string
+          id?: string
+          job_role: string
+          seed_version: string
+          title: string
+        }
+        Update: {
+          body_text?: string
+          created_at?: string
+          doc_type?: string
+          id?: string
+          job_role?: string
+          seed_version?: string
+          title?: string
+        }
+        Relationships: []
+      }
       documents: {
         Row: {
           byte_size: number | null
@@ -472,24 +502,30 @@ export type Database = {
       }
       profiles: {
         Row: {
+          account_type: string
           created_at: string
           default_job_role: string | null
+          demo_consumed_at: string | null
           display_name: string | null
           id: string
           trial_consumed_at: string | null
           updated_at: string
         }
         Insert: {
+          account_type?: string
           created_at?: string
           default_job_role?: string | null
+          demo_consumed_at?: string | null
           display_name?: string | null
           id: string
           trial_consumed_at?: string | null
           updated_at?: string
         }
         Update: {
+          account_type?: string
           created_at?: string
           default_job_role?: string | null
+          demo_consumed_at?: string | null
           display_name?: string | null
           id?: string
           trial_consumed_at?: string | null
@@ -939,6 +975,13 @@ export type Database = {
       set_user_api_key: {
         Args: { p_key: string; p_last4: string; p_user_id: string }
         Returns: undefined
+      }
+      sweep_expired_demo_accounts: {
+        Args: { p_limit?: number; p_ttl_hours?: number }
+        Returns: {
+          created_at: string
+          user_id: string
+        }[]
       }
     }
     Enums: {

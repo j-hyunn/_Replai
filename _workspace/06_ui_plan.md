@@ -58,6 +58,18 @@
   - **16절 #10 해소 처리**(14절 §5·15절 서술도 함께 정리). **16절 #11도 해소** — `02_ai_architecture.md`
     13.6.3절에 "API 키"·"한도" 예외가 명문화되어 QA가 grep 히트를 오탐으로 처리할 필요가 없어졌습니다.
   - 훅 추가·개명·삭제 없음(**43개 그대로**). 새 UI 라이브러리 없음.
+- 2026-09-15 **D35 반영 — Google OAuth + 데모 체험.** 문서를 재작성하지 않고 해당 절만 고쳤습니다.
+  - **신규 라우트 2개** — **`/demo`**(4.15절, 데모 입장) + **`/auth/callback`**(라우트 핸들러, 페이지 아님).
+    라우트 표가 12개 → **13개 URL + 콜백 핸들러 1개**가 됩니다.
+  - **`/login` 재구성**(4.2절) — ① [Google로 계속하기] → `Separator` → ② 기존 이메일 탭
+    → ③ 카드 **바깥** 아래 [로그인 없이 데모 체험하기](`variant="ghost"`). D8 문구·D23 재설정 링크는 그대로.
+  - **신설 훅 3개** — `useSignInWithGoogle` `useStartDemo` `useDemoCapacity`(계약 #42~#43 + Auth 직접).
+    훅 **43개 → 46개**. 새 UI 라이브러리 없음.
+  - **데모 배지·배너** — 면접·리포트·전문 3화면 헤더에 `Badge` "데모" + 24시간 삭제 안내(4.16절).
+  - **`Session.fundingSource` 유니온이 3종**(`trial_shared` | `byok` | `demo`)이 됩니다.
+    **`demo`를 `trial_shared`와 같이 취급하는 분기를 쓰지 마세요** — 키 연결 CTA가 익명 사용자에게
+    뜨면 연결할 수 없는 화면으로 보냅니다(4.16절).
+  - **AppShell 분기** — 익명 사용자에게는 네비게이션 없이 배너 + [계정 만들기]만 렌더합니다.
 
 ---
 
@@ -86,6 +98,9 @@ src/app/
 │   └── page.tsx                                   → /
 ├── (auth)/
 │   └── login/page.tsx                             → /login
+├── auth/
+│   └── callback/route.ts                          → GET /auth/callback  ★신규 (D35, 라우트 핸들러)
+├── demo/page.tsx                                  → /demo               ★신규 (D35)
 └── (app)/
     ├── layout.tsx                                 AppShell(헤더·네비·미열람 배지)
     ├── dashboard/page.tsx                         → /dashboard
@@ -117,7 +132,17 @@ src/app/
 | 10 | `/documents` | `(app)/documents/page.tsx` | 클라이언트 |
 | 11 | `/settings/account` | `(app)/settings/account/page.tsx` | 클라이언트 |
 | **12** ★신규 | **`/settings/api-key`** | `(app)/settings/api-key/page.tsx` | 클라이언트 |
+| **13** ★신규 (D35) | **`/demo`** | `demo/page.tsx` | 클라이언트 |
+| — ★신규 (D35) | **`GET /auth/callback`** | `auth/callback/route.ts` | **라우트 핸들러**(페이지 아님) |
 | — | `/sessions/{sessionId}/compare` | **만들지 않음** `[later]` | — |
+
+**`/demo`와 `/auth/callback`을 `(app)`·`(auth)` 그룹 밖에 두는 이유** (D35)
+- `/demo`는 **미인증 진입**이 정상이므로 `(app)`의 AppShell·인증 가드 아래에 둘 수 없고,
+  `(auth)`는 "로그인 폼" 그룹이라 성격이 다릅니다. 최상위에 둡니다.
+- `/auth/callback`은 **페이지가 아니라 라우트 핸들러**입니다. 라우트 그룹에 넣지 마세요.
+- **데모의 면접·리포트·전문 화면은 새로 만들지 않습니다.** `/sessions/{id}/…` 를 그대로 재사용하며,
+  데모임을 알리는 것은 배지와 배너입니다(4.16절). 평행 라우트를 만들면 음성 4상태·정정·재개 패널·
+  접근성을 두 벌로 관리하게 됩니다(`01_product_spec.md` 7절).
 
 **정적 세그먼트 우선순위 확인.** `/sessions/new`는 정적 세그먼트이고 `/sessions/[sessionId]`는 동적입니다.
 Next.js는 정적을 먼저 매칭하므로 `new`가 `sessionId`로 해석되는 일은 없습니다. 다만 `[sessionId]` 아래에는
@@ -155,6 +180,16 @@ Realtime 전이 세 경로의 유일한 분기입니다.
 
 **미들웨어 리다이렉트와의 정합**(`05_api_contract.md` 7.2절): 미인증 사용자가 `(app)` 이하로 오면
 `/login?next={원래 경로}`로 302됩니다. 로그인 성공 후 UI는 `next` 쿼리로 복귀하고, 없으면 `/dashboard`입니다.
+
+**익명(데모) 사용자의 통과 범위** (D35). 프록시는 `account_type = 'demo'` 세션을
+**`/demo`와 `/sessions/{id}/ready|interview|report|transcript`, 그리고 그 대응 API로만** 통과시키고
+나머지는 `/login`으로 302합니다. `POST /api/sessions`(#3)와 키 연결 계열 API는 **403**입니다.
+따라서 화면 코드는 "익명 사용자가 대시보드에 들어온 경우"를 분기할 필요가 없습니다 — 도달하지 못합니다.
+**`(app)/layout.tsx`의 AppShell만 분기**합니다: 익명이면 네비게이션 대신 데모 배너 + [계정 만들기].
+
+**OAuth 성공 후 랜딩은 이메일 로그인과 동일합니다** — `?next=`(내부 경로 검증 통과 시) 또는 `/dashboard`.
+`next` 검증 규칙은 `/settings/api-key`의 것과 **같은 함수**를 씁니다(`/`로 시작하고 `//`·`/\`가 아닌
+내부 경로만, 아니면 조용히 기본값). 검증 함수를 두 벌로 만들면 한쪽만 고쳐져 오픈 리다이렉트가 남습니다.
 
 ---
 
@@ -237,6 +272,7 @@ Realtime 알림과 상태 전이 뮤테이션은 **해당 키를 무효화(inval
 | `useDocumentDownloadUrl` | `GET /api/documents/[documentId]/download-url` | `{ url, expiresInSec }` | 아니오 | `{ url: string; expiresInSec: 60 }` |
 | `useAccount` | `GET /api/account` | `{ profile, stats }` | 아니오 | `{ profile: Profile; stats: AccountStats }` |
 | **`useCapacity`** ★신규 | `GET /api/capacity` (#36) | `{ capacity }` | **예** | **`Capacity`** = `{ canStartSession: boolean; keyStatus: KeyStatus; trialStatus: TrialStatus; nextFundingSource: FundingSource \| null; requiresTrialConsent: boolean; consentVersion: string; availableAtIso: string \| null }` |
+| **`useDemoCapacity`** ★D35 | `GET /api/demo/capacity` (#43, **미인증 공개**) | `{ demoCapacity }` | **예** | **`DemoCapacity`** = `{ canStartDemo: boolean; demoStatus: 'available' \| 'consumed'; existingSessionId: string \| null; consentVersion: string; availableAtIso: string \| null }` — **`Capacity`와 다른 타입**입니다(`keyStatus`·`trialStatus`·`requiresTrialConsent` 없음). 구현: `src/hooks/use-demo.ts` |
 | **`useApiKeyStatus`** ★신규 | `GET /api/account/api-key` (#37) | `{ apiKey }` | **예** | **`ApiKeyStatus`** = `{ keyStatus: KeyStatus; keyLast4: string \| null; provider: 'google' \| null; lastVerifiedAt: string \| null; lastFailureCode: 'auth_rejected' \| 'quota_exhausted' \| 'unknown' \| null; lastFailureAt: string \| null }` — **키 원문 필드가 없습니다** |
 
 - `useDocumentDownloadUrl`은 **자동 실행하지 않습니다**(`enabled: false` + `refetch()`). 만료 60초짜리 URL을
@@ -273,6 +309,7 @@ Realtime 알림과 상태 전이 뮤테이션은 **해당 키를 무효화(inval
 | 훅 | 엔드포인트 | 요청 body | 응답 봉투 | 언랩 | **훅 반환 타입** |
 |---|---|---|---|---|---|
 | `useCreateSession` | `POST /api/sessions` | `{ sourceSessionId?: string \| null }` | `201 { session }` | **예** | `Session` |
+| **`useStartDemo`** ★D35 | 익명 로그인(`signInAnonymouslyForDemo()`) → `POST /api/demo/sessions` (#42) | `{ jobRole, modality, consentVersion }` | `201 { session }` | **예** | `Session` — **`status`는 항상 `ready`**, 이동할 id는 **`session.id`**(별도 `sessionId` 필드 없음). `retry: 0`. 구현: `src/hooks/use-demo.ts` |
 | `useUpdateSessionConfig` | `PATCH /api/sessions/[sessionId]/config` | `SessionConfigPatch` | `{ session }` | **예** | `Session` |
 | `usePrepareSession` | `POST /api/sessions/[sessionId]/prepare` | — | `202 { sessionId, status, preparation }` | 아니오 | `{ sessionId: string; status: 'configuring'; preparation: PreparationState }` |
 | `useBackToConfig` | `POST /api/sessions/[sessionId]/back-to-config` | — | `{ session }` | **예** | `Session` |
@@ -443,10 +480,32 @@ function useInterviewStream(sessionId: string): {
 
 | 항목 | 내용 |
 |---|---|
-| 진입 | 미인증(인증 상태로 오면 미들웨어가 `/dashboard`로 302) |
-| 이탈 | 성공 시 `?next=` 또는 `/dashboard` |
-| 훅 | `useSignIn` `useSignUp` (Supabase Auth 직접) |
-| shadcn | `Tabs`(로그인/회원가입) `Form` `Input` `Label` `Button` `Alert` `Card` |
+| 진입 | 미인증(인증 상태로 오면 프록시가 `/dashboard`로 302) |
+| 이탈 | 성공 시 `?next=` 또는 `/dashboard`. **데모 버튼 → `/demo`** |
+| 훅 | `useSignIn` `useSignUp`(이메일 — 아직 스텁) · **Google은 훅 없이 `signInWithGoogle(next)`를 클라이언트에서 직접 호출**★ (`src/lib/auth/sign-in.ts`. 성공하면 브라우저가 Google로 떠나므로 반환값·캐시가 없고, 훅으로 감쌀 상태가 없습니다) |
+| shadcn | `Tabs`(로그인/회원가입) `Form` `Input` `Label` `Button` `Alert` `Card` `Separator` |
+
+**버튼 3단 위계 (D35) — 이 순서를 바꾸지 마세요**
+
+```
+┌ Card ───────────────────────────────────────┐
+│  ① [  Google로 계속하기  ]  ← Button 기본, w-full │
+│     ──────────  또는  ──────────  (Separator) │
+│  ② Tabs [로그인 | 회원가입] — 기존 이메일 폼 그대로 │
+└─────────────────────────────────────────────┘
+   ③ 로그인 없이 데모 체험하기   ← Card 바깥, variant="ghost"
+      미리 준비된 이력서로 진짜 AI 면접관을 만나봅니다 (약 10분)
+```
+
+- **③을 ①과 나란히 두지 않습니다.** 두 버튼이 같은 무게로 보이면 **가입하려던 사용자가 데모로 샙니다.**
+  데모의 목적은 가입 전 확신을 주는 것이지 가입을 대체하는 것이 아닙니다.
+- **`NEXT_PUBLIC_DEMO_ENABLED`가 꺼져 있으면 ③은 렌더하지 않습니다.** `disabled`로 두지 마세요 —
+  누를 수 없는 버튼은 고장으로 읽힙니다.
+- ①의 실패(`/login?error=oauth_failed`)는 `Alert variant="destructive"`로
+  **"Google 로그인을 완료하지 못했어요. 다시 시도해 주세요."** 를 띄웁니다. 프로바이더 원문을 노출하지 않습니다.
+- Google 자격 증명은 **외부에서 설정됨을 전제**합니다. 화면 코드에는 클라이언트 ID가 등장하지 않고
+  `supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: <origin>/auth/callback?next=… } })`
+  한 줄뿐입니다.
 
 **필수 문구 (D8 전달 — `04_data_layer.md` 12절)**
 
@@ -1163,6 +1222,71 @@ Google AI Studio에서 키를 만드는 단계를 번호 목록으로 둡니다.
 - 서버가 준 `message`를 그대로 렌더하는 경로(`ErrorState`)도 이 검사 대상입니다.
   계약이 `details`에 버킷·잔여량·한도를 넣지 않기로 했지만(계약 13절), **UI가 그 약속에 기대어 검사를 생략하지는 않습니다.**
 - 검사 방법: `src/lib/blocked/blocked-copy.ts`와 `src/components/**`에 대한 **금칙어 grep을 QA 항목으로** 둡니다(17절).
+- **데모 화면도 같은 금칙 대상입니다**(4.15·4.16절). "데모 정원"·"하루 10회" 같은 표현을 쓰지 않고,
+  여력이 없을 때는 **"지금은 데모 자리가 모두 찼어요"** 로 씁니다.
+
+---
+
+### 4.15 `/demo` — 데모 입장 ★신규 (D35)
+
+| 항목 | 내용 |
+|---|---|
+| 진입 | **누구나(미인증 포함).** `NEXT_PUBLIC_DEMO_ENABLED`가 꺼져 있으면 `notFound()` |
+| 이탈 | 시작 성공 → `/sessions/{sessionId}/ready` · 동의 거부·여력 부족 → `/login` |
+| 훅 | `useDemoCapacity`(조회) · `useStartDemo`(변경, `POST /api/demo/sessions` #42) |
+| shadcn | `Card` `RadioGroup`(직군 5) `ToggleGroup` 또는 `RadioGroup`(모달리티 2) `Checkbox`(동의) `Button` `Alert` `Badge` `Skeleton` |
+| 레이아웃 | 한 화면·한 카드. 헤드라인 → 직군 선택 → 모달리티 → 동의 체크박스 → [면접 시작하기] → 하단에 [계정 만들고 내 이력서로 하기] 링크 |
+
+**한 화면에서 끝냅니다.** 단계가 늘어나면 가입 전 방문자는 이탈합니다.
+`/sessions/new`(설정 화면)를 재사용하지 않는 이유가 이것입니다 — 그 화면은 업로드·보관함·문서 편집을
+전제로 만들어져 있고, 데모에는 그 중 어느 것도 없습니다.
+
+**동의는 다이얼로그가 아니라 체크박스입니다** (D29의 체험 동의 4.13절과 다른 점).
+화면이 하나뿐이라 모달을 띄우면 한 화면에서 모달이 두 번 뜹니다. 문구는 `01_product_spec.md` 6.6.3절이 원본.
+
+- 체크 전에는 [면접 시작하기]가 `disabled`이고, **비활성 이유를 버튼 아래 한 줄로 설명**합니다.
+- 동의 문구는 **접기 없이 전부 보입니다.** `Accordion`에 숨기면 "동의를 받았다"고 말하기 어려워집니다.
+
+**시작 버튼을 누르면** ① `supabase.auth.signInAnonymously()` → ② `POST /api/demo/sessions`
+(`{ jobRole, modality, consentVersion }`) → ③ 응답의 `sessionId`로 `/sessions/{id}/ready`에 `router.replace()`.
+
+> **②의 응답 상태는 `ready`입니다.** 이 라우트가 세션 생성과 준비(예약·플래너)를 한 요청에서
+> 연달아 수행하기 때문입니다(`01_state_machine.md` 2절 ※데모). `configuring`이 돌아오면 버그이며,
+> 그대로 `route-for-status`에 넘기면 **데모 방문자가 쓰지 않는 `/sessions/new`로 떨어집니다.**
+> 이 화면에서 `usePrepareSession`(#6)을 따로 부르지 마세요 — 이중 예약 시도가 됩니다.
+①과 ② 사이에 화면이 비지 않도록 버튼은 `disabled` + 스피너 + **"면접을 준비하고 있어요"** 를 유지합니다.
+
+**오류 분기 — `error.code` 직접 분기**(4.4절과 같은 규칙, 소거법 금지)
+
+| `code` | HTTP | 화면 |
+|---|---|---|
+| `capacity_unavailable` | 503 | `Alert` **"지금은 데모 자리가 모두 찼어요. 잠시 뒤 다시 시도하거나, 계정을 만들면 바로 시작할 수 있어요."** + 1순위 버튼 **[계정 만들기]** → `/login` |
+| `demo_already_consumed` | 409 | `Alert` **"이미 데모를 체험하셨어요."** + **[받은 리포트 다시 보기]** → `details.existingSessionId`의 리포트. **폴백으로 아무 세션이나 고르지 않습니다**(D30에서 배운 것) |
+| `trial_consent_required` | 409 | 체크박스로 스크롤 + 포커스. 페이지를 갈아끼우지 않습니다 |
+| 그 외 | — | 일반 `ErrorState` + 재시도 |
+
+> **여력 부족 화면에 키 연결 CTA를 두지 않습니다.** 4.14.1절과 다른 점입니다 —
+> 익명 사용자는 `/settings/api-key`에 들어갈 수 없습니다(프록시 규칙). 출구는 **가입**입니다.
+
+---
+
+### 4.16 데모 표시 — 배지와 배너 ★신규 (D35)
+
+`fundingSource === 'demo'`이면 **면접·리포트·전문 3화면의 헤더**에 상시 표시합니다.
+
+| 요소 | 내용 |
+|---|---|
+| `Badge variant="secondary"` | **"데모"** — `PageHeader`의 제목 옆 |
+| 배너(`Alert`, 화면당 1회) | "이 면접은 미리 준비된 이력서로 진행한 데모 체험입니다. 기록은 24시간 뒤 자동으로 삭제됩니다." |
+| 리포트 하단 CTA | **[내 이력서로 면접 보기]** → `/login`. 체험 사용자의 **키 연결 CTA와 같은 자리**(8.4절)이고 **목적지만 다릅니다** |
+
+- **`demo`를 `trial_shared`와 묶는 분기를 쓰지 마세요.** 예를 들어 "체험 세션이면 키 연결 CTA"라는
+  기존 조건(8.4절)에 `demo`가 딸려 들어가면, 익명 사용자를 **들어갈 수 없는 화면**으로 보냅니다.
+  분기는 `fundingSource === 'trial_shared'`로 **정확히** 씁니다.
+- 배지 컴포넌트는 `common/DemoBadge.tsx` 하나로 만들고 3화면이 공유합니다.
+- 배너는 `dismiss`되지 않습니다 — 24시간 삭제는 사용자가 놓치면 안 되는 사실입니다.
+- **접근성:** 배너는 `role="status"`로 두고, 배지에는 `aria-label="데모 세션"`을 답니다.
+  음성 전용 사용자에게도 데모라는 사실이 전달되어야 합니다(11절).
 
 ---
 

@@ -10,6 +10,10 @@
   3절 여정에 "체험 동의"·"키 연결" 단계 추가, 4.6절(재원·키) 신설, 6.5절(BYOK·동의) 신설,
   7절에 `/settings/api-key` 추가 및 `/dashboard`·`/sessions/new`·리포트·`/settings/account` 갱신,
   8절에 범위 밖 항목 추가, 10절 팀 전달 사항 신설. 전이·가드는 `01_state_machine.md`가 원본.
+- 2026-09-15 **D35 대응 — Google OAuth 로그인 + 로그인 없는 "데모 체험".**
+  3절 여정에 0단계(데모) 추가, 4.1절 소셜 로그인 `[later]` → **`[MVP]`**, 4.7절(데모 체험) 신설,
+  6.6절(데모 체험) 신설, 7절 화면 목록에 **`/demo`** 와 **`/auth/callback`** 추가,
+  6.6절에 **지표에서 데모를 제외하는 규칙** 명시. 예약 버킷·CHECK는 `01_state_machine.md`가 원본.
 
 ---
 
@@ -44,7 +48,8 @@ API 응답        : camelCase    예) sessionId, createdAt, mainQuestionBudget
 
 | # | 단계 | 입력 | 출력 | 이탈 시 세션 상태 |
 |---|---|---|---|---|
-| 1 | 가입·로그인 | 이메일 | 세션 없음 | — |
+| **0** | **데모 체험**(선택, 로그인 전, D35) | 직군 1개 선택 + 데이터 처리 동의 | **미리 준비된 이력서로 진행하는 짧은 진짜 면접 + 리포트.** 24시간 뒤 자동 삭제 | `ready` → … → `evaluated` (익명 계정) |
+| 1 | 가입·로그인 | **Google 계정** 또는 이메일 | 세션 없음 | — |
 | 2 | 세션 설정 | 직군, 페르소나, 모달리티, 이력서(파일 또는 텍스트), JD(파일 또는 텍스트) | 설정 완료된 세션 | `created` / `configuring` |
 | 2.5 | **체험 동의**(체험 세션에 한함, D29) | 데이터 처리 동의 | 동의 시각 기록 → 준비 진행 / 거부 시 키 연결 안내 | `configuring` 유지 |
 | 3 | 준비 | 마이크 권한 확인 | 컨텍스트 요약 + 오프닝 질문 | `ready` |
@@ -77,10 +82,20 @@ API 응답        : camelCase    예) sessionId, createdAt, mainQuestionBudget
 | 기능 | 범위 |
 |---|---|
 | 이메일 로그인/회원가입 (Supabase Auth) | `[MVP]` |
+| **Google 로그인 (Supabase Auth Google Provider, D35)** | **`[MVP]`** |
+| **익명 인증 — 데모 체험 전용 (`is_anonymous`, D35)** | **`[MVP]`** |
 | 본인 데이터만 접근 (전 테이블 RLS) | `[MVP]` |
 | 세션 단위 삭제 (DB 행 + Storage 객체 실제 삭제) | `[MVP]` |
 | 계정 삭제 (전체 데이터 실제 삭제) | `[MVP]` |
-| 소셜 로그인 | `[later]` |
+| Google 외 소셜 로그인(카카오·GitHub 등) | `[later]` |
+| 익명 계정을 실계정으로 승격(link identity) | `[later]` |
+
+> **소셜 로그인이 `[later]`에서 `[MVP]`로 올라간 근거(D35).** D8이 확인 메일을 끄면서
+> "오타 주소로 가입하면 계정을 영영 못 찾는다"를 **감수하는 위험**으로 남겨 두었는데,
+> Google 로그인은 사용자가 주소를 타이핑하지 않으므로 그 위험 자체를 없앱니다.
+> D8·D23을 되돌리지 않고 위험만 줄이는 경로라서 올립니다.
+> **Google Cloud / Supabase 대시보드의 자격 증명 설정은 이 설계의 범위 밖이며,
+> 외부에서 설정됨을 전제로 합니다.**
 
 > 보존 정책이 무기한이므로 **사용자의 삭제 요청이 유일한 삭제 경로**입니다. 두 삭제 UI는 MVP 필수입니다.
 
@@ -144,6 +159,24 @@ API 응답        : camelCase    예) sessionId, createdAt, mainQuestionBudget
 | 체험 횟수 2회 이상으로의 확대 | `[later]` |
 | 키 사용량·비용 대시보드 | `[later]` |
 | 키 프로바이더 복수 지원(OpenAI 등) | `[later]` |
+
+### 4.7 데모 체험 — 로그인 없이 진짜 면접 (D35)
+| 기능 | 범위 |
+|---|---|
+| `/demo`에서 직군 1개 선택 후 **로그인 없이 즉시 입장** (익명 인증) | `[MVP]` |
+| 미리 심어 둔 이력서·JD 10건(직군 5 × 2)으로 진행 | `[MVP]` |
+| **실제 `interviewer` → `evaluator` 파이프라인** — 가짜 응답·타이핑 애니메이션 없음 | `[MVP]` |
+| 데모 전용 쿼터 버킷(`flash_lite_demo`, 하루 10세션) — **체험 12세션을 침범하지 않음** | `[MVP]` |
+| 입장 전 데이터 처리 동의(체크박스, `demo-1.0.0`) | `[MVP]` |
+| 면접·리포트·전문 화면의 상시 "데모" 배지 + 24시간 삭제 안내 | `[MVP]` |
+| 익명 계정과 그 데이터의 **24시간 TTL 자동 삭제**(크론) | `[MVP]` |
+| 익명 사용자 1인당 24시간에 데모 1회 (`profiles.demo_consumed_at`) | `[MVP]` |
+| 데모에서 파일 업로드·문서 편집·키 연결·세션 목록 | **제공하지 않음** |
+| 데모 결과를 가입 계정으로 이어받기 | `[later]` |
+
+> **데모는 `NEXT_PUBLIC_DEMO_ENABLED` 하나로 꺼집니다.** 꺼져 있으면 `/login`에 버튼이 없고
+> `/demo`·`POST /api/demo/sessions`는 404입니다. 전용 키(`GEMINI_API_KEY_DEMO`)가 없으면
+> **켜지 않습니다** — 켜는 순간 체험 정원 12세션을 침범하기 때문입니다(D35-1).
 
 ---
 
@@ -340,6 +373,79 @@ D28 이후에는 **출구가 있습니다.** 같은 벽인데 다른 경험이�
 
 ---
 
+## 6.6 데모 체험 (D35)
+
+### 6.6.1 한 문장 요약
+
+> **로그인하지 않은 방문자가 미리 준비된 이력서로 짧은 진짜 면접을 치르고 진짜 리포트를 받는다.
+> 계정은 익명으로 자동 생성되고, 24시간 뒤 기록과 함께 사라진다.**
+
+가짜가 아닙니다. `interviewer` → `evaluator` 파이프라인을 그대로 돌고, 꼬리질문도 원문 인용 평가도
+실제로 생성됩니다. 브리프 8절의 "이것만 되면 보여줄 수 있다" 세 가지 —
+**이력서를 읽은 꼬리질문 / 원문 인용 평가 / 음성 대화** — 를 가입 전에 전부 보여주는 것이 목적입니다.
+
+**브리프의 목표와 어긋나지 않는가.** 브리프 3절은 유입이 **산발적**이라고 정의했습니다 —
+사용자는 면접 D-7에 한 번 들어와서 판단합니다. 그런 사용자에게 가입·이력서 업로드·동의를 먼저
+요구하는 것은 **판단하기 전에 비용을 먼저 치르게 하는 것**입니다. 데모는 그 순서를 뒤집습니다.
+반대로 **상시 리텐션을 노리는 기능이 아니므로**(브리프 3절이 배제한 범주) 데일리 연습·스트릭과는
+성격이 다릅니다.
+
+### 6.6.2 데모에서 하는 것과 하지 않는 것
+
+| | 데모 | 체험(`trial_shared`) |
+|---|---|---|
+| 이력서·JD | **우리가 준비한 시드**(직군별 1쌍) | 사용자가 업로드하거나 입력 |
+| 선택 항목 | **직군 1개 + 모달리티**뿐 | 직군·페르소나·모달리티·문서 |
+| 페르소나 | `deep_pressure` 고정 | 2종 중 선택 |
+| 길이 | 주질문 2개, 최대 6턴, 12분 | 주질문 4개, 최대 20턴, 30분 |
+| 평가·리포트 | **끝까지 제공** | 제공 |
+| 계정 | 익명(`is_anonymous`) | 실계정 |
+| 보존 | **24시간 후 자동 삭제** | 무기한(사용자 삭제 시에만) |
+| 파일 업로드·보관함·키 연결·세션 목록 | **없음** | 있음 |
+
+**선택지를 줄인 것이 설계입니다.** 데모는 설정 화면이 아니라 "한 번 눌러 면접에 들어가는" 화면이고,
+고를 것이 많아질수록 가입 전에 이탈합니다. 페르소나를 `deep_pressure`로 고정한 이유는
+제품의 차별점이 꼬리질문이고 심층 압박형이 그것을 가장 선명하게 보여주기 때문입니다.
+
+### 6.6.3 데모 화면에서 반드시 보여야 하는 것
+
+1. **"데모" 배지** — 면접 화면 헤더, 리포트 헤더, 전문 화면 헤더 **3곳 상시**.
+2. **한 줄 안내(배지 옆 또는 바로 아래)**
+   > 이 면접은 미리 준비된 이력서로 진행한 데모 체험입니다. 기록은 24시간 뒤 자동으로 삭제됩니다.
+   > 내 이력서로 면접을 보려면 계정을 만들어 주세요.
+3. **데이터 처리 동의 체크박스**(입장 전, `consent_version = 'demo-1.0.0'`)
+   > 데모 면접은 Google의 무료 AI 서비스로 진행됩니다. 답변하신 내용을 Google이 서비스 개선에
+   > 사용할 수 있고, 검토자가 읽을 수 있습니다. 이 기록은 24시간 뒤 자동으로 삭제됩니다.
+   - 이력서 문장을 뺀 것은 **이력서가 우리 것이기 때문**입니다. 방문자의 답변만 외부로 나갑니다.
+   - 동의하지 않으면 시작 버튼이 비활성입니다. **키 연결로 안내하지 않습니다** — 익명 사용자는
+     키를 연결할 수 없습니다. 대신 `/login`으로 안내합니다.
+4. **리포트 하단 CTA** — "내 이력서로 면접 보기" → `/login`. 체험 사용자의 키 연결 CTA
+   (6.5.2절)와 **같은 자리, 다른 목적지**입니다.
+
+### 6.6.4 지표에서 데모를 제외한다 (필수)
+
+**브리프 5절 지표 1~6의 모든 집계 쿼리에 `funding_source <> 'demo'` 조건을 넣습니다.**
+
+| 지표 | 데모가 섞이면 생기는 왜곡 |
+|---|---|
+| 1 완주율 | 데모는 주질문 2개라 완주가 쉽습니다. 완주율이 실제보다 높게 보입니다 |
+| 2 리포트 도달률 | 데모 방문자는 그 자리에서 리포트를 봅니다. 비동기 대기 이탈이 희석됩니다 |
+| 3 **재시도율(북극성)** | 익명 계정은 7일 뒤 존재하지 않습니다. **구조적으로 0**이라 북극성 지표를 끌어내립니다 |
+| 4·5 유용성·이의 제기 | 남의 이력서에 대한 평가라 사용자의 반응이 다릅니다 |
+| 6 꼬리질문 깊이 | 주질문 2개 기준이라 분모가 다릅니다 |
+
+**데모는 데모대로 셉니다** — 데모 완주율과 `/demo → 가입` 전환은 `funding_source = 'demo'` 필터로
+따로 봅니다. 섞지 않는 것이지 버리는 것이 아닙니다.
+`qa-inspector`에게 **집계 쿼리에서 이 필터가 빠진 곳 찾기**를 상시 점검 항목으로 넘깁니다.
+
+### 6.6.5 이 결정이 뒤집히는 조건
+
+- 데모 전용 키의 무료 한도가 운영 키와 **독립이 아닌 것으로 실측되면** 데모를 켜지 않습니다.
+- 데모 10세션이 매일 소진되는데 가입 전환이 0에 수렴하면 `NEXT_PUBLIC_DEMO_ENABLED`를 끕니다.
+- 근거와 기각한 대안은 `00_input/decisions.md` **D35**에 있습니다.
+
+---
+
 ## 7. 화면·라우트 목록
 
 경로는 영어, 화면에 보이는 문구는 모두 한국어입니다.
@@ -347,7 +453,9 @@ D28 이후에는 **출구가 있습니다.** 같은 벽인데 다른 경험이�
 | 라우트 | 화면 목적 | 진입 조건 | 이탈(다음) | 필요한 데이터 | 범위 |
 |---|---|---|---|---|---|
 | `/` | 랜딩. 제품 설명과 로그인 유도 | 누구나 | `/login`, `/dashboard` | 없음 | `[MVP]` |
-| `/login` | 로그인·회원가입 | 미인증 | `/dashboard` | 없음 | `[MVP]` |
+| `/login` | 로그인·회원가입. **[Google로 계속하기] → 이메일 탭 → [로그인 없이 데모 체험하기]** 3단 위계(D35) | 미인증 | `/dashboard`, **`/demo`** | 없음. `NEXT_PUBLIC_DEMO_ENABLED`만 읽음 | `[MVP]` |
+| **`/demo`** | **데모 입장.** 직군 5개 중 1개 선택 + 모달리티 + 데이터 처리 동의 체크박스 → 익명 로그인 후 즉시 면접 생성 | 누구나(미인증 포함). `NEXT_PUBLIC_DEMO_ENABLED`가 꺼져 있으면 **404** | `/sessions/[sessionId]/ready`, `/login` | 직군 메타 5종, 동의 문구 버전, 데모 여력(`canStartDemo`) | `[MVP]` |
+| **`/auth/callback`** | **OAuth 콜백 — 페이지가 아니라 라우트 핸들러**(`src/app/auth/callback/route.ts`). PKCE 코드 교환 후 `?next=` 복귀, 실패 시 `/login?error=oauth_failed` | Google이 리디렉션 | `?next=`(내부 경로 검증) 또는 `/dashboard` | 없음 | `[MVP]` |
 | `/dashboard` | 홈. 새 면접 시작, 진행 중 세션, 새 리포트 배지. **시작 불가일 때 키 연결 출구**(6.5.5절) | 인증 | `/sessions/new`, `/settings/api-key`, 세션 상세 | 최근 세션 요약, 미완 세션, 미열람 리포트 수, `keyStatus`·`trialStatus`, `canStartSession` | `[MVP]` |
 | `/sessions/new` | 세션 설정(직군·페르소나·모달리티·이력서·JD). **준비 시작 직전에 체험 동의**(D29, 체험 세션만) | 인증 | `/sessions/[sessionId]/ready`, `/settings/api-key`(동의 거부 또는 시작 불가 시) | 문서 보관함 목록, 직군·페르소나 메타, `keyStatus`·`trialStatus`, `canStartSession`, 동의 문구 버전 | `[MVP]` |
 | `/sessions/[sessionId]/ready` | 준비 화면. 마이크 점검, 설정 확인, 오프닝 안내 | 세션이 `ready` | `/sessions/[sessionId]/interview` | 세션 설정 요약, 첫 질문 존재 여부 | `[MVP]` |
@@ -359,6 +467,21 @@ D28 이후에는 **출구가 있습니다.** 같은 벽인데 다른 경험이�
 | `/settings/account` | 계정 정보, **계정 삭제**(전체 데이터 실제 삭제). 키 연결 **상태 한 줄 + 링크만**(폼은 두지 않음) | 인증 | `/`, `/settings/api-key` | 프로필, 데이터 요약(세션 수·문서 용량), `keyStatus` | `[MVP]` |
 | **`/settings/api-key`** | **AI 키 연결·교체·해제.** 마스킹 표시(끝 4자리), 발급 방법 안내, D29 프라이버시 설명, `?next=`로 온 곳 복귀 | 인증 | `?next=` 지정 경로(없으면 `/dashboard`) | `keyStatus` + 마스킹 끝 4자리 + 연결 시각. **키 원문은 응답에 없음**(6.5.7절) | `[MVP]` |
 | `/sessions/[sessionId]/compare` | 회차 간 비교 | — | — | — | `[later]` |
+
+### 데모는 전용 면접 화면을 만들지 않습니다 (D35)
+
+**`/demo`는 입장 화면 하나뿐이고, 그 다음부터는 기존 `/sessions/[sessionId]/…` 를 그대로 씁니다**
+(`ready` → `interview` → `report` → `transcript`). `/demo/[sessionId]/interview` 같은 평행 라우트를
+만들지 않는 이유는 단순합니다 — **"진짜 파이프라인을 돈다"는 결정이 곧 "같은 화면을 쓴다"** 이고,
+면접 화면을 두 벌로 만들면 음성 4상태·정정·재개 패널·접근성을 두 곳에서 고쳐야 합니다.
+데모임을 표시하는 것은 **배지와 배너**이지 라우트가 아닙니다(6.6.3절).
+
+**대신 익명 사용자가 닿을 수 있는 범위를 프록시에서 좁힙니다.** `src/proxy.ts`(D33)는
+`account_type = 'demo'` 세션을 **`/demo`, `/sessions/[id]/ready|interview|report|transcript`
+와 그 대응 API로만** 통과시키고, 나머지(`/dashboard`, `/sessions`, `/documents`, `/settings/*`)는
+`/login`으로 302합니다. **`POST /api/sessions`(#3)와 키 연결 계열은 익명 사용자에게 403**입니다 —
+막지 않으면 익명 사용자가 `trial_shared` 세션을 만들어 하루 12세션의 체험 정원을 먹습니다.
+`(app)/layout.tsx`의 AppShell은 익명 사용자일 때 **네비게이션 없이 데모 배너 + 로그인 CTA**만 렌더합니다.
 
 ### 리포트 화면의 피드백 수집 UI (지표 4·5 — 필수)
 
@@ -487,6 +610,74 @@ D28 이후에는 **출구가 있습니다.** 같은 벽인데 다른 경험이�
 | 사용자 키 실패가 공용 키로 조용히 폴백되지 않는지 |
 | 동의 없이 `prepare`가 통과하지 않는지 |
 | 화면에 금칙어와 체험 잔여 카운터가 없는지 |
+
+---
+
+## 11. 팀 전달 사항 (D35 — Google OAuth + 데모 체험)
+
+**이 설계는 확정입니다.** 아래 세 팀은 바로 구현에 들어갈 수 있습니다.
+근거와 기각한 대안은 `00_input/decisions.md` **D35**, 전이·가드는 `01_state_machine.md`가 원본입니다.
+
+### `supabase-engineer` — `04_data_layer.md`
+
+| # | 작업 | 정확한 값 |
+|---|---|---|
+| 1 | `interview_sessions.funding_source` CHECK 확장 | `in ('trial_shared','byok','demo')` |
+| 2 | `ai_quota_ledger.model_bucket` · `ai_quota_reservations.model_bucket` CHECK 확장 | `in ('flash_lite','flash','pro','flash_lite_demo')` |
+| 3 | `reserve_session_quota` 진입부 가드 확장 | 재원↔버킷 **짝 강제**: `trial_shared`→`flash_lite`만, `demo`→`flash_lite_demo`만, `byok`→예약 금지. 위반 시 `quota_bucket_mismatch:<funding_source>`. 버킷 처리 순서는 `pro → flash → flash_lite → flash_lite_demo`(**새 값을 맨 끝에**) |
+| 4 | `profiles` 컬럼 2개 추가 | `account_type text not null default 'registered' check (account_type in ('registered','demo'))`, `demo_consumed_at timestamptz` |
+| 5 | `handle_new_user` 수정 | `account_type`을 `case when new.is_anonymous then 'demo' else 'registered' end`로, `display_name`을 `coalesce(split_part(new.email,'@',1), '데모 방문자')`로 |
+| 6 | **신규 테이블 `demo_documents`** | 컬럼·제약은 `01_domain_model.md` 3.1-a절. RLS **켜고** `select`만 `authenticated` 전면 허용, `insert/update/delete` 정책 **없음**. 직군 5 × 2 = **10행 시드**(문안은 `ai-interview-architect`와 함께 작성) |
+| 7 | Supabase Auth 설정 | **Anonymous sign-in 켜기** + **Google Provider 켜기**. 익명 로그인 IP 레이트 리밋(및 CAPTCHA)은 **운영자가 외부에서 설정**합니다 — 자격 증명은 이 작업 범위 밖 |
+| 8 | 크론 스윕 1종 추가 | `auth.users.is_anonymous = true AND created_at < now() - interval '24 hours'` 삭제 (`01_state_machine.md` 7.5절 규칙 6) |
+
+**RLS 정책은 한 줄도 새로 쓰지 않습니다.** 익명 사용자도 `auth.uid()`를 가지므로 기존
+`(select auth.uid()) = user_id` 정책이 그대로 적용됩니다. **"로그인 없음"이 "RLS 없음"이 아닙니다.**
+
+### `vercel-platform-engineer` — `05_api_contract.md` · `05_deploy.md`
+
+| # | 작업 | 정확한 값 |
+|---|---|---|
+| 1 | **`GET /auth/callback`** | `src/app/auth/callback/route.ts`. PKCE `exchangeCodeForSession` → `?next=` 검증 후 복귀(없으면 `/dashboard`), 실패 시 `/login?error=oauth_failed`. `next` 검증은 **기존 함수 재사용** |
+| 2 | **`POST /api/demo/sessions`** (#42) | 요청 `{ jobRole, modality, consentVersion }`. 가드: `NEXT_PUBLIC_DEMO_ENABLED` 꺼짐 → 404 / 호출자가 익명 아님 → 403 / `demo_consumed_at` 있음 → **409 `demo_already_consumed`**(+`details.existingSessionId` **항상 채움**) / 생성 10분 이내 재요청 → 409 / 여력 없음 → **503 `capacity_unavailable`**. 성공 시 `funding_source='demo'` 세션을 만들고 **같은 요청에서 예약·플래너까지 수행해 `ready` 상태로 반환**합니다(`01_state_machine.md` 2절 ※데모). 실패 시 **행을 남기지 않고 전체 롤백** |
+| 3 | **`GET /api/demo/capacity`** (#43) | `{ canStartDemo, consentVersion }`. **버킷·잔여량·한도를 응답에 싣지 않습니다**(금칙, `06_ui_plan.md` 4.14.4절) |
+| 4 | `src/proxy.ts`(D33) 익명 가드 | `account_type = 'demo'`는 `/demo`, `/sessions/[id]/ready|interview|report|transcript`와 대응 API만 통과. **`POST /api/sessions`(#3)와 키 연결 계열은 403** |
+| 5 | 환경변수 4종 | `GEMINI_API_KEY_DEMO`(**`NEXT_PUBLIC_` 금지**), `AI_RESERVE_FLASH_LITE_PER_DEMO=17`, `AI_DEMO_DAILY_SESSIONS=10`, `NEXT_PUBLIC_DEMO_ENABLED`(불리언이므로 공개 허용) |
+| 6 | 크론 C1에 스윕 6종째 추가 | 위 supabase #8과 같은 작업의 트리거 |
+| 7 | 배포 완료 조건 | **두 키의 무료 한도가 독립인지 AI Studio에서 실측.** 독립이 아니면 `NEXT_PUBLIC_DEMO_ENABLED`를 켜지 않습니다 |
+
+**`demo` 세션의 예약 호출은 `p_request = {"pro":0,"flash":0,"flash_lite":0,"flash_lite_demo":17}`입니다.**
+`flash_lite`를 0으로 두는 것이 체험 정원을 지키는 지점이므로 실수로 34를 넣지 마세요.
+
+### `shadcn-ui-engineer` — `06_ui_plan.md`
+
+- **`/login` 3단 위계**(4.2절) — [Google로 계속하기] / 이메일 탭 / [로그인 없이 데모 체험하기](ghost, 카드 밖).
+- **`/demo` 신규 화면**(4.15절) — 한 화면·한 카드, 직군 5 라디오 + 모달리티 + **동의 체크박스**, 오류 4분기.
+- **데모 배지·배너**(4.16절) — 면접·리포트·전문 3화면. `fundingSource === 'demo'`.
+  **`demo`를 `trial_shared`와 묶는 분기를 쓰지 마세요** — 키 연결 CTA가 익명 사용자에게 뜨면 안 됩니다.
+- AppShell은 익명 사용자에게 네비게이션 대신 배너 + [계정 만들기].
+
+### `ai-interview-architect` — `02_ai_architecture.md`
+
+- 8.3절에 **버킷의 정의를 "(키 풀 × 모델)에 대응하는 독립 카운터"** 로 정확히 하고
+  `flash_lite_demo`(예약 17, `limit_calls = 10 × 17 = 170`)를 추가해 주세요. 17의 내역은 D35-1 표에 있습니다.
+- 데모 세션 파라미터(주질문 2 / 깊이 2 / 6턴 / 12분)에서 **면접관·플래너·요약 호출 수가 유도되는지**
+  확인하고, 어긋나면 17을 고쳐 알려 주세요. `POST_INTERVIEW_HOLD = 6`은 체험과 동일합니다.
+- **프롬프트는 바뀌지 않습니다.** 데모는 스냅샷만 다를 뿐 같은 파이프라인입니다.
+- `demo_documents` 시드 문안 10건(직군 5 × 이력서·JD)을 `supabase-engineer`와 함께 작성해 주세요.
+  **인물·회사는 전부 가공**이어야 합니다.
+
+### `qa-inspector`
+
+| 점검 항목 |
+|---|
+| `funding_source` CHECK 3종과 `05_api_contract.md`의 `Session.fundingSource` 유니온이 문자 단위로 일치하는가 |
+| **모든 지표 집계 쿼리에 `funding_source <> 'demo'`가 들어 있는가** (6.6.4절 — 빠지기 가장 쉬운 곳) |
+| `demo` 세션이 `flash_lite` 버킷을 예약하는 경로가 하나라도 있는가 (있으면 체험 정원이 샌다) |
+| 익명 사용자가 `POST /api/sessions`·`/settings/api-key`·`/documents`에 도달할 수 있는가 |
+| 키 연결 CTA가 `demo` 세션에서 렌더되는가 (렌더되면 버그) |
+| `/auth/callback`의 `next` 검증이 `/settings/api-key`의 것과 **같은 함수**인가 (두 벌이면 한쪽만 고쳐진다) |
+| `demo_documents`에 RLS가 켜져 있고 쓰기 정책이 **없는**가 |
 
 ---
 

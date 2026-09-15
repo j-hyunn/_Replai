@@ -4,7 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { MODEL_BUCKETS, type ModelBucket } from "@/lib/ai/roles";
 import { ApiError } from "@/lib/api/errors";
-import type { FundingSource } from "@/lib/session/status";
+import { hasQuotaReservation, type FundingSource } from "@/lib/session/status";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database } from "@/lib/supabase/database.types";
 import {
@@ -12,6 +12,7 @@ import {
   effectiveLimits,
   isGateInert,
   sessionRequest,
+  ZERO_BUCKETS,
   type BucketMap,
 } from "@/lib/quota/limits";
 import { currentQuotaDate, nextQuotaResetAt, secondsUntilQuotaReset } from "@/lib/quota/quota-date";
@@ -26,8 +27,11 @@ import { currentQuotaDate, nextQuotaResetAt, secondsUntilQuotaReset } from "@/li
  * **네 함수 전부 진입부 첫 줄이 같습니다**:
  *
  * ```ts
- * if (fundingSource !== "trial_shared") return NO_OP;
+ * if (!hasQuotaReservation(fundingSource)) return NO_OP;   // 예약이 없는 재원은 `byok`뿐
  * ```
+ *
+ * **D35 이후 이 가드를 `!== "trial_shared"`로 되돌리지 마세요.** 그렇게 쓰면 `demo`가 전부
+ * no-op이 되어 데모가 원장을 통과하고, 데모 정원 10세션이라는 구조적 상한이 사라집니다.
  *
  * 분기를 라우트마다 흩으면 한 군데를 빠뜨리는 순간 BYOK 세션이 공용 원장을 갉아먹고,
  * 증상이 "체험 정원이 왜인지 부족하다"로만 보여 원인을 찾을 수 없습니다.
@@ -81,7 +85,7 @@ const NO_OP_PEEK: PeekCapacityResult = {
   hasCapacity: true,
   availableAtIso: null,
 };
-const EMPTY_BUCKETS: BucketMap = { flash_lite: 0, flash: 0, pro: 0 };
+const EMPTY_BUCKETS: BucketMap = { ...ZERO_BUCKETS };
 const NO_OP_RESERVE: ReserveResult = { applicable: false, quotaDate: null, buckets: EMPTY_BUCKETS };
 const NO_OP_CONSUME: ConsumeResult = { applicable: false, consumedCalls: 0 };
 const NO_OP_RELEASE: ReleaseResult = { applicable: false, released: EMPTY_BUCKETS };
@@ -109,9 +113,9 @@ export async function peekCapacity(
   fundingSource: FundingSource,
   admin: Admin = createAdminClient(),
 ): Promise<PeekCapacityResult> {
-  if (fundingSource !== "trial_shared") return NO_OP_PEEK;
+  if (!hasQuotaReservation(fundingSource)) return NO_OP_PEEK;
 
-  const request = sessionRequest();
+  const request = sessionRequest(fundingSource);
   // 한도 미설정 = fail-open(확정 동작). 여기서 막으면 미주입 배포가 전 사용자를 잠급니다.
   if (isGateInert(request)) {
     return { applicable: true, hasCapacity: true, availableAtIso: null };
@@ -158,9 +162,9 @@ export async function reserveSessionQuota(
   fundingSource: FundingSource,
   options: { request?: BucketMap; admin?: Admin } = {},
 ): Promise<ReserveResult> {
-  if (fundingSource !== "trial_shared") return NO_OP_RESERVE;
+  if (!hasQuotaReservation(fundingSource)) return NO_OP_RESERVE;
 
-  const request = options.request ?? sessionRequest();
+  const request = options.request ?? sessionRequest(fundingSource);
   if (isGateInert(request)) return { applicable: false, quotaDate: null, buckets: EMPTY_BUCKETS };
 
   const admin = options.admin ?? createAdminClient();
@@ -208,7 +212,7 @@ export async function consumeSessionQuota(
   calls = 1,
   admin: Admin = createAdminClient(),
 ): Promise<ConsumeResult> {
-  if (fundingSource !== "trial_shared") return NO_OP_CONSUME;
+  if (!hasQuotaReservation(fundingSource)) return NO_OP_CONSUME;
 
   const { data, error } = await admin.rpc("consume_session_quota", {
     p_session_id: sessionId,
@@ -245,7 +249,7 @@ export async function releaseSessionQuota(
   reason: ReleaseReason,
   admin: Admin = createAdminClient(),
 ): Promise<ReleaseResult> {
-  if (fundingSource !== "trial_shared") return NO_OP_RELEASE;
+  if (!hasQuotaReservation(fundingSource)) return NO_OP_RELEASE;
 
   const { data, error } = await admin.rpc("release_session_quota", {
     p_session_id: sessionId,
@@ -291,6 +295,20 @@ function translateReserveError(message: string): ApiError {
     return new ApiError("capacity_unavailable", "지금은 새 면접을 시작할 수 없습니다.", {
       details: { availableAtIso: nextQuotaResetAt().toISOString(), retryAfterSec },
       retryAfterSec,
+    });
+  }
+
+  // 재원↔버킷 짝 위반 (D35-1 ③ — `quota_bucket_mismatch:trial_shared|demo`).
+  // **여기 도달했다는 것 자체가 애플리케이션 버그입니다** — `sessionRequest(fundingSource)`가
+  // 짝을 이미 맞춰 주므로, 이 예외는 누가 요청량을 손으로 만들었다는 뜻입니다.
+  // 그래도 500으로 흘리지 않습니다: 사용자에게는 "지금은 진행할 수 없다"는 503이 정확하고,
+  // 500은 프론트의 일반 오류 처리로 흡수되어 **원인이 로그에서도 사라집니다.**
+  if (message.includes("quota_bucket_mismatch")) {
+    console.error("[quota-gate] 재원↔버킷 짝이 어긋났습니다 — 요청량 생성 경로를 확인하세요", {
+      message,
+    });
+    return new ApiError("provider_unavailable", "지금은 면접을 진행할 수 없습니다.", {
+      cause: message,
     });
   }
 
