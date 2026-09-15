@@ -1116,3 +1116,392 @@ clsx + tailwind-merge 대체 패키지입니다. 제3자 동명 패키지가 아
 3. **L4** — CI 빌드 단계의 환경변수 주입 여부를 확인하세요. 없으면 CI가 항상 빨간불입니다.
 4. 여전히 **실제 LLM 호출과 실제 DB INSERT를 한 번도 실행하지 않았습니다**(8.8절과 동일).
    스테이징에서 세션 1건을 `created`부터 `evaluated`까지 끝까지 돌려 보는 것이 머지 후 첫 작업이어야 합니다.
+
+---
+
+### 8.10 D35 라운드 — Google 로그인 + 로그인 없는 데모 체험 (2026-09-15, 4라운드)
+
+검증 대상: 설계 D35 → `supabase-engineer`(DB·RLS·익명인증) → `vercel-platform-engineer`(API·프록시)
+→ `shadcn-ui-engineer`(화면) 3라운드 구현 전체.
+대조 자료: `_workspace/00_input/decisions.md` D35-1~D35-4, `01_state_machine.md` 1·2·5·10절,
+`04_data_layer.md` 15절, `05_api_contract.md` #42·#43, `06_ui_plan.md` 1·4.15·4.16절.
+
+**이번 라운드는 처음으로 실제 데이터베이스에 SQL을 실행해 검증했습니다.**
+대상은 `replai-service`(`xzeudnlklftfdlkpegtb`, ACTIVE_HEALTHY)이며 D35 마이그레이션 4종
+(`20260915000100`~`000400`)이 전부 적용되어 있습니다. **모든 쓰기 검사는 `begin … rollback`
+안에서만 수행했고, 종료 후 잔여 행이 0건임을 확인했습니다**(`qa_leftovers = 0`,
+`flash_lite_demo` 원장 행 0). 지금까지 "실 DB INSERT를 한 번도 실행하지 않았다"가
+전 라운드의 최대 미검증 항목이었고, 이번에 그 일부가 해소됐습니다.
+
+---
+
+#### 8.10.1 체험 정원(하루 12세션) 침식 여부 — **통과 (실측)**
+
+정적 대조로 `reserve_session_quota`의 세 장치를 먼저 확인했습니다.
+
+| 장치 | 위치 | 상태 |
+|---|---|---|
+| 요청량 0인 버킷 건너뛰기 | `20260915000100_…sql:137` `continue when v_target <= 0;` | **존재** |
+| 재원→허용 버킷 1:1 | 같은 파일 102~110행 (`trial_shared→flash_lite`, `demo→flash_lite_demo`, 그 외 `quota_not_applicable`) | **존재** |
+| 짝 불일치 예외 | 같은 파일 141~145행 `quota_bucket_mismatch:%` | **존재** |
+| 고정 잠금 순서 | 135행 `pro → flash → flash_lite → flash_lite_demo`(신규 값이 **맨 끝**) | **유지됨** |
+
+그 위에서 **실제 SQL로 격리를 재현**했습니다. 익명 `auth.users` → `profiles(account_type='demo')`
+→ 데모 세션을 만들고, **체험 원장에 `flash_lite: held=100, limit=425` 행을 미리 넣어 둔 상태에서**
+데모 예약 17을 잡았습니다.
+
+```
+reserve_session_quota(demo session, today, {"flash_lite_demo":17}, {"flash_lite_demo":170})
+→ ledger: flash_lite:held=100,lim=425,gt=0  /  flash_lite_demo:held=17,lim=170,gt=17
+```
+
+**체험 원장 행이 한 글자도 움직이지 않았습니다**(`held=100` 유지, `granted_total=0`).
+격리가 코드 분기가 아니라 **원장 행 자체가 다르다는 데이터 구조**로 보장된다는 D35-1의 주장이
+실측으로 확인됐습니다.
+
+짝 강제는 **양방향 전부** 걸립니다.
+
+| 시도 | 결과 |
+|---|---|
+| `demo` 세션이 `flash_lite` 요청 | `quota_bucket_mismatch:demo` |
+| `trial_shared` 세션이 `flash_lite_demo` 요청 | `quota_bucket_mismatch:trial_shared` |
+| `demo` 계정이 `trial_shared` 세션 INSERT | `account_funding_mismatch:demo` |
+| `registered` 계정이 `demo` 세션 INSERT | `account_funding_mismatch:registered` |
+
+한도 계산도 대조했습니다 — `effectiveLimit('flash_lite_demo')`는
+`AI_DEMO_DAILY_SESSIONS(10) × AI_RESERVE_FLASH_LITE_PER_DEMO(17) = 170`을 **항상** 돌려주고,
+실측 RPD가 주어지면 작은 쪽이 이깁니다(`src/lib/quota/limits.ts`). 데모 버킷만 fail-open으로
+떨어지지 않는다는 D35-2 장치 ①이 코드에 실재합니다.
+
+버킷 선택 지점도 단일합니다 — `ROLE_BUCKET`을 직접 읽는 코드는 `roles.ts` 내부 한 곳뿐이고,
+호출부(`credentials.ts:114`)는 전부 `bucketFor(role, fundingSource)`를 씁니다.
+
+#### 8.10.2 익명 사용자가 체험·일반 세션을 만들 수 있는 경로 — **없음 (3겹 전부 확인)**
+
+`POST /api/sessions`는 세 겹으로 막혀 있고 **세 겹 모두 실재**합니다.
+
+1. 프록시 — `isDemoAllowedApi()`가 `pathname === "/api/sessions"`를 **명시적으로 거짓**으로
+   떨어뜨립니다(`src/proxy.ts:185`). `/api/sessions/{id}/…`와 한 글자 차이인 지점을
+   정규식이 아니라 완전 일치로 처리한 것이 맞습니다.
+2. 라우트 — `assertNotDemoAccount(user, admin)`(`src/app/api/sessions/route.ts:65`) → 403.
+3. DB — `enforce_session_funding_rules`의 `account_funding_mismatch:demo`(8.10.1 표에서 실측).
+
+`vercel-platform-engineer`가 자기 보고한 접근 매트릭스를 **라우트 단위로 전수 대조**했습니다.
+
+| 경로 | 보고된 표 | 실제 코드 | 판정 |
+|---|---|---|---|
+| `/`, `/demo` | 전원 통과 | `PROTECTED_PAGE_PREFIXES`에 없음 | ○ |
+| `/login`(익명) | 통과(머무름) | 166행 `&& !isDemoUser` | ○ |
+| `/login`(실계정) | `/dashboard` | 166~171행 | ○ |
+| `/sessions/{id}/ready\|interview\|report\|transcript`(익명) | 통과 | `DEMO_SESSION_PAGE_PATTERN` 149행 | ○ |
+| `/dashboard`·`/sessions`·`/sessions/new`·`/documents`·`/settings/*`(익명) | `/login` | 149~154행 | ○ |
+| `GET /api/demo/capacity`(미인증) | 통과 | `PUBLIC_API_PREFIXES` | ○ |
+| `POST /api/demo/sessions` | 401/통과/403 | 프록시 + 라우트 102~108행 | ○ |
+| `/api/sessions/{id}/…`(익명) | 통과 | `DEMO_ALLOWED_API_PATTERNS` | ○ |
+| `POST /api/sessions`·`/api/account/*`·`/api/documents/*`·`/api/dashboard`(익명) | 403 | 127~138행 | ○ |
+| **`/api/trial-consent`(익명)** | **표에 없음** | **`DEMO_ALLOWED_API_PATTERNS`에 포함되어 통과** | **× → D1** |
+
+`/sessions`(목록)·`/sessions/new`를 열지 않으면서 `/sessions/{id}/…` 4화면만 여는 정규식이
+정확합니다. `/sessions/{id}` 단독 페이지는 존재하지 않으므로 구멍이 아닙니다(빌드 라우트 목록 대조).
+
+#### 8.10.3 RLS — **통과 (익명 role 클레임으로 실제 재현)**
+
+`public` 스키마 18개 테이블 전부 `relrowsecurity = true`입니다. 정책 0개인 4개
+(`ai_quota_ledger`·`ai_quota_reservations`·`user_api_keys`·`account_events`·`storage_cleanup_queue`)는
+"켜고 정책 없음 = 전면 거부"라는 기존 설계 그대로입니다.
+
+익명 사용자의 JWT 클레임(`role=authenticated`, `is_anonymous=true`, 임의 `sub`)을 흉내내
+직접 조회했습니다.
+
+```
+demo_documents        10   ← 직군 5종 × (이력서+JD), seed_version='demo-1'
+profiles               0
+interview_sessions     0
+trial_consents         0
+documents              0
+evaluations            0
+turns                  0
+ai_quota_ledger        0
+```
+
+`demo_documents` **쓰기 시도는 RLS가 거부**합니다 — 테이블 GRANT 상으로는
+`insert/update` 권한이 있지만(Supabase 기본 GRANT), 정책이 0개라 실제 INSERT는
+`42501 new row violates row-level security policy for table "demo_documents"`로 막힙니다.
+`supabase-engineer`의 "읽기 전체 허용, 쓰기 없음" 보고가 사실입니다.
+
+함수 실행 권한도 확인했습니다 — `reserve_session_quota`·`consume_session_quota`·
+`sweep_expired_demo_accounts` 전부 `authenticated`·`anon`에게 **실행 권한 없음**.
+
+#### 8.10.4 재입장 제한 — **설계대로 동작, 우회 경로는 D35가 명시적으로 허용**
+
+- `demo_consumed_at`을 채우는 곳은 **한 곳**입니다 —
+  `src/app/api/sessions/[sessionId]/turns/route.ts:297~303`, 첫 **주질문** 답변 턴 저장 경로에서
+  `.is("demo_consumed_at", null)` 조건부 UPDATE. `trial_consumed_at`과 같은 시점·같은 규칙이고,
+  두 분기를 계산된 컬럼명 하나로 합치지 않았습니다(오타가 타입 검사를 통과하는 것을 막는 선택).
+- 검사하는 곳은 둘입니다 — `#42`(`route.ts:110`, 409 `demo_already_consumed` + `existingSessionId`)와
+  `#43`(`capacity/route.ts:71`, `demoStatus: 'consumed'`). 폴백으로 아무 세션이나 고르지 않고
+  없으면 `null`입니다.
+- 쿨다운(장치 ②)도 실재합니다 — `profiles.created_at`이 10분 이내이면서 이미 데모 세션 행을
+  가진 계정의 두 번째 요청을 409로 거절(`route.ts:116~126`, `DEMO_NEW_ACCOUNT_COOLDOWN_MS`).
+
+**"쿠키를 지우고 새 익명 계정을 계속 만들면 매번 새로 체험 가능한가"** — 가능합니다.
+그리고 이것은 **D35-2가 명시적으로 허용한 설계**입니다(`decisions.md`의 "최소 장치 3종" 표):
+본질적 방어는 장치 ①(데모 버킷 하루 10세션의 구조적 상한)이고, 8.10.1에서 그것이 실재함을
+확인했습니다. **어떤 경우에도 체험 12세션은 줄지 않습니다.** 결함이 아닙니다.
+
+다만 문서의 "24시간 1회"는 코드상 **"계정당 영구 1회 + 계정이 24시간 뒤 삭제됨"**의 합성입니다.
+TTL 스윕이 하루 이상 밀리면 그 브라우저에는 "영구 1회"로 보입니다 — 아래 D6.
+
+#### 8.10.5 `funding_source` 3종 분기 누락 — **없음. BYOK CTA는 데모에 도달하지 않음**
+
+`trial_shared`를 언급하는 코드 전수(`grep`) 대조 결과, **`demo`를 `trial_shared`와 묶어 처리하는
+곳은 한 군데도 없습니다.**
+
+- 분기는 전부 `=== "trial_shared"`(정확 비교) 또는 `=== "demo"`입니다.
+  부정 비교 `!== "trial_shared"`는 **0건**입니다 — 이것이 D35 이후 가장 위험한 패턴이었습니다.
+- `src/lib/ai/errors.ts:202·220`의 `context.fundingSource !== "byok"`는 **의도된 묶음**입니다.
+  공용 키·데모 키의 401/403·429는 둘 다 "우리 설정 오류"이므로 같은 처리가 맞습니다.
+- `hasQuotaReservation`의 원천은 `RESERVING_FUNDING_SOURCES = ["trial_shared","demo"]`이고
+  게이트 4함수가 전부 같은 첫 줄을 씁니다(`gate.ts`).
+- 크론 워치독의 예약 만료 반납은 세션의 `funding_source`를 **함께 읽어** 넘깁니다
+  (`cron/daily/route.ts:287~300`) — 상수로 박아 데모 예약을 "체험인 척" 반납하는 일이 없습니다.
+
+**BYOK 유도 CTA 노출 경로 — 없습니다.** `BlockedNotice`(유일하게 `connect_key`·`replace_key`
+액션을 그리는 컴포넌트)를 쓰는 화면은 `/dashboard`와 `/sessions/new` **둘뿐**이고,
+익명 사용자에게 두 경로는 프록시가 `/login`으로 튕겨내므로 **도달 불가**입니다.
+데모 화면 4곳은 대신 전용 CTA를 씁니다(`DemoSignUpCta`·`CapacityUnavailable` → 전부 `/login`).
+`sessionExitHref(fundingSource, …)`가 데모 세션의 이탈 경로를 `/login`으로 돌려주는 것도 확인했습니다.
+
+#### 8.10.6 오픈 리다이렉트 — **차단됨 (페이로드 19종 실행 확인)**
+
+`safeNextPath()`는 **사본이 하나**이고(`src/lib/auth/next-path.ts`),
+`/auth/callback`(`route.ts:35`)·`LoginCard`(`login-card.tsx:47`)·`signInWithGoogle`(`sign-in.ts:31`)
+**세 곳 전부 같은 함수**를 부릅니다. `/login`의 실제 리다이렉트 경로에 적용되고 있습니다.
+
+같은 규칙을 그대로 실행해 페이로드를 넣어 봤습니다(전부 `/dashboard`로 떨어짐):
+
+```
+//evil.com · https://evil.com · evil.com · /\evil.com · ////evil.com
+%2F%2Fevil.com · %252F%252Fevil.com · /%2F%2Fevil.com · /%09/evil.com
+javascript:alert(1) · http://localhost/x · "/\t…" · "/\n…" · "/\0…" · null · ""
+```
+
+통과하는 것은 `/dashboard`·`/sessions/1?tab=a` 같은 내부 경로뿐입니다.
+점 세그먼트 `/..//evil.com`만 통과하는데, 두 소비처가 모두 `new URL(path, origin)` 또는
+`<Link href>`로 해석해 **같은 오리진**(`https://app…//evil.com`)에 머무르므로 실제 오픈
+리다이렉트는 아닙니다 — 그래도 아래 D2로 남깁니다.
+
+`/auth/callback`의 나머지 두 못도 확인했습니다 — 실패는 전부
+`/login?error=oauth_failed` 고정이고 `error_description`을 붙이지 않으며, 성공 랜딩이
+이메일 로그인과 같은 경로입니다.
+
+#### 8.10.7 플래그가 꺼진 상태 — **404·503으로 안전하게 막힘 (500 누출 없음)**
+
+| 표면 | 플래그 꺼짐 | 확인 |
+|---|---|---|
+| `/demo` | **404** | `page.tsx:18` `notFound()` |
+| `POST /api/demo/sessions` | **404** | `assertDemoEnabled()` → `ApiError("not_found")` → `ERROR_STATUS.not_found = 404` |
+| `GET /api/demo/capacity` | **404** | 같음. `assertDemoEnabled()`가 `getUser()`보다 **먼저** 실행됨 |
+| `/login`의 데모 버튼 | **렌더 안 됨** | `disabled`가 아니라 미렌더 |
+
+`GEMINI_API_KEY_DEMO`만 빠진 경우도 분리되어 있습니다 — `#42`가 AI를 부르기 **전에**
+`isDemoProviderConfigured()`로 검사해 **503 `provider_unavailable`**을 돌려주고
+(세션 행·예약이 만들어지기 전입니다), `credentials.ts`가 **운영 공용 키로 폴백하지 않습니다.**
+500이나 내부 오류로 새는 경로는 발견하지 못했습니다.
+
+시드 문서가 빠진 직군도 400이 아니라 503 + 서버 로그입니다(`loadSeedDocuments`).
+실 DB에는 `pm·pd·security·ai·engineer` 5종 × 2 = **10행이 전부 존재**합니다.
+
+#### 8.10.8 각 라운드 에이전트의 자기 보고 재확인 — **3건 전부 사실**
+
+| 보고 | 재확인 방법 | 판정 |
+|---|---|---|
+| `supabase-engineer`: "`consume_session_quota`가 데모 소비를 버리고 있어 직접 고쳤다" | 마이그레이션 241~302행이 `v_funding is distinct from 'trial_shared' then return 0`을 **재원↔버킷 짝**으로 교체. **실 SQL 실행**: 데모 세션에 `consume(…,'flash_lite_demo',3)` → **3 반환**(기록됨), `consume(…,'flash_lite',5)` → **0 반환**(짝 불일치, 예외 아님 — 면접이 끊기지 않음) | **사실** |
+| `vercel-platform-engineer`: "TTL 스윕 반납 공식은 버그가 아니라 정답이었다" | `release_quota_before_delete`는 `status='held'`일 때만 `greatest(reserved − consumed, 0)`을 반납. **실 SQL 실행**: 예약 17 · 소비 5인 데모 계정을 스윕 → 원장 `held 17 → 5`. **쓴 만큼만 남고 안 쓴 12만 돌아갔습니다.** 세션·동의 연쇄 삭제 확인, 실계정은 생존 | **사실 (정정이 옳았음)** |
+| `shadcn-ui-engineer`: "report 화면의 '같은 이력서로 다시 하기'를 데모에서 숨겼다" | `report/page.tsx:199` `{demo ? null : <RepeatSessionButton … />}`. 그 버튼은 `POST /api/sessions`(#3)를 부르므로 익명에게는 403이었을 것. 실패 분기의 "새 면접 시작"(`/sessions/new`)도 데모에서는 `/login`으로 갈아 끼워져 있음 | **사실** |
+
+덧붙여 화면 4곳의 데모 분기를 전수 확인했습니다 — `ready`(배지·배너·[설정 변경] 미렌더),
+`interview`(배지·배너), `transcript`(배지·배너), `report`(배지·반복 버튼 제거·전환 CTA).
+배지 컴포넌트는 `demo-notice.tsx` **한 파일**을 3화면이 공유하고, `app-shell.tsx`는
+익명 사용자에게 `DemoShell`(네비 없음, [계정 만들기]만)을 그립니다 — `useDashboard()`(#1)가
+익명에게 403이므로 **부르지도 않습니다.**
+
+#### 8.10.9 경계 대조 — API ↔ 훅
+
+| 경계 | 프로듀서 | 컨슈머 | 판정 |
+|---|---|---|---|
+| `#43` 봉투 | `single("demoCapacity", …)` | `const { demoCapacity } = await fetchJson<{ demoCapacity: DemoCapacity }>` | ○ |
+| `#43` 필드 5개 | `DemoCapacityDto` (capacity/route.ts) | `DemoCapacity` (types.ts:369) | **5/5 이름·타입 일치** |
+| `#42` 봉투 | `single("session", …, {status:201})` | `const { session } = …` | ○ (한 겹, `sessionId` 별도 필드 없음) |
+| `#42` 상태 | 라우트가 예약·플래너까지 끝내고 `ready` 반환 | 훅이 `routeForStatus()`에 넘기지 않고 `/sessions/{id}/ready`로 직행 | ○ |
+| `consentVersion` | `CURRENT_DEMO_CONSENT_VERSION` | `#43` 응답값을 그대로 되돌려 보냄(하드코딩 아님) | ○ |
+| 오류 코드 | `demo_already_consumed`(409)·`capacity_unavailable`(503)·`trial_consent_required`/`consent_version_stale`(409)·`provider_unavailable`(503)·`not_found`(404)·`forbidden`(403) | `StartError`가 `error.code`로 **직접 분기**(소거법 아님) | ○ |
+
+`useCapacity`(#36)와 `useDemoCapacity`(#43)의 타입이 분리되어 있습니다 — 합쳤다면
+익명 사용자에게 키 연결 CTA를 그리는 분기가 따라왔을 자리입니다.
+
+#### 8.10.10 검증 도구
+
+| 명령 | 결과 |
+|---|---|
+| `npm run typecheck` | **통과** (`next typegen` + `tsc --noEmit`, 오류 0) |
+| `npm run lint` | **통과** (출력 없음) |
+| `npm run build` | **통과**. 라우트 목록에 `/demo`·`/auth/callback`·`/api/demo/capacity`·`/api/demo/sessions` 전부 등재, `ƒ Proxy (Middleware)` 활성 |
+
+언어 정책·shadcn 전용 제약도 재확인했습니다 — 새 컴포넌트가 쓰는 것은
+`alert`·`badge`·`button`·`card`·`checkbox`·`label`·`separator`로 전부 shadcn이고,
+새 UI 의존성은 없습니다. 코드 식별자는 전부 영어(`demo`·`flash_lite_demo`·`account_type`·
+`demo_consumed_at`·`canStartDemo`), 사용자 문구·주석·문서는 전부 한국어입니다.
+
+---
+
+#### 이번 라운드 발견 (critical 0 · high 0 · medium 0 · low 6)
+
+**D1 (low) — `/api/trial-consent`가 익명 사용자에게 열려 있습니다 (문서화된 매트릭스와 불일치)**
+- 위치: `src/proxy.ts:65` — `DEMO_ALLOWED_API_PATTERNS`에 `/^\/api\/trial-consent\/?$/u`
+- 현재: 익명(데모) 계정이 `POST /api/trial-consent`를 호출해
+  `consent_version = CURRENT_TRIAL_CONSENT_VERSION`(**체험** 버전) 행을 `trial_consents`에
+  만들고 `account_events`에도 기록할 수 있습니다.
+- 기대: D35-2의 접근 매트릭스에도, `src/proxy.ts` 자신의 주석 표에도 이 경로는 없습니다.
+  데모 동의는 `#42`가 서버에서 `demo-1.0.0`으로 직접 기록하므로 **클라이언트가 이 라우트를
+  부를 이유가 없습니다.**
+- 실제 영향: **권한 상승 없음.** `#42`는 `consentVersion !== 'demo-1.0.0'`이면 409이고,
+  DB 트리거 (3)은 "동의 행이 존재하는가"까지만 보므로 우회되는 가드가 없습니다.
+  남는 것은 익명 계정에 대한 불필요한 쓰기 표면과 동의 원장 오염입니다.
+- 고치는 법: `DEMO_ALLOWED_API_PATTERNS`에서 `trial-consent` 항목을 제거하거나,
+  유지해야 한다면 `src/proxy.ts`의 매트릭스 표와 D35-2 문서에 근거와 함께 추가하세요.
+- 소유자: `vercel-platform-engineer`
+
+**D2 (low) — `safeNextPath()`가 점 세그먼트를 정규화하지 않습니다**
+- 위치: `src/lib/auth/next-path.ts:40~46`
+- 현재: `/..//evil.com`이 그대로 통과합니다(실행 확인).
+- 실제 영향: **오픈 리다이렉트 아님.** 두 소비처가 `new URL(path, origin)`·`<Link href>`로
+  해석해 같은 오리진에 머무릅니다(`https://app.example.com//evil.com`).
+- 기대: 세 번째 소비처가 이 값을 `location.href`나 `<a href>`에 **날것으로** 넣는 순간
+  `//evil.com`은 프로토콜 상대 URL이 됩니다. 함수 주석이 "이 함수가 유일한 사본"이라고
+  선언한 이유가 그것입니다.
+- 고치는 법: 반환 직전 `new URL(value, "http://x")`로 정규화해 `pathname + search + hash`만
+  돌려주거나, `value.split("/").includes("..")`이면 기본값으로 떨어뜨리세요.
+- 소유자: `vercel-platform-engineer`
+
+**D3 (low) — 서버 쪽 데모 잠금장치가 빌드 시점 값입니다**
+- 위치: `src/lib/env.public.ts:37` → `src/lib/demo/policy.ts:41` `assertDemoEnabled()`
+- 현재: `NEXT_PUBLIC_DEMO_ENABLED`는 Next가 빌드에 인라인하므로, Vercel에서 값을 바꿔도
+  **재배포 전까지 `/demo`와 `/api/demo/*`가 계속 열려 있습니다.** 빌드 산출물에서
+  `/demo`가 `○ (Static)`인 것도 같은 사실을 보여 줍니다.
+- 실제 영향: **긴급 차단 수단은 있습니다** — `GEMINI_API_KEY_DEMO`를 제거하면
+  `serverEnv()`가 런타임에 `process.env`를 읽으므로 새 인스턴스부터 **503**입니다.
+  그래서 low입니다.
+- 고치는 법: `assertDemoEnabled()`가 `serverEnv().DEMO_ENABLED`(서버 전용, 런타임)를 보게 하고
+  `NEXT_PUBLIC_DEMO_ENABLED`는 버튼 렌더 판정에만 남기세요. 또는 `05_deploy.md`에
+  "플래그를 끄려면 재배포가 필요하고, 즉시 차단은 데모 키 제거"라고 명시하세요.
+- 소유자: `vercel-platform-engineer`
+
+**D4 (low) — 데모 구조적 상한이 환경변수 두 개로 조용히 사라질 수 있습니다**
+- 위치: `src/lib/env.server.ts:73` (`AI_RESERVE_FLASH_LITE_PER_DEMO`가 `nonnegative`),
+  `src/lib/quota/limits.ts`의 `isGateInert()`
+- 현재: `AI_RESERVE_FLASH_LITE_PER_DEMO=0`이면 `sessionRequest("demo")`가 전 버킷 0이 되어
+  예약 루프가 전부 `continue`하고, 원장에 아무것도 기록되지 않은 채 데모가 무제한으로
+  열립니다. `AI_QUOTA_GATE_ENABLED=false`도 같은 결과입니다.
+- 기대: D35-2 장치 ①은 "**구조적** 상한"이며, 오타 하나로 없어져서는 안 됩니다.
+- 고치는 법: `AI_RESERVE_FLASH_LITE_PER_DEMO`를 `positive()`로 좁히고,
+  `AI_DEMO_DAILY_SESSIONS`도 `positive()`로. 게이트 전역 스위치가 꺼진 배포에서
+  `demoEnabled`가 켜져 있으면 부팅 경고를 남기세요(`warnIfQuotaGateInert` 옆).
+- 소유자: `vercel-platform-engineer`
+
+**D5 (low) — 공개 API 판정이 접두사 일치입니다**
+- 위치: `src/proxy.ts:51` `PUBLIC_API_PREFIXES = ["/api/demo/capacity"]` + `startsWith`
+- 현재: `/api/demo/capacity-internal` 같은 경로가 생기면 **미인증으로 열립니다.**
+  지금은 해당 라우트가 없어 404이므로 실제 노출은 없습니다.
+- 고치는 법: 이 목록만 완전 일치(`pathname === prefix`)로 판정하세요.
+  주석이 이미 "여기에 라우트를 더 추가하기 전에…"라고 경고하고 있는데, 판정식이 그 경고보다
+  느슨합니다.
+- 소유자: `vercel-platform-engineer`
+
+**D6 (low) — "24시간 1회"는 TTL 스윕이 도는 것에 의존합니다**
+- 위치: `profiles.demo_consumed_at` 검사(`#42`·`#43`)와
+  `sweep_expired_demo_accounts`(크론 C1 워치독 6번)
+- 현재: 코드상의 제한은 **계정당 영구 1회**이고, "24시간"은 계정이 24시간 뒤 삭제된다는
+  사실에서 나옵니다. 스윕이 며칠 실패하면 같은 브라우저에는 "다시는 못 함"으로 보이고,
+  화면 문구는 계속 "24시간 뒤에 다시 시도하거나"라고 말합니다.
+- 실제 영향: 쿠키를 지우면 되므로 사용자가 완전히 막히지는 않습니다.
+- 고치는 법: `#42`·`#43`의 검사를 `demo_consumed_at < now() - interval '24 hours'`면 통과로
+  바꾸거나(문구와 코드를 일치시킴), 스윕 실패를 `WatchdogReport`에서 별도로 드러내세요.
+  현재 `sweepExpiredDemoAccounts`는 실패 시 `console.error`만 남기고 리포트에는
+  `demoAccountsDeleted: 0`으로만 보입니다 — "지울 게 없었다"와 구분되지 않습니다.
+- 소유자: `supabase-engineer` · `vercel-platform-engineer`(경계 이슈 — 한쪽만 고치면 어긋납니다)
+
+---
+
+#### 통과 확인 항목
+
+- 데모 버킷 격리(실 SQL) · 재원↔버킷 짝 양방향(실 SQL) · 계정↔재원 짝 양방향(실 SQL)
+- 익명 role RLS 전면(실 SQL) · `demo_documents` 쓰기 거부(실 SQL) · 함수 실행 권한 3종
+- TTL 스윕의 부분 반납 공식(실 SQL, `17 → 5`) · 연쇄 삭제 · 실계정 미영향
+- `POST /api/sessions` 3겹 차단 · 프록시 접근 매트릭스 10행 중 9행
+- `funding_source` 3종 분기 전수(부정 비교 0건) · BYOK CTA 데모 미도달
+- `safeNextPath()` 단일 사본 · 페이로드 19종 차단
+- 플래그 꺼짐 시 404/503(500 누출 없음) · 데모 키 누락 시 503 · 공용 키 폴백 없음
+- `#42`·`#43` 봉투·필드·오류코드 대조 · 데모 화면 4곳 분기 · `app-shell` 익명 껍데기
+- `NEXT_PUBLIC_` 키 노출 0 · shadcn 전용 유지 · 언어 정책 준수
+- `typecheck` · `lint` · `build` 3종 통과
+
+#### 미검증 항목 (통과 아님)
+
+1. **실제 Google OAuth 왕복.** `exchangeCodeForSession()`을 한 번도 실행하지 않았습니다.
+   프로바이더 콘솔의 클라이언트 ID·리다이렉트 URI 등록은 이 코드 범위 밖이며 확인하지 못했습니다.
+2. **Supabase 대시보드의 익명 로그인 활성화 여부.** 꺼져 있으면 `signInAnonymouslyForDemo()`가
+   실패하고 **데모 진입 자체가 불가능**합니다(`04_data_layer.md` 15.10절). 설정을 읽지 못했습니다.
+3. **`POST /api/demo/sessions`의 실제 실행.** 실 LLM 플래너 호출(8~20초)과 그 뒤의
+   `configuring → ready` 전이, 실패 시 전체 롤백을 **한 번도 돌려 보지 않았습니다.**
+   DB 쪽 부품은 개별로 검증했지만 **한 요청 안에서 이어지는 것은 미검증**입니다.
+4. **프록시의 런타임 동작.** 302·401·403을 코드로만 대조했고 실제 요청을 보내지 않았습니다.
+5. **데모 면접의 실제 진행** — 음성 모달리티, 꼬리질문, `demo_consumed_at` 기록 시점,
+   평가·리포트까지의 완주. 8.9절의 미검증 항목이 데모 경로에도 그대로 남아 있습니다.
+6. **크론 워치독 6번의 실제 실행.** 함수는 실 SQL로 검증했지만 크론 라우트는 실행하지 않았습니다.
+7. **시드 문서 10건의 내용 검수.** 행 수·직군·`seed_version`만 확인했고 본문은 읽지 않았습니다.
+8. **동시성.** 데모 정원 마지막 1자리를 두 요청이 동시에 다투는 상황을 재현하지 않았습니다
+   (`pg_advisory_xact_lock`과 조건부 UPDATE가 있음은 코드로 확인).
+
+#### 최종 집계 (전 라운드 누계, 2026-09-15 D35 라운드 종료 시점)
+
+| 심각도 | 이번 라운드 신규 | 잔존 (전 라운드 포함) |
+|---|---|---|
+| critical | **0** | **0** |
+| high | **0** | **0** |
+| medium | **0** | **2** (8.9절 M1·M2) |
+| low | **6** (D1~D6) | **11** (D1~D6 + 8.9절 L1~L4 + 8.8절 Q11) |
+
+#### 이 브랜치는 머지 가능한가 — **가능합니다 (조건부 승인)**
+
+**판정: 머지할 수 있습니다.** critical·high가 **0건**이고, 이번 기능의 **핵심 위험 하나**였던
+"데모가 체험 정원 12세션을 갉아먹는가"에 대해 **실제 데이터베이스에서 아니라는 증거를 얻었습니다.**
+
+근거:
+- **정원 침식 0 — 실측.** 체험 원장 `flash_lite` 행이 데모 예약 17 이후에도 `held=100`,
+  `granted_total=0`으로 그대로였습니다. 격리가 분기가 아니라 **데이터 구조**라는 D35-1의
+  핵심 주장이 코드 리뷰가 아니라 실행으로 확인됐습니다.
+- **짝 강제가 4방향 전부 작동** — 재원↔버킷 양방향, 계정↔재원 양방향.
+  라우트 분기 하나를 빠뜨려도 DB가 막습니다.
+- **익명 사용자의 체험 경로가 3겹으로 닫혀 있습니다**(프록시·라우트·DB 트리거).
+- **RLS를 익명 클레임으로 직접 재현**했고, 익명 사용자가 읽을 수 있는 것은
+  `demo_documents` 10행뿐이며 쓰기는 거부됐습니다.
+- **3라운드 에이전트의 자기 보고 3건이 전부 사실**이었습니다. 특히
+  `consume_session_quota` 수정은, 하지 않았다면 데모 원장이 "여력 있음"이라고 답하는 동안
+  프로바이더가 429를 돌려주는 상태를 만들었을 결함입니다.
+- `typecheck`·`lint`·`build` 3종 통과, low 6건은 전부 **현재 실제 노출이 없는 강화 항목**입니다.
+
+**조건 — PR 설명에 반드시 적을 것:**
+1. **데모 경로 전체가 런타임으로는 한 번도 실행되지 않았습니다.** DB 부품은 실 SQL로
+   검증했지만 **`POST /api/demo/sessions` 한 요청이 끝까지 이어지는 것은 미검증**입니다.
+   스테이징에서 데모 세션 1건을 `/demo` → `ready` → 첫 답변(`demo_consumed_at` 기록 확인)
+   → `report`까지 돌려 보는 것이 머지 후 첫 작업이어야 합니다.
+2. **`NEXT_PUBLIC_DEMO_ENABLED=true`로 켜기 전에 `GEMINI_API_KEY_DEMO`가 운영 키와
+   다른 프로젝트의 키인지 실측 확인하세요.** 같은 프로젝트 키를 넣으면 원장 두 행
+   (`flash_lite` 425 / `flash_lite_demo` 170)이 합쳐 실제 RPD를 넘고, **이 라운드가 확인한
+   격리가 그 순간 무의미해집니다.** 코드가 막아 줄 수 없는 유일한 지점입니다.
+3. **Supabase 대시보드에서 익명 로그인을 켜고 IP 레이트 리밋(D35-2 장치 ③)을 설정하세요.**
+   끄면 데모가 아예 동작하지 않고, 레이트 리밋 없이 켜면 장치 ①만 남습니다.
+4. **D1**(`/api/trial-consent` 익명 통과)은 권한 상승이 아니지만 **문서화된 접근 매트릭스와
+   코드가 어긋난 유일한 행**입니다. 제거하든 문서에 추가하든 한쪽으로 맞추세요.
+5. 8.9절의 **M1·M2**는 이번 라운드에서 손대지 않았으며 그대로 잔존합니다.
