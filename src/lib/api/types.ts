@@ -39,7 +39,15 @@ export const PAUSE_REASONS = [
 ] as const;
 export type PauseReason = (typeof PAUSE_REASONS)[number];
 
-export type FundingSource = "trial_shared" | "byok";
+/**
+ * **D35로 3종이 됐습니다.** `demo`는 로그인 없는 데모 체험(익명 계정)입니다.
+ *
+ * ⚠️ **`demo`를 `trial_shared`와 묶는 분기를 쓰지 마세요**(`06_ui_plan.md` 4.16절).
+ * 예를 들어 "체험 세션이면 키 연결 CTA"라는 기존 조건에 `demo`가 딸려 들어가면
+ * 익명 사용자를 **들어갈 수 없는 화면**(`/settings/api-key`)으로 보냅니다.
+ * 분기는 `fundingSource === 'trial_shared'`로 **정확히** 씁니다.
+ */
+export type FundingSource = "trial_shared" | "byok" | "demo";
 export type KeyStatus = "none" | "connected" | "invalid";
 export type TrialStatus = "available" | "consumed";
 export type Modality = "voice" | "text";
@@ -348,6 +356,25 @@ export type Capacity = {
   /** #41 요청에 **그대로 되돌려 보냅니다.** 하드코딩하면 409 `consent_version_stale`입니다. */
   consentVersion: string;
   /** `null`이면 기다려도 풀리지 않는 벽입니다 — "내일 오세요"를 렌더하지 마세요. */
+  availableAtIso: string | null;
+};
+
+/**
+ * #43 `GET /api/demo/capacity` → `{ demoCapacity: DemoCapacity }` (D35).
+ *
+ * **`Capacity`와 다른 타입입니다.** `keyStatus`·`trialStatus`·`requiresTrialConsent`가 없습니다 —
+ * 익명 사용자는 키를 연결할 수 없고 체험 1회를 갖지도 않습니다. 두 타입을 합치려 하면
+ * 익명 사용자에게 키 연결 CTA를 그리는 분기가 따라옵니다.
+ */
+export type DemoCapacity = {
+  canStartDemo: boolean;
+  /** `consumed`면 이 브라우저의 익명 계정이 **이미 데모를 썼습니다**(24시간 1회). */
+  demoStatus: "available" | "consumed";
+  /** `consumed`일 때만 값이 있습니다 — "받은 리포트 다시 보기"의 목적지입니다. */
+  existingSessionId: string | null;
+  /** `'demo-1.0.0'`. #42 요청에 **그대로 되돌려 보냅니다.** */
+  consentVersion: string;
+  /** 정원 소진일 때만. **데모 소진(`consumed`)이면 `null`** 입니다. */
   availableAtIso: string | null;
 };
 

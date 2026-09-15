@@ -6,8 +6,10 @@ import { ApiError } from "@/lib/api/errors";
 import { list, single } from "@/lib/api/respond";
 import { handle, readJson, requireUser } from "@/lib/api/route";
 import { IDLE_PREPARATION, toSessionDto } from "@/lib/api/serialize";
+import { assertNotDemoAccount } from "@/lib/demo/policy";
 import { peekCapacity } from "@/lib/quota/gate";
 import { nextQuotaResetAt, secondsUntilQuotaReset } from "@/lib/quota/quota-date";
+import { translateFundingRuleError } from "@/lib/session/funding-errors";
 import { SESSION_STATUSES, type FundingSource, type SessionStatus } from "@/lib/session/status";
 import { recordSessionCreated } from "@/lib/session/store";
 import { toSessionSummaries } from "@/lib/session/summary";
@@ -56,6 +58,12 @@ export function POST(request: Request) {
     // 사용자 문맥 클라이언트로는 키의 존재 여부조차 읽을 수 없습니다.
     const admin = createAdminClient();
 
+    // **익명(데모) 계정은 여기서 끝입니다** (D35-2). 막지 않으면 익명 사용자가 `trial_shared`
+    // 세션을 만들어 하루 12세션의 체험 정원을 먹고, 증상은 "체험 정원이 왜인지 부족하다"로만
+    // 보입니다. 프록시가 첫 겹, 이 가드가 둘째 겹, DB 트리거(`account_funding_mismatch:demo`)가
+    // 마지막 겹입니다 — **한 겹이라도 빼면 안 됩니다.**
+    await assertNotDemoAccount(user, admin);
+
     const fundingSource = await resolveFundingSource(user.id, admin);
     if (fundingSource === null) {
       throw trialExhaustedError();
@@ -94,7 +102,12 @@ export function POST(request: Request) {
       .single();
 
     if (error || !data) {
-      throw new ApiError("internal_error", "요청을 처리하지 못했습니다.", { cause: error });
+      // 계정 유형↔재원 짝 위반(D35-2)은 **500으로 흘리지 않습니다** — 익명 계정이 체험 정원을
+      // 노린 시도가 일반 오류에 섞이면 로그에서도 구분되지 않습니다.
+      throw (
+        translateFundingRuleError(error?.message) ??
+        new ApiError("internal_error", "요청을 처리하지 못했습니다.", { cause: error })
+      );
     }
 
     // 전이 표 1행. `from_status`는 `null`(행이 아직 없었음)이며 CHECK가 이를 허용합니다.

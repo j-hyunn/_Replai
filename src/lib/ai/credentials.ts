@@ -2,7 +2,7 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { ROLE_BUCKET, type AgentRole, type ModelBucket } from "@/lib/ai/roles";
+import { bucketFor, type AgentRole, type ModelBucket } from "@/lib/ai/roles";
 import { ApiError } from "@/lib/api/errors";
 import { serverEnv } from "@/lib/env.server";
 import type { FundingSource } from "@/lib/session/status";
@@ -110,7 +110,8 @@ export async function resolveCallCredentials(
   }
 
   const fundingSource = session.funding_source as FundingSource;
-  const base = { sessionId, role, bucket: ROLE_BUCKET[role], fundingSource };
+  // **버킷은 역할만으로 정해지지 않습니다** — 데모 세션은 전 역할이 `flash_lite_demo`입니다(D35-1).
+  const base = { sessionId, role, bucket: bucketFor(role, fundingSource), fundingSource };
 
   if (fundingSource === "byok") {
     const { data: key, error: keyError } = await admin.rpc("get_user_api_key", {
@@ -132,12 +133,36 @@ export async function resolveCallCredentials(
     return createCallContext(base, key);
   }
 
+  // 데모는 **다른 프로젝트의 두 번째 무료 키**를 씁니다 (D35-1).
+  // **운영 공용 키로 폴백하지 않습니다** — 폴백하면 데모가 체험 세션과 같은 RPD를 먹고,
+  // 원장의 두 행(`flash_lite` 425 / `flash_lite_demo` 170)이 합쳐서 실제 한도를 넘습니다.
+  // 그 순간 원장이 거짓말을 시작하고 하루 12세션 정원이 조용히 깨집니다.
+  if (fundingSource === "demo") {
+    const demoKey = serverEnv().GEMINI_API_KEY_DEMO;
+    if (!demoKey) {
+      throw new ApiError("provider_unavailable", "지금은 데모 면접을 진행할 수 없습니다.", {
+        cause: "GEMINI_API_KEY_DEMO_missing",
+      });
+    }
+    return createCallContext(base, demoKey);
+  }
+
   const sharedKey = sharedProviderKey();
   if (!sharedKey) {
     throw new ApiError("provider_unavailable", "지금은 면접을 진행할 수 없습니다.");
   }
 
   return createCallContext(base, sharedKey);
+}
+
+/**
+ * 데모 키가 준비되어 있는가 — 데모 진입 라우트(#42)가 **AI를 부르기 전에** 확인합니다.
+ *
+ * 키 없이 진입시키면 세션 행과 예약이 만들어진 뒤 플래너에서 터집니다. 그 상태의 롤백은
+ * 가능하지만, 원인이 "환경변수 누락"임을 로그에서만 알 수 있게 됩니다.
+ */
+export function isDemoProviderConfigured(): boolean {
+  return serverEnv().GEMINI_API_KEY_DEMO !== undefined;
 }
 
 /**

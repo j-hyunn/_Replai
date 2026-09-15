@@ -9,6 +9,7 @@ import {
   completeSession,
   enqueueEvaluation,
   failSession,
+  fundingSourceOf,
   releaseExpiredReservation,
   settleEvaluatedSession,
 } from "@/lib/session/lifecycle";
@@ -16,7 +17,7 @@ import { applyTransition, loadSessionDerived, type Admin } from "@/lib/session/s
 import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
- * C1 `GET /api/cron/daily` — 일 1회 워치독 **5종** (계약 4.1절 · `05_deploy.md` 5절).
+ * C1 `GET /api/cron/daily` — 일 1회 워치독 **6종** (계약 4.1절 · `05_deploy.md` 5절).
  *
  * `Authorization: Bearer ${CRON_SECRET}` 검사가 **이 라우트의 유일한 인증**입니다(미들웨어는
  * 크론 경로를 통과시킵니다). Hobby 크론은 하루 1회가 상한이고 ±59분 오차가 있습니다.
@@ -28,6 +29,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
  * | 3 | `evaluating` 지연 | `evaluations.started_at`이 10분보다 오래면 재시도 잔여 시 I2 재기동, 소진 시 `failed`(30행). 평가가 이미 `succeeded`면 정산 전이(28행)만 대신 밟습니다 |
  * | 4 | `completed` 고아 | 평가가 등록됐는데(또는 등록조차 안 됐는데) 아무도 집지 않은 세션을 다시 굴립니다 |
  * | 5 | 만료 예약 | 어제 이전 날짜의 `held` 예약 행을 `expired`로 반납합니다(반납 6지점 #6) |
+ * | 6 | **익명 계정 TTL** | 생성 후 24시간이 지난 `is_anonymous` 계정을 계정째 삭제합니다(D35-2) |
  *
  * **3·4번이 QA R1의 마지막 안전망입니다.** I2는 자기 재시도와 자기 재호출로 스스로 굴러가지만,
  * 함수가 통째로 죽으면(배포 중 종료·플랫폼 상한) 그 자리에 구동자가 없습니다. 그때 세션이
@@ -58,7 +60,14 @@ type WatchdogReport = {
   evaluationRedriven: number;
   evaluationFailed: number;
   reservationsExpired: number;
+  demoAccountsDeleted: number;
 };
+
+/**
+ * 익명 계정 TTL (D35-2). 24시간은 "리포트를 보고 돌아올 만한 시간"의 상한이며,
+ * 기존 보존 정책(무기한)의 **의도된 예외**입니다.
+ */
+const DEMO_ACCOUNT_TTL_HOURS = 24;
 
 export function GET(request: Request) {
   return handle(async () => {
@@ -73,6 +82,7 @@ export function GET(request: Request) {
       evaluationRedriven: 0,
       evaluationFailed: 0,
       reservationsExpired: 0,
+      demoAccountsDeleted: 0,
     };
 
     const overdue = (): boolean => Date.now() - startedAt > SOFT_DEADLINE_MS;
@@ -82,6 +92,7 @@ export function GET(request: Request) {
     if (!overdue()) await sweepEvaluating(admin, report);
     if (!overdue()) await sweepOrphanCompleted(admin, report);
     if (!overdue()) await sweepExpiredReservations(admin, report);
+    if (!overdue()) await sweepExpiredDemoAccounts(admin, report);
 
     return compound({ ok: true as const, watchdogs: report });
   });
@@ -273,17 +284,53 @@ async function sweepExpiredReservations(admin: Admin, report: WatchdogReport): P
     try {
       const { data: session } = await admin
         .from("interview_sessions")
-        .select("status")
+        .select("status, funding_source")
         .eq("id", sessionId)
         .maybeSingle();
       if (!session) continue;
 
-      await releaseExpiredReservation(sessionId, sessionStatusOf(session), admin);
+      // 재원을 함께 읽습니다 — `trial_shared`와 `demo`는 버킷이 다르고, 상수로 박으면
+      // 데모 예약을 "체험인 척" 반납하게 됩니다(D35).
+      await releaseExpiredReservation(
+        sessionId,
+        sessionStatusOf(session),
+        fundingSourceOf(session),
+        admin,
+      );
       report.reservationsExpired += 1;
     } catch (error) {
       logSkip("reservation", sessionId, error);
     }
   }
+}
+
+// ── 6 · 익명 계정 TTL 스윕 (D35-2 · `04_data_layer.md` 15.8절) ───────────────
+
+/**
+ * 24시간이 지난 익명 계정을 계정째 지웁니다. **함수 하나를 부르는 것이 전부입니다** —
+ * 삭제 연쇄(`profiles` → 세션 → 질문·턴·평가·동의·이벤트)와 **예약 반납**(`before delete`
+ * 트리거)은 전부 DB 안에서 일어납니다.
+ *
+ * - **멱등입니다.** 기준이 "생성 후 24시간"이라 못 끝낸 잔여는 다음 날 그대로 다시 걸립니다.
+ * - `for update skip locked` + `limit`으로 배치화돼 있어 크론의 240초 예산을 넘지 않습니다.
+ * - **Storage 정리와 겹치지 않습니다** — 데모는 업로드를 제공하지 않아 객체가 생기지 않습니다.
+ * - `service_role`에만 실행 권한이 있으므로 admin 클라이언트로 부릅니다.
+ *
+ * 실패해도 다른 워치독을 멈추지 않습니다. 이 스윕이 하루 밀리면 익명 계정이 하루 더 남을 뿐이고,
+ * 그 손실은 평가·완주 회수를 통째로 잃는 것보다 작습니다.
+ */
+async function sweepExpiredDemoAccounts(admin: Admin, report: WatchdogReport): Promise<void> {
+  const { data, error } = await admin.rpc("sweep_expired_demo_accounts", {
+    p_ttl_hours: DEMO_ACCOUNT_TTL_HOURS,
+    p_limit: BATCH,
+  });
+
+  if (error) {
+    console.error("[cron] 익명 계정 스윕에 실패했습니다", { message: error.message });
+    return;
+  }
+
+  report.demoAccountsDeleted = data?.length ?? 0;
 }
 
 // ── 공통 ─────────────────────────────────────────────────────────────────────

@@ -8,6 +8,20 @@
 > 짝 문서: `05_deploy.md`(환경변수·런타임·무료 플랜 한도)
 
 ## 변경 로그
+- 2026-09-15 **D35 반영 — Google OAuth + 데모 체험 (`vercel-platform-engineer`, 구현 완료).**
+  - **엔드포인트 41 → 43.** `#42 POST /api/demo/sessions`(데모 진입, **응답 상태는 항상 `ready`**),
+    `#43 GET /api/demo/capacity`(**미인증 공개**). 라우트 핸들러 `GET /auth/callback`은 JSON을
+    돌려주지 않으므로 엔드포인트 표에 넣지 않았습니다.
+  - **오류 코드 1개 추가** — `409 demo_already_consumed`(`details.existingSessionId`).
+    **DB의 짝 위반 예외 2종을 503/403으로 번역**했습니다(13절 새 표) — 500으로 새면 익명 계정의
+    체험 정원 침범 시도가 로그에서 구분되지 않습니다.
+  - **미들웨어 판정이 2차원이 됐습니다**(7.2절 새 표). "로그인했는가" + "익명인가".
+  - **C1 워치독 5종 → 6종**(익명 계정 24시간 TTL 스윕).
+  - **`#3 POST /api/sessions`는 익명 계정에 403**입니다 — 프록시·라우트·DB 트리거 **3겹**입니다.
+  - **버킷이 3종 → 4종**(`flash_lite_demo`). `sessionRequest(fundingSource)`가 재원에서 버킷을
+    정하므로 라우트는 버킷을 직접 적지 않습니다. 게이트 4함수의 진입부 가드는
+    `!== 'trial_shared'`에서 `!hasQuotaReservation(fundingSource)`로 바뀌었습니다 —
+    부정 비교를 되돌리면 데모가 전부 no-op이 되어 원장을 통과합니다.
 - 2026-09-14 (2차) **구현 반영 — 남은 25개 엔드포인트 (`vercel-platform-engineer`).**
   **계약 문안은 바뀌지 않았습니다.** 엔드포인트도 41개 그대로이고 응답 모양·오류 코드·대응 훅도
   이 문서에 적힌 그대로입니다. 이 항목은 **"이제 무엇이 구현되어 있는가"의 기록**입니다.
@@ -304,6 +318,21 @@ type EvaluationResponse = { evaluation: Evaluation | null };
 | **39** | **DELETE** | **`/api/account/api-key`** | auth | — | `{ apiKey: ApiKeyStatus }` (`keyStatus='none'`, `keyLast4=null`) | 아니오 | ~250ms | **없음**. **실제 삭제**(Vault 암호문까지, D28 4항) | `useDisconnectApiKey` |
 | **40** | **POST** | **`/api/account/api-key/verify`** | auth | — | `{ apiKey: ApiKeyStatus }` | 아니오 | ~1.5s | **없음** (`user_api_keys.status`·`last_verified_at`만 갱신) | `useVerifyApiKey` |
 | **41** | **POST** | **`/api/trial-consent`** | auth | `{ consentVersion: string, sessionId?: string \| null }` | `201 { consent: TrialConsent }` (같은 버전 재동의는 **멱등**, `200`) | 아니오 | ~200ms | **없음** (`configuring → ready`의 **가드 충족**일 뿐 전이가 아닙니다) | `useGrantTrialConsent` |
+| **42** ★D35 | **POST** | **`/api/demo/sessions`** | auth (**익명 계정만**) | `{ jobRole, modality, consentVersion }` | `201 { session: Session }` — **`session.status`는 항상 `ready`** | 아니오 | **8~20s**(플래너를 기다립니다) | **(없음) → `configuring` → `ready`** — 두 전이를 한 요청에서 연달아. 실패 시 **행을 남기지 않고 전체 롤백** | `useStartDemo` |
+| **43** ★D35 | **GET** | **`/api/demo/capacity`** | **없음(공개)** | — | `{ demoCapacity: DemoCapacity }` (**수치 없음**) | 아니오 | ~150ms | **없음** | `useDemoCapacity` |
+
+> **#42의 응답 상태는 `ready`입니다 — `configuring`이면 버그입니다.** `/demo`에는 설정 화면이
+> 없어서 `configuring`을 `route-for-status`에 넘기면 방문자가 쓰지 않는 `/sessions/new`로
+> 떨어집니다. **이 화면에서 `usePrepareSession`(#6)을 따로 부르지 마세요** — 이중 예약입니다.
+> 응답은 `{ session: Session }` 한 겹이므로 이동할 id는 **`session.id`** 입니다(별도 `sessionId`
+> 필드를 두지 않았습니다 — 1절 래핑 규칙 + 배지·파라미터를 그리려면 `Session` 전체가 필요합니다).
+>
+> **#43만 미인증으로 열려 있습니다.** `/demo`는 로그인 전 화면이고 시작 버튼을 누르기 전에는
+> 익명 계정조차 없습니다(`src/proxy.ts`의 `PUBLIC_API_PREFIXES`).
+>
+> **`/auth/callback`은 엔드포인트 표에 없습니다.** 페이지도 API도 아닌 **라우트 핸들러**이고
+> (`src/app/auth/callback/route.ts`), JSON을 돌려주지 않고 302만 합니다. 대응 훅이 없습니다 —
+> 브라우저가 Google에서 직접 들어옵니다. 실패는 `/login?error=oauth_failed`입니다.
 
 > **⚠️ `→ completed` 라우트가 돌려주는 `session.status`를 `completed`로 가정하지 마세요 (D18).**
 > #15와 #9는 세션을 `completed`로 옮긴 **직후 같은 요청 안에서** 평가를 등록하므로(6.2절),
@@ -317,7 +346,7 @@ type EvaluationResponse = { evaluation: Evaluation | null };
 |---|---|---|---|---|---|
 | I1 | POST | `/api/internal/jobs/plan` | internal | 플래너 실행 → `context_summary`·오프닝 질문·스냅샷 커밋 | `configuring`→`ready` |
 | I2 | POST | `/api/internal/jobs/evaluate` | internal | **평가자 → 코치를 한 호출 안에서 순차 실행**(D31, 6.2절). 1단계: `evaluations`·`evaluation_scores`·`evaluation_citations` 저장. 2단계: `summary`/`improvements`/`coach_payload`/축별 `improvement` UPDATE. body의 `stage`가 `'coach_only'`면 1단계를 건너뜁니다(#18 재시도 경로) | 평가 실패+잔여 재시도 시 `evaluating`→`completed`, 소진 시 `evaluating`→`failed`. **코치 단계는 성공·실패 어느 쪽이든 `evaluating`→`evaluated`** |
-| C1 | GET | `/api/cron/daily` | cron | 일 1회 워치독 **5종**(`05_deploy.md` 5절. **5종째는 D27 만료 예약 스윕** — `01_state_machine.md` 7.5절). **`paused`→`completed`로 보낼 때 평가를 함께 등록합니다**(D18 — 이 경로에는 클라이언트가 존재하지 않습니다). **1·2·3단계의 종료 전이는 전부 예약 반납을 동반합니다**(4.7.3절 — **단 1단계 `paused→completed`는 6을 남기는 부분 반납**입니다) | `paused`→`completed`(→ 이어서 `completed`→`evaluating`)/`abandoned`, `evaluating`→`failed`, `in_progress`→`paused` |
+| C1 | GET | `/api/cron/daily` | cron | 일 1회 워치독 **6종**(**6종째는 D35 익명 계정 TTL 스윕** — `select * from public.sweep_expired_demo_accounts(24, 200)` 한 번. 멱등이며 삭제 연쇄·예약 반납은 전부 DB 안에서 일어납니다). 이하 5종(`05_deploy.md` 5절. **5종째는 D27 만료 예약 스윕** — `01_state_machine.md` 7.5절). **`paused`→`completed`로 보낼 때 평가를 함께 등록합니다**(D18 — 이 경로에는 클라이언트가 존재하지 않습니다). **1·2·3단계의 종료 전이는 전부 예약 반납을 동반합니다**(4.7.3절 — **단 1단계 `paused→completed`는 6을 남기는 부분 반납**입니다) | `paused`→`completed`(→ 이어서 `completed`→`evaluating`)/`abandoned`, `evaluating`→`failed`, `in_progress`→`paused` |
 
 > **내부 워커 라우트는 2종입니다 (D31 — 3종에서 줄었습니다).** `POST /api/internal/jobs/coach`(구 I3)는
 > **삭제됐습니다.** 코치는 I2 안에서 평가자 다음에 이어 실행되며, 별도의 HTTP 진입점을 갖지 않습니다.
@@ -1163,16 +1192,32 @@ export const config = {
 | **보호 라우트 판정** | 아래 표 |
 | **하지 않는 일** | 리소스 소유권 확인. 미들웨어는 "로그인했는가"만 봅니다 |
 
-| 경로 | 미인증 | 인증됨 |
-|---|---|---|
-| `/`, `/login` | 통과 | `/login`은 **`/dashboard`로 302** |
-| `/dashboard`, `/sessions/**`, `/documents/**`, `/settings/**` | **`/login?next={원래 경로}`로 302** | 통과 |
-| `/api/**` (내부·크론 제외) | **401 JSON** (`{ "error": { "code": "unauthenticated", ... } }`) | 통과 |
-| `/api/internal/**` | **미들웨어 통과 없이 라우트가 `JOB_SECRET` 헤더를 검사** | 동일 |
-| `/api/cron/**` | **`Authorization: Bearer ${CRON_SECRET}`** 검사. 불일치 시 401 | 동일 |
+**D35 이후 판정이 2차원입니다.** 예전에는 "로그인했는가" 하나였지만, 이제 로그인한 사용자 중에도
+**익명(`user.is_anonymous === true`)** 이 있습니다. 익명 사용자가 `POST /api/sessions`에 닿으면
+`trial_shared` 세션을 만들어 하루 12세션의 체험 정원을 먹으므로, 통과 범위를 데모 여정으로만 좁힙니다.
+
+| 경로 | 미인증 | **익명(데모)** | 실계정 |
+|---|---|---|---|
+| `/`, `/login`, **`/demo`** | 통과 | 통과 (**`/login`도 통과** — 가입이 유일한 출구입니다) | `/login`은 **`/dashboard`로 302** |
+| **`/sessions/{id}/ready\|interview\|report\|transcript`** | `/login?next=…`로 302 | **통과** | 통과 |
+| `/dashboard`, `/sessions`, `/sessions/new`, `/documents/**`, `/settings/**` | **`/login?next={원래 경로}`로 302** | **`/login`으로 302**(`next` 없이) | 통과 |
+| **`GET /api/demo/capacity`** | **통과(공개)** | 통과 | 통과 |
+| `POST /api/demo/sessions` | 401 JSON | 통과 | **403**(라우트가 판정) |
+| `/api/sessions/{id}/**`, `/api/trial-consent` | 401 JSON | **통과**(소유권은 라우트가 다시 확인) | 통과 |
+| `POST·GET /api/sessions`, `/api/account/**`, `/api/documents/**`, `/api/dashboard`, `/api/capacity` | 401 JSON | **403 JSON** | 통과 |
+| `/api/internal/**` | **미들웨어 통과 없이 라우트가 `JOB_SECRET` 헤더를 검사** | 동일 | 동일 |
+| `/api/cron/**` | **`Authorization: Bearer ${CRON_SECRET}`** 검사. 불일치 시 403 | 동일 | 동일 |
+
+- **`/api/sessions`와 `/api/sessions/{id}/…`는 한 글자 차이입니다.** 익명 허용 패턴을
+  `^/api/sessions/`로 느슨하게 쓰면 체험 정원을 먹는 경로가 그대로 열립니다 —
+  `src/proxy.ts`의 `isDemoAllowedApi()`가 정확히 이 경로만 먼저 거릅니다.
+- **익명 판정은 `user.is_anonymous`로 합니다.** 미들웨어에서 `profiles`를 읽으면 전 요청에 DB
+  왕복이 하나 붙습니다. `profiles.account_type`은 같은 값의 사본이고(가입 트리거가 복사), 라우트와
+  DB 가드가 그쪽을 봅니다. 두 값은 가입 시점에 확정되고 이후 바뀌지 않으므로 갈라질 수 없습니다.
+- **화면 코드는 "익명 사용자가 대시보드에 들어온 경우"를 분기할 필요가 없습니다** — 도달하지 못합니다.
 
 **API 라우트를 302로 리다이렉트하지 않습니다.** fetch가 로그인 HTML을 받아 `res.json()`이
-`SyntaxError`로 터지고, 프론트에는 "알 수 없는 오류"만 보입니다. API는 **언제나 JSON 401**입니다.
+`SyntaxError`로 터지고, 프론트에는 "알 수 없는 오류"만 보입니다. API는 **언제나 JSON 401/403**입니다.
 
 ### 7.3 라우트 안에서 **다시** 확인합니다
 
@@ -1698,6 +1743,18 @@ type Capacity = {
 };
 // ★ 금지: limitCalls / heldCalls / available / 버킷별 잔여량 — 어느 것도 이 타입에 없고 앞으로도 없다
 
+// #43 GET /api/demo/capacity → { demoCapacity: DemoCapacity }   ★D35
+type DemoCapacity = {
+  canStartDemo: boolean;
+  demoStatus: 'available' | 'consumed';   // 'consumed'면 이 브라우저의 익명 계정이 이미 데모를 썼다
+  existingSessionId: string | null;       // 'consumed'일 때만. "받은 리포트 다시 보기"의 목적지
+  consentVersion: string;                 // 'demo-1.0.0'. #42 요청에 그대로 되돌려 보낸다
+  availableAtIso: string | null;          // 정원 소진일 때만. 데모 소진(consumed)이면 null
+};
+// ★ Capacity와 **다른 타입**이다. keyStatus·trialStatus·requiresTrialConsent가 없다 —
+//   익명 사용자는 키를 연결할 수 없고 체험 1회를 갖지도 않는다.
+//   `demo`를 `trial_shared`와 묶는 분기를 쓰지 마세요(키 연결 CTA가 딸려 들어갑니다).
+
 // #37~#40 → { apiKey: ApiKeyStatus }
 type ApiKeyStatus = {
   keyStatus: KeyStatus;                 // 'none'이면 아래가 전부 null
@@ -1804,7 +1861,7 @@ D4가 약속한 "접수되었습니다" 확인이 사라지고 사용자가 같�
 |---|---|---|
 | 400 | `validation_failed` | 요청 body 스키마 위반. `details.fields`에 필드별 사유(한국어) |
 | 401 | `unauthenticated` | 세션 없음·만료 |
-| 403 | `forbidden` | 내부·크론 시크릿 불일치 |
+| 403 | `forbidden` | 내부·크론 시크릿 불일치. **D35 추가 — 익명(데모) 계정이 실계정용 라우트 호출**(프록시가 `/api/demo/*`·`/api/sessions/{id}/*`·`/api/trial-consent` 외 전부를 403으로 막고, `POST /api/sessions`는 라우트와 DB 트리거(`account_funding_mismatch:demo`)가 다시 막습니다) |
 | 404 | `not_found` | 리소스 없음 **또는 남의 리소스**(구분하지 않음 — 7.3절) |
 | **409** | **`invalid_transition`** | **전이 표에 없는 조합**(`01_state_machine.md` 2절). `details: { from, to }` |
 | 409 | `turn_seq_conflict` | `answerSeq` 중복. `details: { currentSeq }` |
@@ -1813,14 +1870,34 @@ D4가 약속한 "접수되었습니다" 확인이 사라지고 사용자가 같�
 | **409** | **`trial_consent_required`** | **D29.** 체험 세션인데 **현재 문구 버전**의 동의 기록이 없는 상태로 #6 `prepare` 호출. `details: { requiredConsentVersion }`. **전이하지 않고 세션은 `configuring`에 남습니다**(4.9.2절) |
 | **409** | **`consent_version_stale`** | **D29.** #41이 보낸 `consentVersion`이 현재 버전과 다름(옛 클라이언트 번들). `details: { currentVersion }`. 프론트는 새로고침 후 다시 띄웁니다 |
 | **409** | **`trial_reservation_exists`** | **D30.** 체험 사용자가 이미 `held` 예약을 가진 채 다른 세션에서 #6 `prepare` 호출. `details: { existingSessionId }`. **전이하지 않고 세션은 `configuring`에 남습니다**(4.7.6절). **`funding_source='byok'`에서는 절대 나오지 않습니다** |
+| **409** | **`demo_already_consumed`** | **D35.** 같은 익명 계정이 이미 데모를 썼습니다(24시간 1회). `details: { existingSessionId: string \| null }` — UI는 이 id의 리포트로 보냅니다. **폴백으로 아무 세션이나 고르지 않습니다.** 신규 익명 계정 쿨다운(10분) 위반도 같은 코드입니다 |
 | **409** | **`byok_key_invalid`** | **D28.** 사용자 키가 인증 거절(재시도 1회 후 판정). `details: { keyLast4 }`. #6에서는 전이하지 않고, 면접 중이면 `paused(byok_key_invalid)`(10.2절) |
 | **409** | **`byok_quota_exhausted`** | **D28.** 사용자 키가 계정 한도 소진(백오프로 회복되지 않음). `details: { keyLast4 }`. **재개 가능 시각을 넣지 않습니다** — 우리는 그 시각을 모릅니다 |
 | 413 | `payload_too_large` | 본문 상한 초과(#9는 64KB, 그 외 1MB) |
 | 415 | `unsupported_media_type` | #9에 `multipart/form-data`·`audio/*` (P4) |
 | 429 | `rate_limited` | 프로바이더 한도. `details: { retryAfterSec }` + `Retry-After` 헤더 |
 | 500 | `internal_error` | 그 외. `message`는 일반 문구, 상세는 서버 로그로만 |
-| 503 | `provider_unavailable` | 프로바이더 영구 오류. 재시도 안내 없음 |
+| 503 | `provider_unavailable` | 프로바이더 영구 오류. 재시도 안내 없음. **D35 추가 — 데모 전용 키(`GEMINI_API_KEY_DEMO`) 미설정, 시드 문서 누락, 그리고 DB의 짝 위반 예외 2종**(아래) |
 | **503** | **`capacity_unavailable`** | **D27.** 오늘 여력이 없어 체험 세션을 시작·준비할 수 없음(#3·#6·#16·#18). `Retry-After` 헤더 동반. **`funding_source='byok'`에서는 절대 나오지 않습니다** |
+
+#### DB가 던지는 짝 위반 예외 → HTTP (D35 — **500으로 새면 안 됩니다**)
+
+DB 함수·트리거가 재원↔버킷, 계정↔재원의 짝을 강제합니다(`04_data_layer.md` 15.3·15.4절).
+이 예외가 `internal_error` 500으로 흘러가면 프론트의 일반 오류 처리에 흡수되어,
+**익명 계정이 체험 정원을 노린 시도가 로그에서도 구분되지 않습니다.** 그래서 전부 번역합니다.
+
+| DB 예외 | 어디서 | HTTP · `code` | 번역 위치 |
+|---|---|---|---|
+| `quota_bucket_mismatch:trial_shared` · `:demo` | `reserve_session_quota` | **503 `provider_unavailable`** + `console.error` | `src/lib/quota/gate.ts` `translateReserveError()` |
+| `account_funding_mismatch:demo` | `enforce_session_funding_rules` (INSERT) | **403 `forbidden`** + `console.warn` | `src/lib/session/funding-errors.ts` |
+| `account_funding_mismatch:registered` | 〃 | **503 `provider_unavailable`** + `console.error` | 〃 |
+| `quota_not_applicable:byok` | `reserve_session_quota` | 500 `internal_error` (**기존 그대로**) | `gate.ts` |
+
+**두 `account_funding_mismatch`의 상태가 다른 이유:** `:demo`는 사용자가 실제로 시도할 수 있는
+일이고(익명 세션에서 `POST /api/sessions` 직접 호출) 답은 "당신은 이걸 할 수 없다" — 403이
+정확합니다. `:registered`는 사용자가 만들 수 없는 조합이라 **우리 코드가 재원을 잘못 넣었다는
+신호**이며, 사용자에게는 503이 맞습니다. `quota_not_applicable:byok`만 500으로 남겨 둔 것은
+그것이 **진입부 가드가 뚫렸다는 뜻**이고 D28 이래 보안 사고로 다루기로 한 값이기 때문입니다.
 
 ```jsonc
 // 503 capacity_unavailable — 429 rate_limited와 반드시 구분해 주세요

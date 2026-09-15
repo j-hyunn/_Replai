@@ -264,23 +264,43 @@ async function prepareTurn(request: Request, sessionId: string): Promise<Prepare
 }
 
 /**
- * 체험 소진 기록은 **동의 시점이 아닙니다.** 후보가 **첫 주질문에 답한 턴을 저장하는 것과 같은
- * 경로에서** `where trial_consumed_at is null`로 기록합니다 — 준비만 하고 그만둔 세션은
- * 체험을 소진하지 않습니다(계약 4.9.2절).
+ * 체험·데모 소진 기록은 **동의 시점이 아닙니다.** 후보가 **첫 주질문에 답한 턴을 저장하는 것과
+ * 같은 경로에서** `where <컬럼> is null`로 기록합니다 — 준비만 하고 그만둔 세션은 소진하지
+ * 않습니다(계약 4.9.2절).
+ *
+ * **데모(`demo_consumed_at`)도 정확히 같은 규칙, 같은 위치입니다**(D35-2). 컬럼이 둘로 나뉜
+ * 이유는 의미가 다르고 한 계정이 둘 다 갖는 일이 없기 때문이며, **기록 시점은 하나입니다** —
+ * 시점을 나누면 한쪽이 빠져도 아무도 알아채지 못합니다.
  */
 async function consumeTrialIfFirstMainAnswer(
   admin: Admin,
   session: SessionRow,
   question: QuestionRow,
 ): Promise<void> {
-  if (fundingSourceOf(session) !== "trial_shared") return;
   if (question.question_kind !== "main") return;
 
-  await admin
-    .from("profiles")
-    .update({ trial_consumed_at: new Date().toISOString() })
-    .eq("id", session.user_id)
-    .is("trial_consumed_at", null);
+  const fundingSource = fundingSourceOf(session);
+  const now = new Date().toISOString();
+
+  // `byok`는 소진 개념이 없습니다 — 사용자 키는 횟수를 세지 않습니다.
+  // **두 분기를 계산된 키 하나로 합치지 않습니다** — 컬럼 이름이 문자열이 되면 오타가
+  // 타입 검사를 통과해 "소진이 기록되지 않는" 조용한 버그가 됩니다.
+  if (fundingSource === "trial_shared") {
+    await admin
+      .from("profiles")
+      .update({ trial_consumed_at: now })
+      .eq("id", session.user_id)
+      .is("trial_consumed_at", null);
+    return;
+  }
+
+  if (fundingSource === "demo") {
+    await admin
+      .from("profiles")
+      .update({ demo_consumed_at: now })
+      .eq("id", session.user_id)
+      .is("demo_consumed_at", null);
+  }
 }
 
 function buildGuards(

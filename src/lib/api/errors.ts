@@ -17,6 +17,8 @@ export const API_ERROR_CODES = [
   "trial_consent_required",
   "consent_version_stale",
   "trial_reservation_exists",
+  /** D35 — 같은 익명 계정이 데모를 이미 썼습니다. `details.existingSessionId`로 리포트에 보냅니다. */
+  "demo_already_consumed",
   "byok_key_invalid",
   "byok_quota_exhausted",
   "payload_too_large",
@@ -42,6 +44,7 @@ export const API_ERROR_STATUS: Record<ApiErrorCode, number> = {
   trial_consent_required: 409,
   consent_version_stale: 409,
   trial_reservation_exists: 409,
+  demo_already_consumed: 409,
   byok_key_invalid: 409,
   byok_quota_exhausted: 409,
   payload_too_large: 413,

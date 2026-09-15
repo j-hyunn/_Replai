@@ -89,15 +89,19 @@ async function releaseAndRecord(
  * 오늘의 여력을 잡아먹지는 않지만(원장은 날짜별) **원장과 현실이 어긋난 흔적**이므로 정리하고
  * 기록을 남깁니다.
  *
- * 예약 행은 `trial_shared` 세션에만 존재하므로 재원을 다시 조회하지 않습니다 — BYOK 세션을
- * 넘겨도 대상 행이 0건이라 아무 일도 일어나지 않습니다.
+ * **재원을 호출 측이 넘깁니다** (D35). 예약을 가진 재원이 `trial_shared` 하나였을 때는 상수로
+ * 박아도 무방했지만, 이제 `demo`도 예약을 갖습니다. 상수로 두면 게이트 진입부 가드가
+ * "체험이다"라고 믿은 채 데모 예약을 반납하게 되고, 그 상태가 정상으로 보이기 때문에
+ * **가드가 실제로는 아무것도 검사하지 않는다는 사실이 드러나지 않습니다.**
+ * `byok`를 넘기면 게이트가 no-op이며, 그 세션에는 예약 행 자체가 없습니다.
  */
 export function releaseExpiredReservation(
   sessionId: string,
   status: SessionStatus,
+  fundingSource: FundingSource,
   admin: Admin = createAdminClient(),
 ): Promise<void> {
-  return releaseAndRecord(sessionId, "trial_shared", null, "expired", status, "scheduler", admin);
+  return releaseAndRecord(sessionId, fundingSource, null, "expired", status, "scheduler", admin);
 }
 
 // ── 1번 · 부분 반납 + 평가 등록 ───────────────────────────────────────────────

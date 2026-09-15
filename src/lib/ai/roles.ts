@@ -1,6 +1,7 @@
 import "server-only";
 
 import { serverEnv } from "@/lib/env.server";
+import type { FundingSource } from "@/lib/session/status";
 
 /**
  * 역할 상수와 모델 매핑 (02_ai_architecture.md 4.4절).
@@ -20,10 +21,17 @@ export const AGENT_ROLES = [
 export type AgentRole = (typeof AGENT_ROLES)[number];
 
 /**
- * D34 이후 **활성 버킷은 `flash_lite` 하나**입니다.
- * `flash`·`pro`는 휴면(세션당 예약 0)이며 유료 전환에 대비해 값만 남겨 둡니다.
+ * **버킷은 모델이 아니라 "(키 풀 × 모델) 하나에 대응하는 독립 RPD 카운터"입니다** (D35-1).
+ *
+ * D34 이후 체험의 활성 버킷은 `flash_lite` 하나이고, `flash`·`pro`는 휴면(세션당 예약 0)입니다.
+ * **`flash_lite_demo`는 D35로 추가된 네 번째 버킷**이며 같은 모델을 쓰지만 **키가 다릅니다**
+ * (`GEMINI_API_KEY_DEMO`). 같은 키·같은 모델을 두 행으로 쪼개면 원장이 거짓말을 시작하므로,
+ * 이 버킷을 운영 공용 키에 붙이면 안 됩니다.
+ *
+ * **순서가 의미를 갖습니다** — DB 함수의 고정 잠금 순서(`pro → flash → flash_lite →
+ * flash_lite_demo`)와 같게 유지하고, 새 값은 **맨 끝에만** 붙입니다(데드락 회피 근거).
  */
-export const MODEL_BUCKETS = ["flash_lite", "flash", "pro"] as const;
+export const MODEL_BUCKETS = ["flash_lite", "flash", "pro", "flash_lite_demo"] as const;
 export type ModelBucket = (typeof MODEL_BUCKETS)[number];
 
 /** 라우트가 버킷을 직접 고르지 않습니다 — 역할이 버킷을 결정합니다 (05_api_contract.md 4.7.2절). */
@@ -34,6 +42,17 @@ export const ROLE_BUCKET: Record<AgentRole, ModelBucket> = {
   evaluator: "flash_lite",
   coach: "flash_lite",
 };
+
+/**
+ * 재원까지 반영한 버킷 (D35-1 ③ — 재원↔버킷 짝).
+ *
+ * **`demo` 세션의 모든 역할은 `flash_lite_demo`입니다.** 역할만 보고 버킷을 고르면 데모 호출이
+ * 체험 원장(`flash_lite`)에 기록되고, 그 증상은 "체험 정원이 왜인지 부족하다"로만 보입니다.
+ * DB 함수도 같은 짝을 강제하지만 그것은 마지막 방어선이지 유일한 방어선이 아닙니다.
+ */
+export function bucketFor(role: AgentRole, fundingSource: FundingSource): ModelBucket {
+  return fundingSource === "demo" ? "flash_lite_demo" : ROLE_BUCKET[role];
+}
 
 export type ProviderName = "google" | "anthropic";
 
