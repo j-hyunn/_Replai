@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { use, useEffect, useState } from "react";
 
+import { DemoBadge, DemoBanner, isDemoSession } from "@/components/common/demo-notice";
 import { EmptyState, ErrorState, LoadingCard } from "@/components/common/states";
 import {
   Accordion,
@@ -13,6 +14,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { useSession } from "@/hooks/use-sessions";
 import { useTranscript } from "@/hooks/use-transcript";
 import type { Question, Turn } from "@/lib/api/types";
 import { cn } from "@/lib/utils";
@@ -30,6 +32,13 @@ export default function TranscriptPage({
 }: PageProps<"/sessions/[sessionId]/transcript">) {
   const { sessionId } = use(params);
   const transcript = useTranscript(sessionId);
+  /*
+    배지 하나 때문에 세션을 한 번 더 읽습니다 — `#4`는 `['session', id]` 캐시를 리포트 화면과
+    공유하므로 리포트에서 넘어온 경우에는 추가 왕복이 없습니다. 실패해도 전문은 그대로
+    보여야 하므로 **오류를 화면으로 올리지 않습니다**(배지만 빠집니다).
+  */
+  const session = useSession(sessionId);
+  const demo = session.data ? isDemoSession(session.data.fundingSource) : false;
   const [highlighted, setHighlighted] = useState<string | null>(null);
 
   const ready = transcript.isSuccess;
@@ -58,11 +67,16 @@ export default function TranscriptPage({
   return (
     <main id="main" className="mx-auto w-full max-w-3xl space-y-4 px-4 py-8">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-semibold tracking-tight">대화 전문</h1>
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-2xl font-semibold tracking-tight">대화 전문</h1>
+          {demo ? <DemoBadge /> : null}
+        </div>
         <Button asChild variant="outline" size="sm">
           <Link href={`/sessions/${sessionId}/report`}>리포트로 돌아가기</Link>
         </Button>
       </div>
+
+      {demo ? <DemoBanner /> : null}
 
       {transcript.isPending ? (
         <LoadingCard lines={8} />

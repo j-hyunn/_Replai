@@ -7,6 +7,13 @@ import { use, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { ConfirmCancelDialog } from "@/components/common/confirm-cancel-dialog";
+import {
+  DemoBadge,
+  DemoBanner,
+  DemoSignUpCta,
+  isDemoSession,
+  sessionExitHref,
+} from "@/components/common/demo-notice";
 import { ErrorState, LoadingCard, NotFoundState } from "@/components/common/states";
 import { DisputeDialog, HelpfulnessFeedback } from "@/components/report/feedback";
 import { AxisScoreCard, OverallScoreCard } from "@/components/report/score-cards";
@@ -91,18 +98,29 @@ export default function ReportPage({
   }
 
   const current = session.data;
+  const demo = isDemoSession(current.fundingSource);
 
   return (
     <main id="main" className="mx-auto w-full max-w-3xl space-y-6 px-4 py-8">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-semibold tracking-tight">면접 리포트</h1>
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-2xl font-semibold tracking-tight">면접 리포트</h1>
+          {demo ? <DemoBadge /> : null}
+        </div>
         <div className="flex flex-wrap gap-2">
           <Button asChild variant="outline" size="sm">
             <Link href={`/sessions/${sessionId}/transcript`}>대화 전문</Link>
           </Button>
-          <RepeatSessionButton session={current} />
+          {/*
+            "같은 이력서로 다시 하기"는 `POST /api/sessions`(#3)를 부릅니다 — 익명 계정에게는
+            403이고, 이력서도 우리 시드라 "같은 이력서"라는 말 자체가 성립하지 않습니다.
+            데모에서는 전환 CTA가 그 자리를 대신합니다(4.16절).
+          */}
+          {demo ? null : <RepeatSessionButton session={current} />}
         </div>
       </div>
+
+      {demo ? <DemoBanner /> : null}
 
       {waiting ? <EvaluationWaiting /> : null}
 
@@ -126,6 +144,9 @@ export default function ReportPage({
           />
         )
       ) : null}
+
+      {/* 하단 전환 CTA — 체험 사용자의 키 연결 CTA와 **같은 자리, 다른 목적지**입니다. */}
+      {demo ? <DemoSignUpCta /> : null}
     </main>
   );
 }
@@ -175,6 +196,14 @@ function FailedReport({ session }: { session: Session }) {
               >
                 평가 재시도
               </Button>
+            ) : isDemoSession(session.fundingSource) ? (
+              /*
+                데모 방문자에게 `/sessions/new`는 프록시가 `/login`으로 튕겨내는 경로입니다.
+                출구는 **가입** 하나이므로 문구도 그렇게 씁니다.
+              */
+              <Button asChild size="sm">
+                <Link href="/login">회원가입하고 진짜 면접 시작하기</Link>
+              </Button>
             ) : (
               <Button asChild size="sm">
                 <Link href="/sessions/new">새 면접 시작</Link>
@@ -196,7 +225,10 @@ function FailedReport({ session }: { session: Session }) {
         pending={cancelSession.isPending}
         onConfirm={() => {
           cancelSession.mutate(session.id, {
-            onSuccess: () => router.replace("/sessions?includeCanceled=true"),
+            onSuccess: () =>
+              router.replace(
+                sessionExitHref(session.fundingSource, "/sessions?includeCanceled=true"),
+              ),
             onError: (error) => toast.error(error.message),
           });
         }}

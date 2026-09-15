@@ -272,6 +272,7 @@ Realtime 알림과 상태 전이 뮤테이션은 **해당 키를 무효화(inval
 | `useDocumentDownloadUrl` | `GET /api/documents/[documentId]/download-url` | `{ url, expiresInSec }` | 아니오 | `{ url: string; expiresInSec: 60 }` |
 | `useAccount` | `GET /api/account` | `{ profile, stats }` | 아니오 | `{ profile: Profile; stats: AccountStats }` |
 | **`useCapacity`** ★신규 | `GET /api/capacity` (#36) | `{ capacity }` | **예** | **`Capacity`** = `{ canStartSession: boolean; keyStatus: KeyStatus; trialStatus: TrialStatus; nextFundingSource: FundingSource \| null; requiresTrialConsent: boolean; consentVersion: string; availableAtIso: string \| null }` |
+| **`useDemoCapacity`** ★D35 | `GET /api/demo/capacity` (#43, **미인증 공개**) | `{ demoCapacity }` | **예** | **`DemoCapacity`** = `{ canStartDemo: boolean; demoStatus: 'available' \| 'consumed'; existingSessionId: string \| null; consentVersion: string; availableAtIso: string \| null }` — **`Capacity`와 다른 타입**입니다(`keyStatus`·`trialStatus`·`requiresTrialConsent` 없음). 구현: `src/hooks/use-demo.ts` |
 | **`useApiKeyStatus`** ★신규 | `GET /api/account/api-key` (#37) | `{ apiKey }` | **예** | **`ApiKeyStatus`** = `{ keyStatus: KeyStatus; keyLast4: string \| null; provider: 'google' \| null; lastVerifiedAt: string \| null; lastFailureCode: 'auth_rejected' \| 'quota_exhausted' \| 'unknown' \| null; lastFailureAt: string \| null }` — **키 원문 필드가 없습니다** |
 
 - `useDocumentDownloadUrl`은 **자동 실행하지 않습니다**(`enabled: false` + `refetch()`). 만료 60초짜리 URL을
@@ -308,6 +309,7 @@ Realtime 알림과 상태 전이 뮤테이션은 **해당 키를 무효화(inval
 | 훅 | 엔드포인트 | 요청 body | 응답 봉투 | 언랩 | **훅 반환 타입** |
 |---|---|---|---|---|---|
 | `useCreateSession` | `POST /api/sessions` | `{ sourceSessionId?: string \| null }` | `201 { session }` | **예** | `Session` |
+| **`useStartDemo`** ★D35 | 익명 로그인(`signInAnonymouslyForDemo()`) → `POST /api/demo/sessions` (#42) | `{ jobRole, modality, consentVersion }` | `201 { session }` | **예** | `Session` — **`status`는 항상 `ready`**, 이동할 id는 **`session.id`**(별도 `sessionId` 필드 없음). `retry: 0`. 구현: `src/hooks/use-demo.ts` |
 | `useUpdateSessionConfig` | `PATCH /api/sessions/[sessionId]/config` | `SessionConfigPatch` | `{ session }` | **예** | `Session` |
 | `usePrepareSession` | `POST /api/sessions/[sessionId]/prepare` | — | `202 { sessionId, status, preparation }` | 아니오 | `{ sessionId: string; status: 'configuring'; preparation: PreparationState }` |
 | `useBackToConfig` | `POST /api/sessions/[sessionId]/back-to-config` | — | `{ session }` | **예** | `Session` |
@@ -480,7 +482,7 @@ function useInterviewStream(sessionId: string): {
 |---|---|
 | 진입 | 미인증(인증 상태로 오면 프록시가 `/dashboard`로 302) |
 | 이탈 | 성공 시 `?next=` 또는 `/dashboard`. **데모 버튼 → `/demo`** |
-| 훅 | `useSignIn` `useSignUp` **`useSignInWithGoogle`**★ (Supabase Auth 직접) |
+| 훅 | `useSignIn` `useSignUp`(이메일 — 아직 스텁) · **Google은 훅 없이 `signInWithGoogle(next)`를 클라이언트에서 직접 호출**★ (`src/lib/auth/sign-in.ts`. 성공하면 브라우저가 Google로 떠나므로 반환값·캐시가 없고, 훅으로 감쌀 상태가 없습니다) |
 | shadcn | `Tabs`(로그인/회원가입) `Form` `Input` `Label` `Button` `Alert` `Card` `Separator` |
 
 **버튼 3단 위계 (D35) — 이 순서를 바꾸지 마세요**

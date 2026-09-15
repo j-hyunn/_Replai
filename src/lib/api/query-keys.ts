@@ -20,5 +20,11 @@ export const queryKeys = {
   document: (documentId: string) => ["document", documentId] as const,
   account: () => ["account"] as const,
   capacity: () => ["capacity"] as const,
+  /**
+   * #43 `GET /api/demo/capacity` (D35). **`capacity()`와 다른 키입니다** — 응답 타입도
+   * 다르고(`DemoCapacity`), 한 브라우저가 둘을 동시에 쓰는 일도 없습니다.
+   * 하나로 합치면 익명 사용자의 캐시에 실계정용 `keyStatus`가 섞입니다.
+   */
+  demoCapacity: () => ["demoCapacity"] as const,
   apiKey: () => ["apiKey"] as const,
 } as const;

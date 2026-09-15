@@ -5,6 +5,12 @@ import { use, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { ConfirmCancelDialog } from "@/components/common/confirm-cancel-dialog";
+import {
+  DemoBadge,
+  DemoBanner,
+  isDemoSession,
+  sessionExitHref,
+} from "@/components/common/demo-notice";
 import { ErrorState, LiveRegion, LoadingCard, NotFoundState } from "@/components/common/states";
 import {
   AnswerInputText,
@@ -195,6 +201,8 @@ function InterviewRoom({ session }: { session: Session }) {
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-lg font-semibold tracking-tight">면접 진행</h1>
+          {/* 데모 배지는 3화면 공통 컴포넌트입니다 — `trial_shared`와 묶지 않습니다(4.16절). */}
+          {isDemoSession(session.fundingSource) ? <DemoBadge /> : null}
           {session.persona ? (
             <Badge variant="outline">{PERSONA_LABEL[session.persona]}</Badge>
           ) : null}
@@ -248,6 +256,8 @@ function InterviewRoom({ session }: { session: Session }) {
           </Button>
         </div>
       </header>
+
+      {isDemoSession(session.fundingSource) ? <DemoBanner /> : null}
 
       <Separator />
 
@@ -420,7 +430,10 @@ function InterviewRoom({ session }: { session: Session }) {
           // (①·③의 오디오 정리는 음성 파이프라인이 붙을 때 이 자리에 들어갑니다.)
           stream.abort();
           cancelSession.mutate(sessionId, {
-            onSuccess: () => router.replace("/sessions?includeCanceled=true"),
+            onSuccess: () =>
+              router.replace(
+                sessionExitHref(session.fundingSource, "/sessions?includeCanceled=true"),
+              ),
             onError: (error) => toast.error(error.message),
           });
         }}

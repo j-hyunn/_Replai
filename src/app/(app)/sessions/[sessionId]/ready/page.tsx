@@ -5,6 +5,12 @@ import { use, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { ConfirmCancelDialog } from "@/components/common/confirm-cancel-dialog";
+import {
+  DemoBadge,
+  DemoBanner,
+  isDemoSession,
+  sessionExitHref,
+} from "@/components/common/demo-notice";
 import { ErrorState, LoadingCard, NotFoundState } from "@/components/common/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -74,7 +80,17 @@ export default function ReadyPage({
 
   return (
     <main id="main" className="mx-auto w-full max-w-3xl space-y-6 px-4 py-8">
-      <h1 className="text-2xl font-semibold tracking-tight">면접 시작 준비</h1>
+      <div className="flex flex-wrap items-center gap-2">
+        <h1 className="text-2xl font-semibold tracking-tight">면접 시작 준비</h1>
+        {isDemoSession(current.fundingSource) ? <DemoBadge /> : null}
+      </div>
+
+      {/*
+        4.16절이 요구하는 상시 표시는 면접·리포트·전문 3화면이지만, 데모 방문자가 `/demo`
+        다음으로 **처음 보는 화면**이 여기입니다. 24시간 삭제는 시작 전에 한 번 더 보이는
+        편이 낫습니다(D35-2가 입장 화면에도 명시하라고 한 것과 같은 이유).
+      */}
+      {isDemoSession(current.fundingSource) ? <DemoBanner /> : null}
 
       <Card>
         <CardHeader>
@@ -132,19 +148,26 @@ export default function ReadyPage({
         >
           면접 시작
         </Button>
-        <Button
-          variant="outline"
-          size="lg"
-          disabled={backToConfig.isPending}
-          onClick={() => {
-            backToConfig.mutate(undefined, {
-              onSuccess: () => router.replace(`/sessions/new?sessionId=${sessionId}`),
-              onError: (error) => toast.error(error.message),
-            });
-          }}
-        >
-          설정 변경
-        </Button>
+        {/*
+          [설정 변경]은 `/sessions/new`로 돌아가는 버튼입니다 — 데모에는 설정 화면이 없고
+          익명 사용자는 그 경로에서 `/login`으로 튕깁니다. 그래서 **렌더하지 않습니다**
+          (`disabled`로 두면 고장으로 읽힙니다).
+        */}
+        {isDemoSession(current.fundingSource) ? null : (
+          <Button
+            variant="outline"
+            size="lg"
+            disabled={backToConfig.isPending}
+            onClick={() => {
+              backToConfig.mutate(undefined, {
+                onSuccess: () => router.replace(`/sessions/new?sessionId=${sessionId}`),
+                onError: (error) => toast.error(error.message),
+              });
+            }}
+          >
+            설정 변경
+          </Button>
+        )}
         <Button variant="ghost" size="lg" onClick={() => setCancelOpen(true)}>
           이 면접 그만두기
         </Button>
@@ -156,7 +179,8 @@ export default function ReadyPage({
         pending={cancelSession.isPending}
         onConfirm={() => {
           cancelSession.mutate(sessionId, {
-            onSuccess: () => router.replace("/sessions"),
+            onSuccess: () =>
+              router.replace(sessionExitHref(current.fundingSource, "/sessions")),
             onError: (error) => toast.error(error.message),
           });
         }}
